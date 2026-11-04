@@ -1,0 +1,63 @@
+# Block definitions. Data-driven: the server sends this file to clients on join,
+# so ids always match. The first entry MUST be "air" (id 0).
+# Append only! Reordering changes numeric ids and breaks existing worlds.
+#
+# Fields (all optional except name):
+#   solid=true  opaque=true  render="opaque"|"cutout"|"translucent"
+#   light=0..15  hardness=1.0 (negative = unbreakable)
+#   texture / top / side / bottom  (texture names, interned into ids)
+#   behavior="name"  (must be registered in behavior.rs)
+
+[[block]]
+name = "air"
+solid = false
+opaque = false
+
+[[block]]
+name = "stone"
+hardness = 1.5
+
+[[block]]
+name = "dirt"
+hardness = 0.5
+
+[[block]]
+name = "grass"
+hardness = 0.6
+top = "grass_top"
+side = "grass_side"
+bottom = "dirt"
+
+[[block]]
+name = "sand"
+hardness = 0.5
+behavior = "falling"
+
+[[block]]
+name = "water"
+solid = false
+opaque = false
+render = "translucent"
+hardness = 100
+
+[[block]]
+name = "log"
+hardness = 2.0
+top = "log_top"
+bottom = "log_top"
+side = "log_side"
+
+[[block]]
+name = "leaves"
+opaque = false
+render = "cutout"
+hardness = 0.2
+
+[[block]]
+name = "glowstone"
+light = 15
+hardness = 0.3
+
+[[block]]
+name = "bedrock"
+hardness = -1

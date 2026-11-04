@@ -1,0 +1,27 @@
+[package]
+name = "blockforge"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.70"
+description = "Headless core of a mobile-first voxel engine: cubic chunks, slabs, client/server split"
+
+[lib]
+name = "blockforge"
+path = "src/lib.rs"
+
+[[bin]]
+name = "headless"
+path = "src/main.rs"
+
+[dependencies]
+# Intentionally empty: the core is std-only so it builds and tests anywhere.
+# Planned for the client layer: wgpu, winit, glam, hecs, kira, egui, puffin.
+
+[profile.dev]
+opt-level = 1      # world generation is painfully slow at opt-level 0
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+debug = 1          # keep symbols for profiling on device
