@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  unpack:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Unpack any zip in the repo root
+        shell: bash
+        run: |
+          shopt -s nullglob
+          zips=(*.zip)
+          if [ ${#zips[@]} -eq 0 ]; then echo "No zip to unpack."; exit 0; fi
+          for z in "${zips[@]}"; do
+            tmp=$(mktemp -d)
+            unzip -q -o "$z" -d "$tmp"
+            entries=("$tmp"/*)
+            src="$tmp"
+            if [ ${#entries[@]} -eq 1 ] && [ -d "${entries[0]}" ]; then src="${entries[0]}"; fi
+            rm -rf "$src/.github"
+            cp -a "$src"/. .
+            rm -f "$z"
+          done
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Unpack uploaded zip"
+          git push
+
+  test:
+    needs: unpack
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+      - uses: dtolnay/rust-toolchain@stable
+      - name: cargo test
+        shell: bash
+        run: |
+          if [ ! -f Cargo.toml ]; then echo "No Cargo.toml yet." >> "$GITHUB_STEP_SUMMARY"; exit 1; fi
+          set +e
+          cargo test --all-targets --color never 2>&1 | tee test.log
+          code=${PIPESTATUS[0]}
+          {
+            echo "### cargo test: exit code $code"
+            echo '```'
+            if grep -q "could not compile" test.log; then head -n 150 test.log; else tail -n 80 test.log; fi
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit $code
+      - name: Headless demo
+        if: success()
+        shell: bash
+        run: |
+          cargo run --release --bin headless 2>&1 | tee demo.log
+          { echo "### headless demo"; echo '```'; cat demo.log; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
