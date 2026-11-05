@@ -44,6 +44,8 @@ fn streams_generates_and_meshes() {
     );
     let (mesh_chunks, quads) = c.mesh_totals();
     assert!(mesh_chunks > 0 && quads > 0);
+    // The renderer is told about every mesh that appeared.
+    assert!(!c.take_mesh_changes(usize::MAX).is_empty());
     // Cubic chunks: sky and deep underground are uniform, so far fewer meshes than chunks.
     assert!(mesh_chunks < c.store.len());
 }

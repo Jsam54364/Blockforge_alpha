@@ -44,6 +44,8 @@ pub struct Client {
     registry: Option<Arc<BlockRegistry>>,
     pub store: ChunkStore,
     pub meshes: HashMap<ChunkPos, ChunkMesh>,
+    /// Chunks whose entry in `meshes` was inserted or removed since the renderer last looked.
+    mesh_changes: Vec<ChunkPos>,
     versions: HashMap<ChunkPos, u64>,
     dirty: HashSet<ChunkPos>,
     pool: Option<JobPool<MeshJob, MeshResult>>,
@@ -65,6 +67,7 @@ impl Client {
             registry: None,
             store: ChunkStore::new(),
             meshes: HashMap::new(),
+            mesh_changes: Vec::new(),
             versions: HashMap::new(),
             dirty: HashSet::new(),
             pool: None,
@@ -132,6 +135,21 @@ impl Client {
         self.dirty.is_empty() && self.pool.as_ref().map_or(true, |p| p.in_flight() == 0)
     }
 
+    /// Up to `max` chunk positions whose mesh changed (or was removed) since the last call.
+    /// The renderer re-uploads `meshes[pos]` if present, or frees its GPU buffers if not.
+    pub fn take_mesh_changes(&mut self, max: usize) -> Vec<ChunkPos> {
+        let n = max.min(self.mesh_changes.len());
+        self.mesh_changes.drain(..n).collect()
+    }
+
+    /// Solid block at `pos` in the client's replica (false if unloaded). For raycasts.
+    pub fn is_solid(&self, pos: BlockPos) -> bool {
+        match (self.store.block(pos), self.registry.as_ref()) {
+            (Some(s), Some(r)) => r.get(s).solid,
+            _ => false,
+        }
+    }
+
     /// (chunks that have geometry, total quads)
     pub fn mesh_totals(&self) -> (usize, usize) {
         (self.meshes.len(), self.meshes.values().map(|m| m.quad_count()).sum())
@@ -165,6 +183,7 @@ impl Client {
             ServerMsg::ChunkUnload { pos } => {
                 self.store.remove(pos);
                 self.meshes.remove(&pos);
+                self.mesh_changes.push(pos);
                 self.dirty.remove(&pos);
                 self.versions.remove(&pos);
             }
@@ -251,6 +270,7 @@ impl Client {
                 } else {
                     self.meshes.insert(r.pos, r.mesh);
                 }
+                self.mesh_changes.push(r.pos);
                 self.stats.meshes_built += 1;
             } else {
                 // A newer edit superseded this snapshot; its replacement is queued.

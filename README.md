@@ -4,9 +4,9 @@ Headless core of a mobile-first voxel engine in Rust. **Std-only, zero dependenc
 No renderer yet: this is the part that decides performance and architecture, built so a
 `wgpu` client can be dropped on top.
 
-> **Status: written but never compiled.** It was produced in a sandbox with no Rust
-> toolchain and no network. Expect a handful of compile errors to fix on first build.
-> Run `cargo test` first; the tests are the spec for each module.
+> **Status:** the core compiles and all 61 unit + 3 end-to-end tests pass on GitHub Actions.
+> The `app/` front-end (renderer, touch controls, APK packaging) has been written but not yet
+> built; expect to fix a few compile errors on its first CI run.
 
 ```
 cargo test                           # unit + end-to-end tests
@@ -58,3 +58,19 @@ cargo run --release --bin headless   # stream, mesh, edit; prints stats + an ASC
 
 `CHUNK_BITS` (4 vs 5), `ServerConfig::{sim_distance_chunks, vertical_view_chunks,
 max_chunk_sends_per_tick}`, `Client::mesh_budget`, worker count, cave thresholds in `worldgen`.
+
+## Android app (`app/`)
+
+A separate crate (its own workspace root, so the core stays dependency-free): winit + wgpu 22.x,
+NativeActivity, packaged with `cargo-apk`. Controls: left 40% of the screen is a virtual stick
+(fly where you look); right side drags to look, quick tap breaks the block under the crosshair,
+press-and-hold places stone.
+
+CI flow (GitHub Actions, all from a phone):
+1. Upload a zip to the repo root -> `CI` unpacks it, runs the core tests.
+2. When `CI` succeeds, `Android APK` runs: host type-check + WGSL validation, then `cargo apk build`.
+3. The APK is published to the repo's **Releases** page as `blockforge-debug.apk`.
+
+Renderer gaps: pooled vertex buffers, real frustum planes, texture array (colours come from a
+palette keyed by texture name), render-scale governor hookup, back-face culling (off until the
+winding is confirmed on a device), on-screen HUD.

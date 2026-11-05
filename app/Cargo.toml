@@ -1,0 +1,51 @@
+[package]
+name = "blockforge_app"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+description = "Android / desktop front-end for blockforge: winit window + wgpu renderer + touch controls"
+
+[lib]
+name = "blockforge_app"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+blockforge = { path = ".." }
+# wgpu is pinned to the 22.x API (request_adapter -> Option, entry_point: &str).
+# Upgrading is a deliberate, separate step.
+wgpu = "22.1"
+winit = "0.30"
+pollster = "0.3"
+
+[target.'cfg(target_os = "android")'.dependencies]
+winit = { version = "0.30", features = ["android-native-activity"] }
+
+[dev-dependencies]
+# Used by tests/shader.rs to validate the WGSL on the host, before the slow APK build.
+naga = { version = "22.1", features = ["wgsl-in"] }
+
+# This crate is its own workspace root so the parent crate stays dependency-free.
+[workspace]
+
+[profile.dev]
+# The APK is built in the dev profile (no signing keys needed), so optimise it:
+# world generation and meshing are unusable at opt-level 0.
+opt-level = 3
+debug = false
+
+# ---- cargo-apk packaging (NativeActivity) ----
+[package.metadata.android]
+package = "com.blockforge.alpha"
+apk_name = "blockforge"
+build_targets = ["aarch64-linux-android"]
+
+[package.metadata.android.sdk]
+min_sdk_version = 26
+target_sdk_version = 34
+
+[package.metadata.android.application]
+label = "Blockforge"
+
+[package.metadata.android.application.activity]
+orientation = "landscape"
+config_changes = "orientation|keyboardHidden|screenSize|smallestScreenSize|screenLayout|uiMode|density"
