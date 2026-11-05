@@ -1,0 +1,94 @@
+name: Android APK
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  NDK_VERSION: "28.2.13676358"
+
+jobs:
+  check:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_branch || github.ref_name }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app
+      - name: Type-check and test the app on the host
+        shell: bash
+        run: |
+          if [ ! -f app/Cargo.toml ]; then echo "No app/ folder yet." >> "$GITHUB_STEP_SUMMARY"; exit 1; fi
+          set +e
+          cargo test --manifest-path app/Cargo.toml --color never 2>&1 | tee check.log
+          code=${PIPESTATUS[0]}
+          {
+            echo "### app host check: exit code $code"
+            echo '```'
+            if grep -q "could not compile" check.log; then head -n 150 check.log; else tail -n 60 check.log; fi
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit $code
+
+  apk:
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_branch || github.ref_name }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: "platforms;android-34 build-tools;34.0.0 ndk;${{ env.NDK_VERSION }}"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app
+      - name: Install cargo-apk
+        run: command -v cargo-apk || cargo install cargo-apk
+      - name: Build APK
+        shell: bash
+        working-directory: app
+        run: |
+          export ANDROID_NDK_ROOT="$ANDROID_HOME/ndk/$NDK_VERSION"
+          export ANDROID_NDK_HOME="$ANDROID_NDK_ROOT"
+          set +e
+          cargo apk build --lib 2>&1 | tee ../apk.log
+          code=${PIPESTATUS[0]}
+          {
+            echo "### cargo apk build: exit code $code"
+            echo '```'
+            if [ "$code" -ne 0 ]; then head -n 120 ../apk.log; else tail -n 15 ../apk.log; fi
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit $code
+      - name: Publish APK as a release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ github.event.workflow_run.head_branch || github.ref_name }}
+        shell: bash
+        run: |
+          apk=$(find app/target -name '*.apk' | head -n 1)
+          if [ -z "$apk" ]; then echo "No APK produced" >> "$GITHUB_STEP_SUMMARY"; exit 1; fi
+          cp "$apk" blockforge-debug.apk
+          gh release delete latest-apk --yes --cleanup-tag || true
+          gh release create latest-apk blockforge-debug.apk \
+            --prerelease --target "$BRANCH" \
+            --title "Latest debug APK" \
+            --notes "Built from commit ${GITHUB_SHA::7}. Download blockforge-debug.apk and install it."
+          echo "APK published: see the Releases page" >> "$GITHUB_STEP_SUMMARY"
