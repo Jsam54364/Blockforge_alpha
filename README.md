@@ -71,6 +71,19 @@ CI flow (GitHub Actions, all from a phone):
 2. When `CI` succeeds, `Android APK` runs: host type-check + WGSL validation, then `cargo apk build`.
 3. The APK is published to the repo's **Releases** page as `blockforge-debug.apk`.
 
+### HUD and settings
+
+Top-left overlay (toggle in the menu): FPS and frame time, this app's CPU use (from
+`/proc/self/stat`, so it is the app's share, not the whole phone), CPU time per frame
+(excluding the wait for the display), GPU time (timestamp queries; shows N/A on devices
+without them) with a derived busy%, memory (VmRSS) and chunk/mesh counts. Android exposes no
+public GPU-usage percentage, hence the derived figure.
+
+Top-right menu button: render distance (2-12 chunks, applied to the server stream too),
+LOD distance (stored and shown but **not used yet**: LOD meshing isn't built), fog on/off,
+stats on/off. The HUD is drawn by a tiny immediate-mode layer (`ui.rs`) with its own 5x7 bitmap
+font (`font.rs`, `glyphs.rs`), so there are no UI dependencies.
+
 Renderer gaps: pooled vertex buffers, real frustum planes, texture array (colours come from a
 palette keyed by texture name), render-scale governor hookup, back-face culling (off until the
-winding is confirmed on a device), on-screen HUD.
+winding is confirmed on a device), LOD meshing.

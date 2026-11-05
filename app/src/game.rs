@@ -5,8 +5,9 @@
 //!   right side               drag = look around
 //!                            quick tap = break the block under the crosshair
 //!                            press-and-hold (no drag) = place stone on the face you look at
+//!   top-right button         settings menu (render distance, LOD distance, fog, stats)
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -19,13 +20,13 @@ use blockforge::registry::BlockRegistry;
 use blockforge::server::{self, ServerConfig, ServerHandle};
 use winit::event::TouchPhase;
 
+use crate::ui::Ui;
+
 const LOOK_SENS: f32 = 0.0045;
 const FLY_SPEED: f32 = 14.0;
 const REACH: f32 = 8.0;
 const TAP_MAX: Duration = Duration::from_millis(300);
 const DRAG_PIXELS: f32 = 14.0;
-/// Streaming radius in chunks. Conservative for a first run on a phone.
-pub const VIEW_CHUNKS: u8 = 6;
 
 #[derive(Clone, Copy, Debug)]
 pub struct CameraView {
@@ -63,6 +64,9 @@ pub struct Game {
     registry: Arc<BlockRegistry>,
     pub cam: CameraView,
     pub size: (u32, u32),
+    pub ui: Ui,
+    /// Touches that started on a HUD button; they never reach the game controls.
+    ui_touches: HashSet<u64>,
     touches: HashMap<u64, TouchInfo>,
     stone: BlockState,
     last_update: Instant,
@@ -83,7 +87,8 @@ impl Game {
         let server = server::spawn(cfg, registry.clone());
         let mut client = Client::connect(server.connect(), 2);
         let cam = CameraView { pos: [0.5, 70.0, 0.5], yaw: 0.0, pitch: -0.35 };
-        client.set_view_distance(VIEW_CHUNKS);
+        let ui = Ui::new();
+        client.set_view_distance(ui.settings.render_chunks);
         client.set_position(cam.pos);
 
         let now = Instant::now();
@@ -93,6 +98,8 @@ impl Game {
             registry,
             cam,
             size: (1, 1),
+            ui,
+            ui_touches: HashSet::new(),
             touches: HashMap::new(),
             stone,
             last_update: now,
@@ -106,7 +113,13 @@ impl Game {
 
     /// Far edge of the streamed area, in blocks (used for fog).
     pub fn view_blocks(&self) -> f32 {
-        (VIEW_CHUNKS as f32 + 0.5) * CHUNK_SIZE as f32
+        (self.ui.settings.render_chunks as f32 + 0.5) * CHUNK_SIZE as f32
+    }
+
+    /// Call when the window is (re)created or resized.
+    pub fn set_surface(&mut self, w: u32, h: u32, scale_factor: f64) {
+        self.size = (w.max(1), h.max(1));
+        self.ui.set_surface(w, h, scale_factor);
     }
 
     /// (strafe, forward), each in -1..1, from the virtual stick.
@@ -150,6 +163,27 @@ impl Game {
     }
 
     pub fn touch(&mut self, id: u64, phase: TouchPhase, x: f32, y: f32) {
+        // HUD first: a touch that starts on a button belongs to the HUD until it ends.
+        match phase {
+            TouchPhase::Started => {
+                if let Some(action) = self.ui.hit(x, y) {
+                    self.ui_touches.insert(id);
+                    if self.ui.apply(action) {
+                        self.client.set_view_distance(self.ui.settings.render_chunks);
+                    }
+                    return;
+                }
+            }
+            _ => {
+                if self.ui_touches.contains(&id) {
+                    if matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled) {
+                        self.ui_touches.remove(&id);
+                    }
+                    return;
+                }
+            }
+        }
+
         let width = self.size.0 as f32;
         match phase {
             TouchPhase::Started => {

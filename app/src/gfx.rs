@@ -8,6 +8,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use blockforge::client::Client;
 use blockforge::coords::{ChunkPos, CHUNK_SIZE};
@@ -17,7 +18,9 @@ use wgpu::util::DeviceExt;
 use winit::window::Window;
 
 use crate::game::CameraView;
+use crate::gpu_timer::GpuTimer;
 use crate::math;
+use crate::ui::{HudVertex, MAX_HUD_VERTS};
 
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 /// A chunk can show at most 3 * 32^3 faces (3D checkerboard), so this index range is always enough.
@@ -30,6 +33,7 @@ const SKY_SRGB: [f32; 3] = [0.55, 0.74, 0.95];
 
 const VERTEX_ATTRS: [wgpu::VertexAttribute; 1] = wgpu::vertex_attr_array![0 => Uint32x2];
 const INSTANCE_ATTRS: [wgpu::VertexAttribute; 1] = wgpu::vertex_attr_array![1 => Float32x4];
+const HUD_ATTRS: [wgpu::VertexAttribute; 2] = wgpu::vertex_attr_array![0 => Float32x2, 1 => Unorm8x4];
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -38,7 +42,15 @@ struct Globals {
     cam_pos: [f32; 4],
     fog_color: [f32; 4],
     fog_params: [f32; 4],
+    screen: [f32; 4],
+    flags: [f32; 4],
     palette: [[f32; 4]; 32],
+}
+
+/// Per-frame toggles chosen in the settings menu.
+#[derive(Clone, Copy, Debug)]
+pub struct RenderOptions {
+    pub fog: bool,
 }
 
 fn as_bytes<T>(s: &[T]) -> &[u8] {
@@ -119,7 +131,9 @@ pub struct Gfx {
     depth_view: wgpu::TextureView,
     pipe_solid: wgpu::RenderPipeline,
     pipe_water: wgpu::RenderPipeline,
-    pipe_ui: wgpu::RenderPipeline,
+    pipe_hud: wgpu::RenderPipeline,
+    hud_buf: wgpu::Buffer,
+    timer: Option<GpuTimer>,
     globals_solid: wgpu::Buffer,
     globals_water: wgpu::Buffer,
     bind_solid: wgpu::BindGroup,
@@ -145,11 +159,17 @@ impl Gfx {
             })
             .await
             .ok_or("no suitable GPU adapter found")?;
+        // GPU timing is optional: not every device supports timestamp queries.
+        let want_ts = adapter.features().contains(wgpu::Features::TIMESTAMP_QUERY);
         let (device, queue) = adapter
             .request_device(
                 &wgpu::DeviceDescriptor {
                     label: Some("blockforge"),
-                    required_features: wgpu::Features::empty(),
+                    required_features: if want_ts {
+                        wgpu::Features::TIMESTAMP_QUERY
+                    } else {
+                        wgpu::Features::empty()
+                    },
                     required_limits: wgpu::Limits::downlevel_defaults().using_resolution(adapter.limits()),
                     memory_hints: wgpu::MemoryHints::default(),
                 },
@@ -227,7 +247,7 @@ impl Gfx {
             false,
             "water",
         );
-        let pipe_ui = ui_pipeline(&device, &layout, &shader, format);
+        let pipe_hud = hud_pipeline(&device, &layout, &shader, format);
 
         let index_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("shared quad indices"),
@@ -241,6 +261,14 @@ impl Gfx {
             mapped_at_creation: false,
         });
 
+        let hud_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("hud vertices"),
+            size: (MAX_HUD_VERTS * std::mem::size_of::<HudVertex>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let timer = if want_ts { Some(GpuTimer::new(&device, &queue)) } else { None };
+
         Ok(Gfx {
             surface,
             device,
@@ -249,7 +277,9 @@ impl Gfx {
             depth_view,
             pipe_solid,
             pipe_water,
-            pipe_ui,
+            pipe_hud,
+            hud_buf,
+            timer,
             globals_solid,
             globals_water,
             bind_solid,
@@ -263,6 +293,11 @@ impl Gfx {
 
     pub fn size(&self) -> (u32, u32) {
         (self.config.width, self.config.height)
+    }
+
+    /// Newest GPU frame time in ms, if the device supports timing and a result arrived.
+    pub fn take_gpu_ms(&mut self) -> Option<f32> {
+        self.timer.as_mut().and_then(|t| t.take())
     }
 
     pub fn resize(&mut self, w: u32, h: u32) {
@@ -305,12 +340,16 @@ impl Gfx {
         }
     }
 
+    /// Draws a frame. On success returns how long we waited for the display to hand
+    /// us a frame (so callers can exclude it from CPU time).
     pub fn render(
         &mut self,
         client: &mut Client,
         cam: &CameraView,
         view_blocks: f32,
-    ) -> Result<(), wgpu::SurfaceError> {
+        opts: &RenderOptions,
+        hud: &[HudVertex],
+    ) -> Result<Duration, wgpu::SurfaceError> {
         self.sync_meshes(client);
 
         let aspect = self.config.width as f32 / self.config.height as f32;
@@ -357,13 +396,22 @@ impl Gfx {
             cam_pos: [cam.pos[0], cam.pos[1], cam.pos[2], 1.0],
             fog_color: [sky[0], sky[1], sky[2], 1.0],
             fog_params: [view_blocks * 0.55, view_blocks * 0.92, 1.0, aspect],
+            screen: [self.config.width as f32, self.config.height as f32, 0.0, 0.0],
+            flags: [if opts.fog { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
             palette: self.palette,
         };
         self.queue.write_buffer(&self.globals_solid, 0, as_bytes(std::slice::from_ref(&globals)));
         globals.fog_params[2] = 0.65;
         self.queue.write_buffer(&self.globals_water, 0, as_bytes(std::slice::from_ref(&globals)));
 
+        let hud_verts = hud.len().min(MAX_HUD_VERTS);
+        if hud_verts > 0 {
+            self.queue.write_buffer(&self.hud_buf, 0, as_bytes(&hud[..hud_verts]));
+        }
+
+        let acquire_start = Instant::now();
         let frame = self.surface.get_current_texture()?;
+        let acquire_wait = acquire_start.elapsed();
         let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
         let mut encoder = self
             .device
@@ -392,7 +440,7 @@ impl Gfx {
                     }),
                     stencil_ops: None,
                 }),
-                timestamp_writes: None,
+                timestamp_writes: self.timer.as_ref().map(|t| t.pass_writes()),
                 occlusion_query_set: None,
             });
 
@@ -417,14 +465,23 @@ impl Gfx {
                 }
             }
 
-            // Crosshair
-            pass.set_pipeline(&self.pipe_ui);
-            pass.set_bind_group(0, &self.bind_solid, &[]);
-            pass.draw(0..12, 0..1);
+            // HUD (crosshair, stats, menu)
+            if hud_verts > 0 {
+                pass.set_pipeline(&self.pipe_hud);
+                pass.set_bind_group(0, &self.bind_solid, &[]);
+                pass.set_vertex_buffer(0, self.hud_buf.slice(0..(hud_verts * std::mem::size_of::<HudVertex>()) as u64));
+                pass.draw(0..hud_verts as u32, 0..1);
+            }
+        }
+        if let Some(t) = self.timer.as_mut() {
+            t.encode(&mut encoder);
         }
         self.queue.submit(std::iter::once(encoder.finish()));
         frame.present();
-        Ok(())
+        if let Some(t) = self.timer.as_mut() {
+            t.after_submit(&self.device);
+        }
+        Ok(acquire_wait)
     }
 }
 
@@ -490,24 +547,28 @@ fn voxel_pipeline(
     })
 }
 
-fn ui_pipeline(
+fn hud_pipeline(
     device: &wgpu::Device,
     layout: &wgpu::PipelineLayout,
     shader: &wgpu::ShaderModule,
     format: wgpu::TextureFormat,
 ) -> wgpu::RenderPipeline {
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("ui"),
+        label: Some("hud"),
         layout: Some(layout),
         vertex: wgpu::VertexState {
             module: shader,
-            entry_point: "vs_ui",
+            entry_point: "vs_hud",
             compilation_options: wgpu::PipelineCompilationOptions::default(),
-            buffers: &[],
+            buffers: &[wgpu::VertexBufferLayout {
+                array_stride: std::mem::size_of::<HudVertex>() as u64,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &HUD_ATTRS,
+            }],
         },
         fragment: Some(wgpu::FragmentState {
             module: shader,
-            entry_point: "fs_ui",
+            entry_point: "fs_hud",
             compilation_options: wgpu::PipelineCompilationOptions::default(),
             targets: &[Some(wgpu::ColorTargetState {
                 format,
@@ -536,8 +597,9 @@ mod tests {
 
     #[test]
     fn globals_layout_matches_the_wgsl_struct() {
-        // 64 (mat4) + 3 * 16 (vec4s) + 32 * 16 (palette)
-        assert_eq!(std::mem::size_of::<Globals>(), 64 + 48 + 512);
+        // 64 (mat4) + 5 * 16 (vec4s) + 32 * 16 (palette)
+        assert_eq!(std::mem::size_of::<Globals>(), 64 + 80 + 512);
+        assert_eq!(std::mem::size_of::<HudVertex>(), 12);
     }
 
     #[test]

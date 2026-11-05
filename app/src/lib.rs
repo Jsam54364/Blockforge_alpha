@@ -1,16 +1,22 @@
-//! Front-end for blockforge: winit window + wgpu renderer + touch controls.
+//! Front-end for blockforge: winit window + wgpu renderer + touch controls + HUD.
 //!
 //! On Android the entry point is `android_main` (NativeActivity, packaged by cargo-apk).
 //! The same code type-checks and its tests run on a normal PC, which is what CI does
 //! before it spends time building the APK.
 #![allow(dead_code)]
 
+mod font;
 mod game;
 mod gfx;
+mod glyphs;
+mod gpu_timer;
 mod math;
+mod perf;
+mod ui;
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Instant;
 
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
@@ -21,11 +27,19 @@ pub struct App {
     window: Option<Arc<Window>>,
     gfx: Option<gfx::Gfx>,
     game: game::Game,
+    perf: perf::Perf,
+    hud: Vec<ui::HudVertex>,
 }
 
 impl App {
     pub fn new(save_dir: Option<PathBuf>) -> App {
-        App { window: None, gfx: None, game: game::Game::new(save_dir) }
+        App {
+            window: None,
+            gfx: None,
+            game: game::Game::new(save_dir),
+            perf: perf::Perf::new(),
+            hud: Vec::new(),
+        }
     }
 }
 
@@ -46,7 +60,7 @@ impl ApplicationHandler for App {
         let size = window.inner_size();
         match pollster::block_on(gfx::Gfx::new(window.clone(), self.game.registry())) {
             Ok(g) => {
-                self.game.size = (size.width.max(1), size.height.max(1));
+                self.game.set_surface(size.width, size.height, window.scale_factor());
                 self.gfx = Some(g);
                 self.window = Some(window);
             }
@@ -68,7 +82,8 @@ impl ApplicationHandler for App {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
-                self.game.size = (size.width.max(1), size.height.max(1));
+                let scale = self.window.as_ref().map_or(1.0, |w| w.scale_factor());
+                self.game.set_surface(size.width, size.height, scale);
                 if let Some(g) = self.gfx.as_mut() {
                     g.resize(size.width, size.height);
                 }
@@ -77,11 +92,21 @@ impl ApplicationHandler for App {
                 self.game.touch(t.id, t.phase, t.location.x as f32, t.location.y as f32);
             }
             WindowEvent::RedrawRequested => {
+                let frame_start = Instant::now();
                 self.game.update();
                 let view_blocks = self.game.view_blocks();
+                self.perf.chunks = self.game.client.store.len();
+                self.perf.meshes = self.game.client.meshes.len();
                 if let Some(g) = self.gfx.as_mut() {
-                    match g.render(&mut self.game.client, &self.game.cam, view_blocks) {
-                        Ok(()) => {}
+                    if let Some(ms) = g.take_gpu_ms() {
+                        self.perf.add_gpu_sample(ms);
+                    }
+                    self.game.ui.build(&self.perf, &mut self.hud);
+                    let opts = gfx::RenderOptions { fog: self.game.ui.settings.fog };
+                    match g.render(&mut self.game.client, &self.game.cam, view_blocks, &opts, &self.hud) {
+                        Ok(display_wait) => {
+                            self.perf.end_frame(frame_start.elapsed().saturating_sub(display_wait));
+                        }
                         Err(wgpu::SurfaceError::Lost) | Err(wgpu::SurfaceError::Outdated) => {
                             let (w, h) = g.size();
                             g.resize(w, h);
