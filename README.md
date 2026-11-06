@@ -93,10 +93,15 @@ The HUD keeps clear of Android's status bar (top) and navigation bar (right, in 
 fixed insets measured from a real phone (`SAFE_TOP_DP`, `SAFE_RIGHT_DP` in `ui.rs`). Immersive
 mode or real inset queries would replace these.
 
+Culling: back faces (solid terrain only) and a real six-plane frustum test per chunk bounding
+box (`math::Frustum`, tested to never reject a visible box). The menu's CULL row cycles
+ALL / FRUST / BACK / OFF so each can be measured on a device; the overlay's DRAWN line shows
+how many chunk meshes survived culling out of those resident.
+
 Measured on a mid-range phone, fog off, flying over terrain (GPU time of the main pass):
 render distance 6 = 7.1 ms (43% busy), 8 = 11.7 ms (70%), 10 = 12.9 ms (77%), 12 = 16.7 ms
 (94%, 56 fps). CPU stayed near 5% of the device; memory 100-220 MB. The renderer is GPU-bound,
-so the next wins are real frustum culling, occlusion culling, then LOD meshes.
+so the next wins after frustum culling are occlusion culling, then LOD meshes.
 
-Renderer gaps: pooled vertex buffers, real frustum planes, occlusion culling, texture array
+Renderer gaps: pooled vertex buffers, occlusion culling, texture array
 (colours come from a palette keyed by texture name), render-scale governor hookup, LOD meshing.

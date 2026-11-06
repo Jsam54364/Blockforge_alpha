@@ -29,6 +29,43 @@ pub const LOD_MAX: u8 = 32;
 pub const SAFE_TOP_DP: f32 = 28.0;
 pub const SAFE_RIGHT_DP: f32 = 56.0;
 
+/// Which culling is active. Useful for measuring what each one buys on a real device.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CullMode {
+    All,
+    Frustum,
+    Back,
+    Off,
+}
+
+impl CullMode {
+    pub fn frustum(self) -> bool {
+        matches!(self, CullMode::All | CullMode::Frustum)
+    }
+
+    pub fn backface(self) -> bool {
+        matches!(self, CullMode::All | CullMode::Back)
+    }
+
+    pub fn next(self) -> CullMode {
+        match self {
+            CullMode::All => CullMode::Frustum,
+            CullMode::Frustum => CullMode::Back,
+            CullMode::Back => CullMode::Off,
+            CullMode::Off => CullMode::All,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            CullMode::All => "ALL",
+            CullMode::Frustum => "FRUST",
+            CullMode::Back => "BACK",
+            CullMode::Off => "OFF",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Settings {
     /// Chunks streamed and drawn around the player.
@@ -37,12 +74,13 @@ pub struct Settings {
     /// it yet: LOD meshing isn't built (see README).
     pub lod_chunks: u8,
     pub fog: bool,
+    pub cull: CullMode,
     pub show_stats: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { render_chunks: 6, lod_chunks: 16, fog: true, show_stats: true }
+        Settings { render_chunks: 6, lod_chunks: 16, fog: true, cull: CullMode::All, show_stats: true }
     }
 }
 
@@ -54,6 +92,7 @@ pub enum Action {
     RenderDist(i8),
     LodDist(i8),
     ToggleFog,
+    CycleCull,
     ToggleStats,
 }
 
@@ -149,6 +188,7 @@ pub fn stats_lines(perf: &Perf) -> Vec<String> {
         v.push(format!("MEM {:.0}MB", m));
     }
     v.push(format!("CHUNKS {}  MESHED {}", perf.chunks, perf.meshes));
+    v.push(format!("DRAWN {}/{}", perf.drawn, perf.meshes));
     v
 }
 
@@ -197,6 +237,10 @@ impl Ui {
             }
             Action::ToggleFog => {
                 self.settings.fog = !self.settings.fog;
+                false
+            }
+            Action::CycleCull => {
+                self.settings.cull = self.settings.cull.next();
                 false
             }
             Action::ToggleStats => {
@@ -271,10 +315,12 @@ impl Ui {
         // Never wider than the space left of the right edge (matters on narrow screens).
         let panel_w = (360.0 * dp).min((right - 8.0 * dp).max(0.0));
         let pad = 8.0 * dp;
-        let row_h = 56.0 * dp;
         let bw = 48.0 * dp;
         let gap = 6.0 * dp;
-        let rows = 4usize;
+        let rows = 5usize;
+        // Rows shrink (down to button height) on short screens so the panel stays visible.
+        let avail = self.size.1 - top - 8.0 * dp;
+        let row_h = (56.0 * dp).min((avail - pad * 2.0) / rows as f32).max(bw);
         let panel_h = pad * 2.0 + row_h * rows as f32;
         let x0 = right - panel_w;
 
@@ -312,6 +358,10 @@ impl Ui {
                     text(out, label_x, ty, px, "FOG", WHITE);
                     let label = if s.fog { "ON" } else { "OFF" };
                     self.button(out, minus_x, by, 2.0 * bw + gap, bw, label, px, Action::ToggleFog);
+                }
+                3 => {
+                    text(out, label_x, ty, px, "CULL", WHITE);
+                    self.button(out, minus_x, by, 2.0 * bw + gap, bw, s.cull.label(), px, Action::CycleCull);
                 }
                 _ => {
                     text(out, label_x, ty, px, "STATS", WHITE);
@@ -368,6 +418,7 @@ mod tests {
             Action::LodDist(-1),
             Action::LodDist(1),
             Action::ToggleFog,
+            Action::CycleCull,
             Action::ToggleStats,
         ] {
             let (x, y) = center_of(&u, a);
@@ -437,6 +488,36 @@ mod tests {
     }
 
     #[test]
+    fn cull_mode_cycles_through_all_four_states_and_maps_to_the_right_flags() {
+        let mut u = ui();
+        assert_eq!(u.settings.cull, CullMode::All);
+        assert!(u.settings.cull.frustum() && u.settings.cull.backface());
+        u.apply(Action::CycleCull);
+        assert_eq!(u.settings.cull, CullMode::Frustum);
+        assert!(u.settings.cull.frustum() && !u.settings.cull.backface());
+        u.apply(Action::CycleCull);
+        assert_eq!(u.settings.cull, CullMode::Back);
+        assert!(!u.settings.cull.frustum() && u.settings.cull.backface());
+        u.apply(Action::CycleCull);
+        assert_eq!(u.settings.cull, CullMode::Off);
+        assert!(!u.settings.cull.frustum() && !u.settings.cull.backface());
+        u.apply(Action::CycleCull);
+        assert_eq!(u.settings.cull, CullMode::All);
+    }
+
+    #[test]
+    fn menu_rows_shrink_to_fit_a_shorter_screen() {
+        let mut u = Ui::new();
+        u.set_surface(2400, 1080, 3.0); // 360dp tall
+        u.menu_open = true;
+        let mut out = Vec::new();
+        u.build(&Perf::new(), &mut out);
+        for b in &u.buttons {
+            assert!(b.y + b.h <= 1080.0, "{:?} runs off the bottom ({})", b.action, b.y + b.h);
+        }
+    }
+
+    #[test]
     fn toggles_flip() {
         let mut u = ui();
         u.apply(Action::ToggleFog);
@@ -475,7 +556,7 @@ mod tests {
                 assert!(font::has_art(c), "no glyph for {c:?} in {line:?}");
             }
         }
-        for s in ["REND", "LOD", "FOG", "STATS", "SOON", "ON", "OFF", "+", "-"] {
+        for s in ["REND", "LOD", "FOG", "CULL", "ALL", "FRUST", "BACK", "STATS", "SOON", "ON", "OFF", "+", "-"] {
             assert!(s.chars().all(font::has_art), "{s}");
         }
     }

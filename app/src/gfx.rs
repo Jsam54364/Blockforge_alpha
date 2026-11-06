@@ -51,6 +51,10 @@ struct Globals {
 #[derive(Clone, Copy, Debug)]
 pub struct RenderOptions {
     pub fog: bool,
+    /// Skip chunks whose bounding box is outside the camera frustum.
+    pub frustum_cull: bool,
+    /// Use the back-face-culling pipeline for solid terrain.
+    pub backface_cull: bool,
 }
 
 fn as_bytes<T>(s: &[T]) -> &[u8] {
@@ -130,6 +134,7 @@ pub struct Gfx {
     config: wgpu::SurfaceConfiguration,
     depth_view: wgpu::TextureView,
     pipe_solid: wgpu::RenderPipeline,
+    pipe_solid_nocull: wgpu::RenderPipeline,
     pipe_water: wgpu::RenderPipeline,
     pipe_hud: wgpu::RenderPipeline,
     hud_buf: wgpu::Buffer,
@@ -141,6 +146,7 @@ pub struct Gfx {
     index_buf: wgpu::Buffer,
     instance_buf: wgpu::Buffer,
     chunks: HashMap<ChunkPos, GpuChunk>,
+    last_drawn: usize,
     palette: [[f32; 4]; 32],
 }
 
@@ -240,6 +246,8 @@ impl Gfx {
         // Solid terrain is one-sided: cull back faces (the winding is covered by tests).
         let pipe_solid =
             voxel_pipeline(&device, &layout, &shader, format, None, true, Some(wgpu::Face::Back), "solid");
+        let pipe_solid_nocull =
+            voxel_pipeline(&device, &layout, &shader, format, None, true, None, "solid (no culling)");
         let pipe_water = voxel_pipeline(
             &device,
             &layout,
@@ -279,6 +287,7 @@ impl Gfx {
             config,
             depth_view,
             pipe_solid,
+            pipe_solid_nocull,
             pipe_water,
             pipe_hud,
             hud_buf,
@@ -290,12 +299,18 @@ impl Gfx {
             index_buf,
             instance_buf,
             chunks: HashMap::new(),
+            last_drawn: 0,
             palette: build_palette(reg),
         })
     }
 
     pub fn size(&self) -> (u32, u32) {
         (self.config.width, self.config.height)
+    }
+
+    /// Chunk meshes drawn last frame (after distance and frustum culling).
+    pub fn drawn_chunks(&self) -> usize {
+        self.last_drawn
     }
 
     /// Newest GPU frame time in ms, if the device supports timing and a result arrived.
@@ -358,18 +373,28 @@ impl Gfx {
         let aspect = self.config.width as f32 / self.config.height as f32;
         let fwd = cam.forward();
 
-        // Visible chunks: drop anything behind the camera or beyond the fog distance.
-        let half = CHUNK_SIZE as f32 * 0.5;
+        // Visible chunks: within the view distance and (optionally) inside the camera
+        // frustum, tested against each chunk's bounding box.
+        let vp = math::view_proj(cam.pos, fwd, aspect);
+        let frustum = math::Frustum::from_view_proj(&vp);
+        let size = CHUNK_SIZE as f32;
+        let half = size * 0.5;
         let mut vis: Vec<(f32, ChunkPos)> = Vec::new();
         for pos in self.chunks.keys() {
             let o = pos.origin();
+            let min = [o.x as f32, o.y as f32, o.z as f32];
             let c = [
-                o.x as f32 + half - cam.pos[0],
-                o.y as f32 + half - cam.pos[1],
-                o.z as f32 + half - cam.pos[2],
+                min[0] + half - cam.pos[0],
+                min[1] + half - cam.pos[1],
+                min[2] + half - cam.pos[2],
             ];
             let d2 = math::dot(c, c);
-            if math::dot(c, fwd) < -half * 1.8 || d2 > view_blocks * view_blocks {
+            if d2 > view_blocks * view_blocks {
+                continue;
+            }
+            if opts.frustum_cull
+                && !frustum.contains_aabb(min, [min[0] + size, min[1] + size, min[2] + size])
+            {
                 continue;
             }
             vis.push((d2, *pos));
@@ -377,6 +402,7 @@ impl Gfx {
         vis.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
         vis.truncate(MAX_INSTANCES);
         vis.reverse(); // far to near, for the translucent pass
+        self.last_drawn = vis.len();
 
         let instances: Vec<[f32; 4]> = vis
             .iter()
@@ -395,7 +421,7 @@ impl Gfx {
             srgb_to_linear(SKY_SRGB[2]),
         ];
         let mut globals = Globals {
-            view_proj: math::view_proj(cam.pos, fwd, aspect),
+            view_proj: vp,
             cam_pos: [cam.pos[0], cam.pos[1], cam.pos[2], 1.0],
             fog_color: [sky[0], sky[1], sky[2], 1.0],
             fog_params: [view_blocks * 0.55, view_blocks * 0.92, 1.0, aspect],
@@ -450,7 +476,7 @@ impl Gfx {
             pass.set_index_buffer(self.index_buf.slice(..), wgpu::IndexFormat::Uint32);
             pass.set_vertex_buffer(1, self.instance_buf.slice(..));
 
-            pass.set_pipeline(&self.pipe_solid);
+            pass.set_pipeline(if opts.backface_cull { &self.pipe_solid } else { &self.pipe_solid_nocull });
             pass.set_bind_group(0, &self.bind_solid, &[]);
             for (i, (_, pos)) in vis.iter().enumerate() {
                 if let Some(layer) = self.chunks.get(pos).and_then(|c| c.solid.as_ref()) {

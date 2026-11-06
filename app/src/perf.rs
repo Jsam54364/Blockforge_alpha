@@ -30,6 +30,8 @@ pub struct Perf {
     pub n_cores: usize,
     pub chunks: usize,
     pub meshes: usize,
+    /// Chunk meshes that survived culling and were drawn last frame.
+    pub drawn: usize,
 }
 
 impl Default for Perf {
@@ -58,6 +60,7 @@ impl Perf {
             n_cores: std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1),
             chunks: 0,
             meshes: 0,
+            drawn: 0,
         }
     }
 

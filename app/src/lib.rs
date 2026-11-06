@@ -101,8 +101,14 @@ impl ApplicationHandler for App {
                     if let Some(ms) = g.take_gpu_ms() {
                         self.perf.add_gpu_sample(ms);
                     }
+                    self.perf.drawn = g.drawn_chunks();
                     self.game.ui.build(&self.perf, &mut self.hud);
-                    let opts = gfx::RenderOptions { fog: self.game.ui.settings.fog };
+                    let settings = self.game.ui.settings;
+                    let opts = gfx::RenderOptions {
+                        fog: settings.fog,
+                        frustum_cull: settings.cull.frustum(),
+                        backface_cull: settings.cull.backface(),
+                    };
                     match g.render(&mut self.game.client, &self.game.cam, view_blocks, &opts, &self.hud) {
                         Ok(display_wait) => {
                             self.perf.end_frame(frame_start.elapsed().saturating_sub(display_wait));
