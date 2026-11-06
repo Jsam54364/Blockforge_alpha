@@ -237,7 +237,9 @@ impl Gfx {
         let bind_solid = make_bind("bind solid", &globals_solid);
         let bind_water = make_bind("bind water", &globals_water);
 
-        let pipe_solid = voxel_pipeline(&device, &layout, &shader, format, None, true, "solid");
+        // Solid terrain is one-sided: cull back faces (the winding is covered by tests).
+        let pipe_solid =
+            voxel_pipeline(&device, &layout, &shader, format, None, true, Some(wgpu::Face::Back), "solid");
         let pipe_water = voxel_pipeline(
             &device,
             &layout,
@@ -245,6 +247,7 @@ impl Gfx {
             format,
             Some(wgpu::BlendState::ALPHA_BLENDING),
             false,
+            None, // double-sided: from underwater the surface is a back face
             "water",
         );
         let pipe_hud = hud_pipeline(&device, &layout, &shader, format);
@@ -492,6 +495,7 @@ fn voxel_pipeline(
     format: wgpu::TextureFormat,
     blend: Option<wgpu::BlendState>,
     depth_write: bool,
+    cull: Option<wgpu::Face>,
     label: &str,
 ) -> wgpu::RenderPipeline {
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -528,8 +532,7 @@ fn voxel_pipeline(
             topology: wgpu::PrimitiveTopology::TriangleList,
             strip_index_format: None,
             front_face: wgpu::FrontFace::Ccw,
-            // Culling is off until winding is confirmed on a real device; then turn on Face::Back.
-            cull_mode: None,
+            cull_mode: cull,
             polygon_mode: wgpu::PolygonMode::Fill,
             unclipped_depth: false,
             conservative: false,
@@ -594,6 +597,56 @@ fn hud_pipeline(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_face_is_front_facing_when_seen_from_outside() {
+        // Solid geometry is back-face culled, so a face wound the wrong way would vanish.
+        // Project each face of a block from a camera in front of it and require
+        // counter-clockwise triangles in NDC (wgpu's front face).
+        use blockforge::block::AIR;
+        use blockforge::coords::Face;
+        use blockforge::mesh::{mesh_chunk, PaddedChunk};
+
+        let reg = BlockRegistry::builtin();
+        let mut pc = PaddedChunk::filled(AIR);
+        pc.set(5, 5, 5, reg.state("stone").unwrap());
+        let mesh = mesh_chunk(&reg, &pc);
+        let center = [5.5f32, 5.5, 5.5];
+        for face in Face::ALL {
+            let (nx, ny, nz) = face.normal();
+            let n = [nx as f32, ny as f32, nz as f32];
+            // A small offset keeps the view direction off the vertical axis for +Y/-Y faces.
+            let eye = [
+                center[0] + n[0] * 6.0 + 0.3,
+                center[1] + n[1] * 6.0 + 0.2,
+                center[2] + n[2] * 6.0 + 0.1,
+            ];
+            let fwd = [center[0] - eye[0], center[1] - eye[1], center[2] - eye[2]];
+            let vp = math::view_proj(eye, fwd, 1.0);
+            let verts: Vec<PackedVertex> = mesh
+                .opaque
+                .vertices
+                .iter()
+                .copied()
+                .filter(|v| v.face_index() == face as u32)
+                .collect();
+            assert_eq!(verts.len(), 4, "{face:?}");
+            let p = |i: usize| {
+                let v = verts[i];
+                let c = math::transform(
+                    &vp,
+                    [v.x() as f32 / 4.0, v.y() as f32 / 4.0, v.z() as f32 / 4.0, 1.0],
+                );
+                assert!(c[3] > 0.0, "vertex behind the camera for {face:?}");
+                [c[0] / c[3], c[1] / c[3]]
+            };
+            for tri in [[0usize, 1, 2], [0, 2, 3]] {
+                let (a, b, c) = (p(tri[0]), p(tri[1]), p(tri[2]));
+                let area = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+                assert!(area > 0.0, "{face:?} triangle {tri:?} is back-facing (area {area})");
+            }
+        }
+    }
 
     #[test]
     fn globals_layout_matches_the_wgsl_struct() {

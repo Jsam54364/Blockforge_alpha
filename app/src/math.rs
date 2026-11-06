@@ -106,6 +106,21 @@ mod tests {
     }
 
     #[test]
+    fn counter_clockwise_triangles_facing_the_camera_have_positive_ndc_area() {
+        // wgpu's `FrontFace::Ccw` means positive signed area in y-up NDC.
+        let m = view_proj([0.0, 0.0, 0.0], [0.0, 0.0, -1.0], 1.0);
+        let p = |x: f32, y: f32| {
+            let c = transform(&m, [x, y, -5.0, 1.0]);
+            [c[0] / c[3], c[1] / c[3]]
+        };
+        // A triangle in the plane z = -5 with its normal toward +Z (toward the camera),
+        // counter-clockwise as the camera sees it.
+        let (a, b, c) = (p(-1.0, -1.0), p(1.0, -1.0), p(0.0, 1.0));
+        let area = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+        assert!(area > 0.0, "area {area}");
+    }
+
+    #[test]
     fn near_plane_maps_to_zero_and_far_to_one() {
         let p = perspective(1.0, 1.0, 0.1, 100.0);
         let n = transform(&p, [0.0, 0.0, -0.1, 1.0]);

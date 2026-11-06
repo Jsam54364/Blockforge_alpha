@@ -453,6 +453,54 @@ mod tests {
     }
 
     #[test]
+    fn every_triangle_winds_counter_clockwise_seen_from_outside() {
+        // The renderer culls back faces, so a face wound the wrong way would vanish.
+        // A lumpy structure with slabs also exercises the AO diagonal flip.
+        let r = reg();
+        let id = r.id("stone").unwrap();
+        let stone = BlockState::full(id);
+        let slab_b = BlockState::new(id, Shape::SlabBottom);
+        let slab_t = BlockState::new(id, Shape::SlabTop);
+        let quarter = BlockState::new(id, Shape::Quarter);
+        let mut pc = PaddedChunk::filled(AIR);
+        for (x, y, z, s) in [
+            (5, 5, 5, stone),
+            (6, 5, 5, stone),
+            (6, 6, 5, stone),
+            (5, 6, 6, slab_b),
+            (7, 5, 6, slab_t),
+            (4, 5, 5, quarter),
+            (5, 5, 6, stone),
+            (6, 5, 6, stone),
+            (6, 6, 6, slab_b),
+        ] {
+            pc.set(x, y, z, s);
+        }
+        let m = mesh_chunk(&r, &pc);
+        assert!(m.opaque.quad_count() > 20);
+        let idx = quad_indices(m.opaque.quad_count());
+        let v = &m.opaque.vertices;
+        let pos = |i: u32| {
+            let p = v[i as usize];
+            [p.x() as f32, p.y() as f32, p.z() as f32]
+        };
+        for tri in idx.chunks(3) {
+            let (a, b, c) = (pos(tri[0]), pos(tri[1]), pos(tri[2]));
+            let e1 = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+            let e2 = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+            let n = [
+                e1[1] * e2[2] - e1[2] * e2[1],
+                e1[2] * e2[0] - e1[0] * e2[2],
+                e1[0] * e2[1] - e1[1] * e2[0],
+            ];
+            let face = Face::ALL[v[tri[0] as usize].face_index() as usize];
+            let (fx, fy, fz) = face.normal();
+            let dot = n[0] * fx as f32 + n[1] * fy as f32 + n[2] * fz as f32;
+            assert!(dot > 0.0, "triangle faces away from {face:?}: {a:?} {b:?} {c:?}");
+        }
+    }
+
+    #[test]
     fn packed_vertex_roundtrip() {
         let v = PackedVertex::pack(128, 7, 99, Face::NegZ, 2, 513, 15, 9);
         assert_eq!((v.x(), v.y(), v.z()), (128, 7, 99));

@@ -23,6 +23,12 @@ pub const RENDER_MAX: u8 = 12;
 pub const LOD_MIN: u8 = 4;
 pub const LOD_MAX: u8 = 32;
 
+/// Android draws the status bar over the top edge and the navigation bar over the right
+/// edge in landscape. These fixed insets come from a real phone's screenshots (status bar
+/// about 24dp, nav bar about 51dp). The proper fix is immersive mode or reading real insets.
+pub const SAFE_TOP_DP: f32 = 28.0;
+pub const SAFE_RIGHT_DP: f32 = 56.0;
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Settings {
     /// Chunks streamed and drawn around the player.
@@ -215,13 +221,15 @@ impl Ui {
         rect(out, cx - th * 0.5, cy - len, th, len * 2.0, XHAIR);
 
         let margin = 8.0 * dp;
+        let safe_top = SAFE_TOP_DP * dp;
+        let safe_right = SAFE_RIGHT_DP * dp;
         if self.settings.show_stats {
-            self.draw_stats(perf, out, margin);
+            self.draw_stats(perf, out, margin, safe_top + 4.0 * dp);
         }
 
-        // Menu button (three bars)
+        // Menu button (three bars), kept clear of the system bars
         let bs = 48.0 * dp;
-        let (bx, by) = (w - bs - margin, margin);
+        let (bx, by) = (w - safe_right - margin - bs, safe_top + 4.0 * dp);
         rect(out, bx, by, bs, bs, PANEL);
         for i in 0..3 {
             rect(out, bx + bs * 0.25, by + bs * 0.29 + bs * 0.17 * i as f32, bs * 0.5, bs * 0.07, WHITE);
@@ -229,7 +237,7 @@ impl Ui {
         self.buttons.push(Button { x: bx, y: by, w: bs, h: bs, action: Action::ToggleMenu });
 
         if self.menu_open {
-            self.draw_menu(out, w - margin, by + bs + 4.0 * dp);
+            self.draw_menu(out, bx + bs, by + bs + 4.0 * dp);
         }
 
         if out.len() > MAX_HUD_VERTS {
@@ -237,16 +245,16 @@ impl Ui {
         }
     }
 
-    fn draw_stats(&self, perf: &Perf, out: &mut Vec<HudVertex>, margin: f32) {
+    fn draw_stats(&self, perf: &Perf, out: &mut Vec<HudVertex>, x: f32, y: f32) {
         let px = (2.0 * self.dp).round().max(2.0);
         let lines = stats_lines(perf);
         let pad = 4.0 * self.dp;
         let line_h = 9.0 * px;
         let width = lines.iter().map(|l| text_width(px, l)).fold(0.0f32, f32::max);
         let height = line_h * lines.len() as f32 - 2.0 * px;
-        rect(out, margin, margin, width + 2.0 * pad, height + 2.0 * pad, PANEL);
+        rect(out, x, y, width + 2.0 * pad, height + 2.0 * pad, PANEL);
         for (i, l) in lines.iter().enumerate() {
-            text(out, margin + pad, margin + pad + line_h * i as f32, px, l, WHITE);
+            text(out, x + pad, y + pad + line_h * i as f32, px, l, WHITE);
         }
     }
 
@@ -260,7 +268,8 @@ impl Ui {
     fn draw_menu(&mut self, out: &mut Vec<HudVertex>, right: f32, top: f32) {
         let dp = self.dp;
         let px = (2.5 * dp).round().max(2.0);
-        let panel_w = 360.0 * dp;
+        // Never wider than the space left of the right edge (matters on narrow screens).
+        let panel_w = (360.0 * dp).min((right - 8.0 * dp).max(0.0));
         let pad = 8.0 * dp;
         let row_h = 56.0 * dp;
         let bw = 48.0 * dp;
@@ -376,6 +385,11 @@ mod tests {
             if b.action != Action::Nothing {
                 assert!(b.w >= 48.0 * 2.75 - 0.5 && b.h >= 48.0 * 2.75 - 0.5);
             }
+        }
+        // Nothing sits under the status bar or the navigation bar.
+        for b in &u.buttons {
+            assert!(b.y >= SAFE_TOP_DP * 2.75 - 0.5, "{:?} is under the status bar", b.action);
+            assert!(b.x + b.w <= 2400.0 - SAFE_RIGHT_DP * 2.75 + 0.5, "{:?} is under the nav bar", b.action);
         }
         // And it still fits on a portrait screen.
         u.set_surface(1080, 2400, 2.75);

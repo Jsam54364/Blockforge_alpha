@@ -84,6 +84,19 @@ LOD distance (stored and shown but **not used yet**: LOD meshing isn't built), f
 stats on/off. The HUD is drawn by a tiny immediate-mode layer (`ui.rs`) with its own 5x7 bitmap
 font (`font.rs`, `glyphs.rs`), so there are no UI dependencies.
 
-Renderer gaps: pooled vertex buffers, real frustum planes, texture array (colours come from a
-palette keyed by texture name), render-scale governor hookup, back-face culling (off until the
-winding is confirmed on a device), LOD meshing.
+Back-face culling is on for solid terrain (water stays double-sided so the surface is visible
+from underwater). Tests prove every face is wound counter-clockwise from outside, both in the
+mesher and after projection (`mesh.rs`, `gfx.rs`). Flying inside solid rock therefore looks
+see-through, as in any voxel game.
+
+The HUD keeps clear of Android's status bar (top) and navigation bar (right, in landscape) using
+fixed insets measured from a real phone (`SAFE_TOP_DP`, `SAFE_RIGHT_DP` in `ui.rs`). Immersive
+mode or real inset queries would replace these.
+
+Measured on a mid-range phone, fog off, flying over terrain (GPU time of the main pass):
+render distance 6 = 7.1 ms (43% busy), 8 = 11.7 ms (70%), 10 = 12.9 ms (77%), 12 = 16.7 ms
+(94%, 56 fps). CPU stayed near 5% of the device; memory 100-220 MB. The renderer is GPU-bound,
+so the next wins are real frustum culling, occlusion culling, then LOD meshes.
+
+Renderer gaps: pooled vertex buffers, real frustum planes, occlusion culling, texture array
+(colours come from a palette keyed by texture name), render-scale governor hookup, LOD meshing.
