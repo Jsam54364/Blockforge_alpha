@@ -9,6 +9,8 @@
 //!   rotating the vertex order instead of changing indices.
 //! * Not yet implemented: greedy merging, real light propagation (sky/block light
 //!   are placeholders), AO sampling across chunk edges/corners from unloaded neighbours.
+//! * Planned for the next version: a binary greedy mesher (bitmask face detection plus
+//!   merging of coplanar same-block faces into large quads). See README.
 
 use crate::block::{BlockState, UNKNOWN};
 use crate::coords::{ChunkPos, Face, LocalPos, CHUNK_SIZE};

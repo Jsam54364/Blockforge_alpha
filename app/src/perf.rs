@@ -3,6 +3,8 @@
 //! * FPS and CPU frame time come from our own timing.
 //! * Process CPU use is read from /proc/self/stat (Android allows this for your own
 //!   process; the system-wide /proc/stat is blocked for apps since Android 8).
+//! * The render (main) thread's own CPU use comes from /proc/thread-self/stat: near 100% means
+//!   the CPU is the bottleneck; low with low FPS means the GPU is.
 //! * Memory is VmRSS from /proc/self/status.
 //! * GPU time comes from `gpu_timer` (timestamp queries). Android exposes no public
 //!   "GPU usage %" counter, so busy% is derived: gpu_ms * fps / 1000.
@@ -19,6 +21,7 @@ pub struct Perf {
     gpu_acc_ms: f32,
     gpu_samples: u32,
     proc_last: Option<(u64, Instant)>,
+    thread_last: Option<(u64, Instant)>,
     proc_checked: Instant,
     pub fps: f32,
     pub frame_ms: f32,
@@ -32,6 +35,10 @@ pub struct Perf {
     pub meshes: usize,
     /// Chunk meshes that survived culling and were drawn last frame.
     pub drawn: usize,
+    /// Name of the active present mode (FIFO = vsync).
+    pub present_mode: &'static str,
+    /// Fraction of one core the main (render) thread used over the last second.
+    pub main_thread: Option<f32>,
 }
 
 impl Default for Perf {
@@ -50,6 +57,7 @@ impl Perf {
             gpu_acc_ms: 0.0,
             gpu_samples: 0,
             proc_last: None,
+            thread_last: None,
             proc_checked: now,
             fps: 0.0,
             frame_ms: 0.0,
@@ -61,6 +69,8 @@ impl Perf {
             chunks: 0,
             meshes: 0,
             drawn: 0,
+            present_mode: "FIFO",
+            main_thread: None,
         }
     }
 
@@ -104,11 +114,26 @@ impl Perf {
                 }
                 self.proc_last = Some((ticks, now));
             }
+            if let Some(ticks) = read_thread_ticks() {
+                if let Some((t0, i0)) = self.thread_last {
+                    let dt = now.saturating_duration_since(i0).as_secs_f32();
+                    if dt > 0.0 && ticks >= t0 {
+                        self.main_thread = Some((ticks - t0) as f32 / CLK_TCK / dt);
+                    }
+                }
+                self.thread_last = Some((ticks, now));
+            }
             self.mem_mb = std::fs::read_to_string("/proc/self/status")
                 .ok()
                 .and_then(|s| parse_rss_mb(&s));
         }
     }
+}
+
+/// CPU ticks used by the calling thread (call from the render thread).
+fn read_thread_ticks() -> Option<u64> {
+    let s = std::fs::read_to_string("/proc/thread-self/stat").ok()?;
+    parse_stat_ticks(&s)
 }
 
 fn read_proc_ticks() -> Option<u64> {
@@ -189,6 +214,7 @@ mod tests {
     fn real_process_stats_are_readable_on_linux() {
         if cfg!(target_os = "linux") || cfg!(target_os = "android") {
             assert!(read_proc_ticks().is_some());
+            assert!(read_thread_ticks().is_some());
             let s = std::fs::read_to_string("/proc/self/status").unwrap();
             assert!(parse_rss_mb(&s).unwrap() > 0.0);
         }

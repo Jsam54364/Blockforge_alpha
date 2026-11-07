@@ -75,12 +75,14 @@ pub struct Settings {
     pub lod_chunks: u8,
     pub fog: bool,
     pub cull: CullMode,
+    /// true = FIFO (capped at the display refresh); false = uncapped, for measuring.
+    pub vsync: bool,
     pub show_stats: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { render_chunks: 6, lod_chunks: 16, fog: true, cull: CullMode::All, show_stats: true }
+        Settings { render_chunks: 6, lod_chunks: 16, fog: true, cull: CullMode::All, vsync: true, show_stats: true }
     }
 }
 
@@ -93,6 +95,7 @@ pub enum Action {
     LodDist(i8),
     ToggleFog,
     CycleCull,
+    ToggleVsync,
     ToggleStats,
 }
 
@@ -107,6 +110,8 @@ struct Button {
 pub struct Ui {
     pub settings: Settings,
     pub menu_open: bool,
+    /// False when the surface offers no uncapped present mode (the toggle then shows N/A).
+    pub vsync_supported: bool,
     size: (f32, f32),
     dp: f32,
     buttons: Vec<Button>,
@@ -180,6 +185,9 @@ pub fn stats_lines(perf: &Perf) -> Vec<String> {
         None => v.push("CPU N/A".to_string()),
     }
     v.push(format!("CPU FRAME {:.1}MS", perf.cpu_frame_ms));
+    if let Some(m) = perf.main_thread {
+        v.push(format!("MAIN THREAD {:.0}%", m * 100.0));
+    }
     match perf.gpu_ms {
         Some(g) => v.push(format!("GPU {:.1}MS  ({:.0}%)", g, (g * perf.fps / 10.0).min(999.0))),
         None => v.push("GPU N/A".to_string()),
@@ -189,6 +197,7 @@ pub fn stats_lines(perf: &Perf) -> Vec<String> {
     }
     v.push(format!("CHUNKS {}  MESHED {}", perf.chunks, perf.meshes));
     v.push(format!("DRAWN {}/{}", perf.drawn, perf.meshes));
+    v.push(format!("PRESENT {}", perf.present_mode));
     v
 }
 
@@ -200,7 +209,14 @@ impl Default for Ui {
 
 impl Ui {
     pub fn new() -> Ui {
-        Ui { settings: Settings::default(), menu_open: false, size: (1.0, 1.0), dp: 1.0, buttons: Vec::new() }
+        Ui {
+            settings: Settings::default(),
+            menu_open: false,
+            vsync_supported: true,
+            size: (1.0, 1.0),
+            dp: 1.0,
+            buttons: Vec::new(),
+        }
     }
 
     pub fn set_surface(&mut self, w: u32, h: u32, scale_factor: f64) {
@@ -243,6 +259,10 @@ impl Ui {
                 self.settings.cull = self.settings.cull.next();
                 false
             }
+            Action::ToggleVsync => {
+                self.settings.vsync = !self.settings.vsync;
+                false
+            }
             Action::ToggleStats => {
                 self.settings.show_stats = !self.settings.show_stats;
                 false
@@ -281,7 +301,8 @@ impl Ui {
         self.buttons.push(Button { x: bx, y: by, w: bs, h: bs, action: Action::ToggleMenu });
 
         if self.menu_open {
-            self.draw_menu(out, bx + bs, by + bs + 4.0 * dp);
+            // Beside the menu button (not under it) so six rows still fit a 360dp-tall screen.
+            self.draw_menu(out, bx - 4.0 * dp, by);
         }
 
         if out.len() > MAX_HUD_VERTS {
@@ -317,7 +338,7 @@ impl Ui {
         let pad = 8.0 * dp;
         let bw = 48.0 * dp;
         let gap = 6.0 * dp;
-        let rows = 5usize;
+        let rows = 6usize;
         // Rows shrink (down to button height) on short screens so the panel stays visible.
         let avail = self.size.1 - top - 8.0 * dp;
         let row_h = (56.0 * dp).min((avail - pad * 2.0) / rows as f32).max(bw);
@@ -362,6 +383,17 @@ impl Ui {
                 3 => {
                     text(out, label_x, ty, px, "CULL", WHITE);
                     self.button(out, minus_x, by, 2.0 * bw + gap, bw, s.cull.label(), px, Action::CycleCull);
+                }
+                4 => {
+                    text(out, label_x, ty, px, "VSYNC", WHITE);
+                    let label = if !self.vsync_supported {
+                        "N/A"
+                    } else if s.vsync {
+                        "ON"
+                    } else {
+                        "OFF"
+                    };
+                    self.button(out, minus_x, by, 2.0 * bw + gap, bw, label, px, Action::ToggleVsync);
                 }
                 _ => {
                     text(out, label_x, ty, px, "STATS", WHITE);
@@ -419,6 +451,7 @@ mod tests {
             Action::LodDist(1),
             Action::ToggleFog,
             Action::CycleCull,
+            Action::ToggleVsync,
             Action::ToggleStats,
         ] {
             let (x, y) = center_of(&u, a);
@@ -518,6 +551,19 @@ mod tests {
     }
 
     #[test]
+    fn vsync_toggle_flips_and_shows_na_when_unsupported() {
+        let mut u = ui();
+        u.menu_open = true;
+        assert!(u.settings.vsync);
+        u.apply(Action::ToggleVsync);
+        assert!(!u.settings.vsync);
+        u.vsync_supported = false;
+        build(&mut u); // must not panic with the N/A label
+        u.apply(Action::ToggleVsync);
+        assert!(u.settings.vsync);
+    }
+
+    #[test]
     fn toggles_flip() {
         let mut u = ui();
         u.apply(Action::ToggleFog);
@@ -546,6 +592,8 @@ mod tests {
         p.mem_mb = Some(412.4);
         p.chunks = 885;
         p.meshes = 312;
+        p.main_thread = Some(0.42);
+        p.present_mode = "IMMEDIATE";
         let mut all = stats_lines(&p);
         p.cpu_cores = None;
         p.gpu_ms = None;
@@ -556,7 +604,7 @@ mod tests {
                 assert!(font::has_art(c), "no glyph for {c:?} in {line:?}");
             }
         }
-        for s in ["REND", "LOD", "FOG", "CULL", "ALL", "FRUST", "BACK", "STATS", "SOON", "ON", "OFF", "+", "-"] {
+        for s in ["REND", "LOD", "FOG", "CULL", "ALL", "FRUST", "BACK", "VSYNC", "N/A", "STATS", "SOON", "ON", "OFF", "+", "-"] {
             assert!(s.chars().all(font::has_art), "{s}");
         }
     }

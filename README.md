@@ -98,6 +98,13 @@ box (`math::Frustum`, tested to never reject a visible box). The menu's CULL row
 ALL / FRUST / BACK / OFF so each can be measured on a device; the overlay's DRAWN line shows
 how many chunk meshes survived culling out of those resident.
 
+Frustum culling, same camera at each distance (render distance: drawn / meshed chunks):
+6: 94/458, 8: 156/602, 10: 230/706, 12: 315/985, i.e. about 21-33% of meshed chunks. GPU
+milliseconds at a vsync-capped 60 fps are NOT a reliable cost measure (the GPU clocks down to
+fill the frame), so use the menu's VSYNC toggle to read uncapped FPS when comparing settings.
+The overlay's MAIN THREAD line is the render thread's own CPU use: near 100% = CPU-bound,
+low with low FPS = GPU-bound.
+
 Measured on a mid-range phone, fog off, flying over terrain (GPU time of the main pass):
 render distance 6 = 7.1 ms (43% busy), 8 = 11.7 ms (70%), 10 = 12.9 ms (77%), 12 = 16.7 ms
 (94%, 56 fps). CPU stayed near 5% of the device; memory 100-220 MB. The renderer is GPU-bound,
@@ -105,3 +112,16 @@ so the next wins after frustum culling are occlusion culling, then LOD meshes.
 
 Renderer gaps: pooled vertex buffers, occlusion culling, texture array
 (colours come from a palette keyed by texture name), render-scale governor hookup, LOD meshing.
+
+## Planned next
+
+1. **Binary greedy mesher** (next version). Detect visible faces with per-row bitmasks and merge
+   coplanar faces of the same block into large quads. Expected to cut vertex count and meshing
+   time sharply on flat terrain. Needs a policy for per-vertex AO and light (merge only faces
+   whose AO/light match, or move AO into a texture); slab/partial blocks keep the per-face path.
+2. Occlusion culling (cave-style flood fill) to skip chunks hidden behind terrain, which should
+   help most underground.
+3. LOD meshes behind the (currently inert) LOD distance setting.
+4. Pooled vertex buffers instead of one buffer per chunk.
+5. Immersive mode / real window insets instead of the fixed HUD insets.
+6. A fixed signing key in CI so new APKs install over old ones without uninstalling.

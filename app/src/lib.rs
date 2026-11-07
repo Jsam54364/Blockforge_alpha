@@ -61,6 +61,7 @@ impl ApplicationHandler for App {
         match pollster::block_on(gfx::Gfx::new(window.clone(), self.game.registry())) {
             Ok(g) => {
                 self.game.set_surface(size.width, size.height, window.scale_factor());
+                self.game.ui.vsync_supported = g.vsync_supported();
                 self.gfx = Some(g);
                 self.window = Some(window);
             }
@@ -102,12 +103,14 @@ impl ApplicationHandler for App {
                         self.perf.add_gpu_sample(ms);
                     }
                     self.perf.drawn = g.drawn_chunks();
+                    self.perf.present_mode = g.present_mode_name();
                     self.game.ui.build(&self.perf, &mut self.hud);
                     let settings = self.game.ui.settings;
                     let opts = gfx::RenderOptions {
                         fog: settings.fog,
                         frustum_cull: settings.cull.frustum(),
                         backface_cull: settings.cull.backface(),
+                        vsync: settings.vsync,
                     };
                     match g.render(&mut self.game.client, &self.game.cam, view_blocks, &opts, &self.hud) {
                         Ok(display_wait) => {

@@ -55,6 +55,8 @@ pub struct RenderOptions {
     pub frustum_cull: bool,
     /// Use the back-face-culling pipeline for solid terrain.
     pub backface_cull: bool,
+    /// true = FIFO (capped at the display rate); false = the fastest uncapped mode available.
+    pub vsync: bool,
 }
 
 fn as_bytes<T>(s: &[T]) -> &[u8] {
@@ -132,6 +134,8 @@ pub struct Gfx {
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
+    /// Immediate or Mailbox if the surface offers one: used when VSYNC is turned off.
+    uncapped_mode: Option<wgpu::PresentMode>,
     depth_view: wgpu::TextureView,
     pipe_solid: wgpu::RenderPipeline,
     pipe_solid_nocull: wgpu::RenderPipeline,
@@ -185,6 +189,9 @@ impl Gfx {
             .map_err(|e| format!("could not create device: {e}"))?;
 
         let caps = surface.get_capabilities(&adapter);
+        let uncapped_mode = [wgpu::PresentMode::Immediate, wgpu::PresentMode::Mailbox]
+            .into_iter()
+            .find(|m| caps.present_modes.contains(m));
         let format = caps.formats.iter().copied().find(|f| f.is_srgb()).unwrap_or(caps.formats[0]);
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -285,6 +292,7 @@ impl Gfx {
             device,
             queue,
             config,
+            uncapped_mode,
             depth_view,
             pipe_solid,
             pipe_solid_nocull,
@@ -306,6 +314,32 @@ impl Gfx {
 
     pub fn size(&self) -> (u32, u32) {
         (self.config.width, self.config.height)
+    }
+
+    /// Whether the surface offers any mode that isn't locked to the display's refresh.
+    pub fn vsync_supported(&self) -> bool {
+        self.uncapped_mode.is_some()
+    }
+
+    pub fn present_mode_name(&self) -> &'static str {
+        match self.config.present_mode {
+            wgpu::PresentMode::Fifo => "FIFO",
+            wgpu::PresentMode::Immediate => "IMMEDIATE",
+            wgpu::PresentMode::Mailbox => "MAILBOX",
+            _ => "OTHER",
+        }
+    }
+
+    fn apply_vsync(&mut self, on: bool) {
+        let want = if on {
+            wgpu::PresentMode::Fifo
+        } else {
+            self.uncapped_mode.unwrap_or(wgpu::PresentMode::Fifo)
+        };
+        if want != self.config.present_mode {
+            self.config.present_mode = want;
+            self.surface.configure(&self.device, &self.config);
+        }
     }
 
     /// Chunk meshes drawn last frame (after distance and frustum culling).
@@ -358,8 +392,8 @@ impl Gfx {
         }
     }
 
-    /// Draws a frame. On success returns how long we waited for the display to hand
-    /// us a frame (so callers can exclude it from CPU time).
+    /// Draws a frame. On success returns how long we were blocked on the display (waiting
+    /// for a frame to draw into, plus presenting it), so callers can exclude it from CPU time.
     pub fn render(
         &mut self,
         client: &mut Client,
@@ -368,6 +402,7 @@ impl Gfx {
         opts: &RenderOptions,
         hud: &[HudVertex],
     ) -> Result<Duration, wgpu::SurfaceError> {
+        self.apply_vsync(opts.vsync);
         self.sync_meshes(client);
 
         let aspect = self.config.width as f32 / self.config.height as f32;
@@ -506,11 +541,13 @@ impl Gfx {
             t.encode(&mut encoder);
         }
         self.queue.submit(std::iter::once(encoder.finish()));
+        let present_start = Instant::now();
         frame.present();
+        let present_wait = present_start.elapsed();
         if let Some(t) = self.timer.as_mut() {
             t.after_submit(&self.device);
         }
-        Ok(acquire_wait)
+        Ok(acquire_wait + present_wait)
     }
 }
 
