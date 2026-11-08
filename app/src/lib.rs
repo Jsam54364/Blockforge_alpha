@@ -103,6 +103,7 @@ impl ApplicationHandler for App {
                         self.perf.add_gpu_sample(ms);
                     }
                     self.perf.drawn = g.drawn_chunks();
+                    self.perf.quads = g.drawn_quads();
                     self.perf.present_mode = g.present_mode_name();
                     self.game.ui.build(&self.perf, &mut self.hud);
                     let settings = self.game.ui.settings;

@@ -11,6 +11,7 @@
 //!   are placeholders), AO sampling across chunk edges/corners from unloaded neighbours.
 //! * Planned for the next version: a binary greedy mesher (bitmask face detection plus
 //!   merging of coplanar same-block faces into large quads). See README.
+//!   (Implemented in `greedy.rs`: see `Mesher` and `mesh_chunk_greedy`.)
 
 use crate::block::{BlockState, UNKNOWN};
 use crate::coords::{ChunkPos, Face, LocalPos, CHUNK_SIZE};
@@ -89,7 +90,9 @@ fn axis_span(d: i32) -> (i32, i32, i32) {
 
 /// 8 bytes:
 ///   a: x(8) | y(8)<<8 | z(8)<<16 | face(3)<<24 | ao(2)<<27
-///   b: texture(16) | sky(4)<<16 | block(4)<<20 | 8 spare bits
+///   b: texture(16) | sky(4)<<16 | block(4)<<20 | grow_u(1)<<24 | grow_v(1)<<25 | merged(1)<<26
+/// The last three are set on greedy-merged quads: which side of the quad this corner is on
+/// along the face's two tangent axes, and the flag the shader uses to grow merged quads slightly.
 /// x/y/z are quarter-block units within the chunk (0..=128 fits in 8 bits).
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
@@ -105,6 +108,26 @@ impl PackedVertex {
         let a = x | (y << 8) | (z << 16) | ((face as u32) << 24) | (((ao & 3) as u32) << 27);
         let b = (tex as u32) | (((sky & 15) as u32) << 16) | (((block & 15) as u32) << 20);
         PackedVertex { a, b }
+    }
+
+    /// Marks this vertex as part of a merged quad (see `greedy.rs`). `u_max`/`v_max` say
+    /// whether the corner is on the high side of the quad along the face's first and second
+    /// tangent axes ((axis + 1) % 3 and (axis + 2) % 3).
+    pub fn with_grow(mut self, u_max: bool, v_max: bool) -> PackedVertex {
+        self.b |= ((u_max as u32) << 24) | ((v_max as u32) << 25) | (1 << 26);
+        self
+    }
+
+    pub fn grows(self) -> bool {
+        (self.b >> 26) & 1 == 1
+    }
+
+    pub fn grow_u(self) -> bool {
+        (self.b >> 24) & 1 == 1
+    }
+
+    pub fn grow_v(self) -> bool {
+        (self.b >> 25) & 1 == 1
     }
 
     pub fn x(self) -> u32 {
@@ -189,7 +212,7 @@ pub fn quad_indices(quads: usize) -> Vec<u32> {
 }
 
 /// Unit-cube corners per face, counter-clockwise seen from outside. Index = `Face::index()`.
-const FACE_CORNERS: [[[i32; 3]; 4]; 6] = [
+pub(crate) const FACE_CORNERS: [[[i32; 3]; 4]; 6] = [
     [[1, 0, 1], [1, 0, 0], [1, 1, 0], [1, 1, 1]], // +X
     [[0, 0, 0], [0, 0, 1], [0, 1, 1], [0, 1, 0]], // -X
     [[0, 1, 1], [1, 1, 1], [1, 1, 0], [0, 1, 0]], // +Y
@@ -237,7 +260,7 @@ fn occludes_ao(reg: &BlockRegistry, s: BlockState) -> bool {
 
 /// Per-corner ambient occlusion, 0 (dark) ..= 3 (bright).
 /// Approximation: samples the cell in front of the face, even for partial-height tops.
-fn corner_ao(reg: &BlockRegistry, pc: &PaddedChunk, x: i32, y: i32, z: i32, face: Face) -> [u8; 4] {
+pub(crate) fn corner_ao(reg: &BlockRegistry, pc: &PaddedChunk, x: i32, y: i32, z: i32, face: Face) -> [u8; 4] {
     let (nx, ny, nz) = face.normal();
     let axis = if nx != 0 {
         0
@@ -270,7 +293,7 @@ fn corner_ao(reg: &BlockRegistry, pc: &PaddedChunk, x: i32, y: i32, z: i32, face
 }
 
 #[allow(clippy::too_many_arguments)]
-fn emit_quad(
+pub(crate) fn emit_quad(
     layer: &mut MeshLayer,
     face: Face,
     ox: i32,
@@ -298,13 +321,44 @@ fn emit_quad(
     }
 }
 
+/// Which mesher to use. Both produce the same visible faces; greedy merges coplanar faces
+/// of full opaque cubes into larger quads.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Mesher {
+    Simple,
+    Greedy,
+}
+
+pub fn mesh_chunk_with(kind: Mesher, reg: &BlockRegistry, pc: &PaddedChunk) -> ChunkMesh {
+    match kind {
+        Mesher::Simple => mesh_chunk(reg, pc),
+        Mesher::Greedy => mesh_chunk_greedy(reg, pc),
+    }
+}
+
+/// One quad per visible face.
 pub fn mesh_chunk(reg: &BlockRegistry, pc: &PaddedChunk) -> ChunkMesh {
+    mesh_chunk_impl(reg, pc, false)
+}
+
+/// Hybrid: full opaque cubes go through the bit-mask greedy mesher, everything else (slabs,
+/// water, leaves, ...) through the per-face path.
+pub fn mesh_chunk_greedy(reg: &BlockRegistry, pc: &PaddedChunk) -> ChunkMesh {
+    let mut mesh = mesh_chunk_impl(reg, pc, true);
+    crate::greedy::mesh_eligible(reg, pc, &mut mesh);
+    mesh
+}
+
+fn mesh_chunk_impl(reg: &BlockRegistry, pc: &PaddedChunk, skip_greedy: bool) -> ChunkMesh {
     let mut mesh = ChunkMesh::default();
     for y in 0..CHUNK_SIZE {
         for z in 0..CHUNK_SIZE {
             for x in 0..CHUNK_SIZE {
                 let state = pc.at(x, y, z);
                 if state.is_air() {
+                    continue;
+                }
+                if skip_greedy && crate::greedy::is_eligible(reg, state) {
                     continue;
                 }
                 let def = reg.get(state);

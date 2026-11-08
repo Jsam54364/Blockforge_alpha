@@ -43,8 +43,18 @@ fn face_normal(f: u32) -> vec3<f32> {
 fn vs_main(v: VsIn) -> VsOut {
     let a = v.packed.x;
     let b = v.packed.y;
-    let local = vec3<f32>(f32(a & 255u), f32((a >> 8u) & 255u), f32((a >> 16u) & 255u)) * 0.25;
     let face = (a >> 24u) & 7u;
+    // Merged (greedy) quads are grown by a hair so they overlap their neighbours and hide
+    // pixel cracks at T-junctions. b bits 24/25 say which side of the quad this corner is on
+    // along the face's two tangent axes; bit 26 marks a merged quad.
+    let axis = face >> 1u;
+    let su = f32((b >> 24u) & 1u) * 2.0 - 1.0;
+    let sv = f32((b >> 25u) & 1u) * 2.0 - 1.0;
+    let merged = f32((b >> 26u) & 1u);
+    let e1 = vec3<f32>(f32(axis == 2u), f32(axis == 0u), f32(axis == 1u));
+    let e2 = vec3<f32>(f32(axis == 1u), f32(axis == 2u), f32(axis == 0u));
+    let grow = (e1 * su + e2 * sv) * (0.002 * merged);
+    let local = vec3<f32>(f32(a & 255u), f32((a >> 8u) & 255u), f32((a >> 16u) & 255u)) * 0.25 + grow;
     let ao = (a >> 27u) & 3u;
     let tex = b & 65535u;
     let sky = f32((b >> 16u) & 15u) / 15.0;

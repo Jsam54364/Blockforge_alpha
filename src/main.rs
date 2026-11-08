@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 use blockforge::client::Client;
 use blockforge::coords::{BlockPos, CHUNK_VOLUME};
 use blockforge::jobs::default_worker_threads;
+use blockforge::mesh::{mesh_chunk_with, Mesher, PaddedChunk};
 use blockforge::registry::BlockRegistry;
 use blockforge::server::{self, ServerConfig};
 
@@ -40,6 +41,29 @@ fn wait_until_settled(c: &mut Client, timeout: Duration) {
         }
         thread::sleep(Duration::from_millis(2));
     }
+}
+
+/// Meshes every loaded chunk with both meshers and compares quad counts and meshing time.
+fn compare_meshers(c: &Client, reg: &BlockRegistry) {
+    let positions: Vec<_> = c.store.positions().collect();
+    let mut totals = [(0usize, Duration::ZERO); 2];
+    for (i, kind) in [Mesher::Simple, Mesher::Greedy].into_iter().enumerate() {
+        for &p in &positions {
+            let pc = PaddedChunk::capture(&c.store, p);
+            let t = Instant::now();
+            let mesh = mesh_chunk_with(kind, reg, &pc);
+            totals[i].1 += t.elapsed();
+            totals[i].0 += mesh.quad_count();
+        }
+    }
+    let ((sq, st), (gq, gt)) = (totals[0], totals[1]);
+    println!("\nMesher comparison over {} loaded chunks (this machine, not a phone):", positions.len());
+    println!("  simple: {sq} quads in {st:.2?}");
+    println!(
+        "  greedy: {gq} quads in {gt:.2?}  ({:.0}% of the quads, {:.0}% of the vertex data)",
+        100.0 * gq as f32 / sq.max(1) as f32,
+        100.0 * gq as f32 / sq.max(1) as f32
+    );
 }
 
 fn highest_solid(c: &Client, reg: &BlockRegistry, x: i32, z: i32) -> Option<i32> {
@@ -128,6 +152,7 @@ fn main() {
     );
 
     print_map(&client, &registry);
+    compare_meshers(&client, &registry);
 
     if let Some(g) = highest_solid(&client, &registry, 0, 0) {
         let name = &registry.get(client.store.block(BlockPos::new(0, g, 0)).unwrap()).name;

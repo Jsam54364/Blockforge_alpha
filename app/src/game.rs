@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 use blockforge::block::BlockState;
 use blockforge::client::Client;
 use blockforge::coords::{BlockPos, CHUNK_SIZE};
+use blockforge::mesh::Mesher;
 use blockforge::raycast::{raycast, RayHit};
 use blockforge::registry::BlockRegistry;
 use blockforge::server::{self, ServerConfig, ServerHandle};
@@ -168,8 +169,13 @@ impl Game {
             TouchPhase::Started => {
                 if let Some(action) = self.ui.hit(x, y) {
                     self.ui_touches.insert(id);
+                    let greedy_before = self.ui.settings.greedy;
                     if self.ui.apply(action) {
                         self.client.set_view_distance(self.ui.settings.render_chunks);
+                    }
+                    if self.ui.settings.greedy != greedy_before {
+                        let kind = if self.ui.settings.greedy { Mesher::Greedy } else { Mesher::Simple };
+                        self.client.set_mesher(kind);
                     }
                     return;
                 }

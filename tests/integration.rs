@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 use blockforge::client::Client;
 use blockforge::coords::BlockPos;
+use blockforge::mesh::{mesh_chunk_with, Mesher, PaddedChunk};
 use blockforge::registry::BlockRegistry;
 use blockforge::server::{self, ServerConfig};
 
@@ -90,4 +91,25 @@ fn sand_falls_and_lands_on_ground() {
     );
     // ...and it left its starting cell.
     assert!(c.store.block(start_pos).map_or(false, |s| s.is_air() || !reg.get(s).solid));
+}
+
+#[test]
+fn greedy_mesher_works_through_the_client() {
+    let (_h, mut c, reg) = start(7);
+    assert!(pump_until(&mut c, Duration::from_secs(60), loaded));
+    // Same chunks, both meshers: greedy must use fewer quads.
+    let positions: Vec<_> = c.store.positions().collect();
+    let (mut simple, mut greedy) = (0usize, 0usize);
+    for &p in &positions {
+        let pc = PaddedChunk::capture(&c.store, p);
+        simple += mesh_chunk_with(Mesher::Simple, &reg, &pc).quad_count();
+        greedy += mesh_chunk_with(Mesher::Greedy, &reg, &pc).quad_count();
+    }
+    assert!(simple > 0 && greedy < simple, "greedy {greedy} vs simple {simple}");
+
+    // Switching the client's mesher re-meshes everything it has loaded.
+    let before = c.stats.meshes_built;
+    c.set_mesher(Mesher::Greedy);
+    assert!(pump_until(&mut c, Duration::from_secs(60), |c| c.is_idle()));
+    assert!(c.stats.meshes_built > before, "switching mesher should rebuild meshes");
 }

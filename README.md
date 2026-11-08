@@ -43,7 +43,7 @@ cargo run --release --bin headless   # stream, mesh, edit; prints stats + an ASC
 1. **Renderer**: `wgpu` + `winit`, pooled vertex buffers, one shared static index buffer
    (`mesh::quad_indices`), opaque → cutout → translucent, ASTC/ETC2 texture array, fog.
 2. **Lighting**: vertices carry sky/block light fields but values are placeholders.
-3. **Greedy meshing**: currently one quad per visible face. Top faces merge well.
+3. **Greedy meshing**: implemented as a hybrid (see below) but not the default mesher yet.
 4. **LOD meshing**: `lod::select` picks nodes; downsampled meshing + seam handling is not written.
 5. **Server**: no reach/anti-cheat checks, undo history is global not per-player, autosave
    blocks the tick, events outside sim distance are dropped instead of re-scanned.
@@ -105,7 +105,14 @@ fill the frame), so use the menu's VSYNC toggle to read uncapped FPS when compar
 The overlay's MAIN THREAD line is the render thread's own CPU use: near 100% = CPU-bound,
 low with low FPS = GPU-bound.
 
-Measured on a mid-range phone, fog off, flying over terrain (GPU time of the main pass):
+Uncapped measurements on a mid-range phone (VSYNC off, same camera): render distance 10, GPU time
+by CULL mode: OFF 26.0 ms (37 fps, 1000 chunks drawn), BACK 17.2 ms, FRUST 9.6 ms (85 fps, 318 drawn),
+ALL 9.8 ms. Render distance 12: OFF 22.3 ms, BACK 22.2 ms, FRUST 9.5 ms (95 fps, 445 drawn), ALL 8.8 ms.
+So frustum culling is worth about 2.5x, back-face culling adds little on top of it, GPU time tracks the
+number of chunks drawn (about 20-30 microseconds each), and the main thread sits at 35-40% of a core, i.e.
+the GPU is the bottleneck and geometry per chunk is what to cut.
+
+Measured earlier on a mid-range phone, fog off, flying over terrain (GPU time of the main pass):
 render distance 6 = 7.1 ms (43% busy), 8 = 11.7 ms (70%), 10 = 12.9 ms (77%), 12 = 16.7 ms
 (94%, 56 fps). CPU stayed near 5% of the device; memory 100-220 MB. The renderer is GPU-bound,
 so the next wins after frustum culling are occlusion culling, then LOD meshes.
@@ -113,12 +120,30 @@ so the next wins after frustum culling are occlusion culling, then LOD meshes.
 Renderer gaps: pooled vertex buffers, occlusion culling, texture array
 (colours come from a palette keyed by texture name), render-scale governor hookup, LOD meshing.
 
+## Greedy meshing (`greedy.rs`)
+
+A hybrid bit-mask greedy mesher, written from the published "binary greedy meshing" idea
+(cgerikj's repository, MIT, and the 0fps article). Full opaque cubes are found with one 64-bit
+integer per column, visible faces with shifts and masks, and same-texture faces merge into
+rectangles. Slabs, water and leaves keep using the per-face mesher, and three occupancy masks
+(full / bottom-anchored / top-anchored) reproduce the slab hiding rules exactly. Only fully lit
+faces merge, because a merged quad can't hold per-corner ambient occlusion. Merged quads are
+flagged so the shader grows them by 0.002 blocks, hiding T-junction cracks.
+
+The tests prove the greedy and simple meshers cover exactly the same unit faces (random blocky
+scenes, flat plates, slab neighbours and real generated terrain) and that every triangle is
+wound outward. The menu's MESH row switches between them at runtime (default SIMPLE until it has
+been checked on a phone); the overlay's QUADS line shows the result. The headless demo prints
+quad counts and meshing time for both.
+
+Not yet done: iterate only the non-eligible voxels in the per-face path (it still scans all 32^3),
+draw one instance per quad (8 bytes instead of 32), texture repeat across merged quads.
+
 ## Planned next
 
-1. **Binary greedy mesher** (next version). Detect visible faces with per-row bitmasks and merge
-   coplanar faces of the same block into large quads. Expected to cut vertex count and meshing
-   time sharply on flat terrain. Needs a policy for per-vertex AO and light (merge only faces
-   whose AO/light match, or move AO into a texture); slab/partial blocks keep the per-face path.
+
+1. Flip the default mesher to GREEDY once it has been checked on a phone; then one instance per
+   quad (8 bytes) and a faster scan for the per-face path.
 2. Occlusion culling (cave-style flood fill) to skip chunks hidden behind terrain, which should
    help most underground.
 3. LOD meshes behind the (currently inert) LOD distance setting.

@@ -151,6 +151,7 @@ pub struct Gfx {
     instance_buf: wgpu::Buffer,
     chunks: HashMap<ChunkPos, GpuChunk>,
     last_drawn: usize,
+    last_quads: u64,
     palette: [[f32; 4]; 32],
 }
 
@@ -308,6 +309,7 @@ impl Gfx {
             instance_buf,
             chunks: HashMap::new(),
             last_drawn: 0,
+            last_quads: 0,
             palette: build_palette(reg),
         })
     }
@@ -345,6 +347,11 @@ impl Gfx {
     /// Chunk meshes drawn last frame (after distance and frustum culling).
     pub fn drawn_chunks(&self) -> usize {
         self.last_drawn
+    }
+
+    /// Quads in those meshes: what greedy meshing is meant to reduce.
+    pub fn drawn_quads(&self) -> u64 {
+        self.last_quads
     }
 
     /// Newest GPU frame time in ms, if the device supports timing and a result arrived.
@@ -480,6 +487,7 @@ impl Gfx {
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame") });
+        let mut quads = 0u64;
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("main pass"),
@@ -517,6 +525,7 @@ impl Gfx {
                 if let Some(layer) = self.chunks.get(pos).and_then(|c| c.solid.as_ref()) {
                     pass.set_vertex_buffer(0, layer.buf.slice(..));
                     pass.draw_indexed(0..layer.quads.min(MAX_QUADS) * 6, 0, i as u32..i as u32 + 1);
+                    quads += layer.quads as u64;
                 }
             }
 
@@ -526,6 +535,7 @@ impl Gfx {
                 if let Some(layer) = self.chunks.get(pos).and_then(|c| c.water.as_ref()) {
                     pass.set_vertex_buffer(0, layer.buf.slice(..));
                     pass.draw_indexed(0..layer.quads.min(MAX_QUADS) * 6, 0, i as u32..i as u32 + 1);
+                    quads += layer.quads as u64;
                 }
             }
 
@@ -537,6 +547,7 @@ impl Gfx {
                 pass.draw(0..hud_verts as u32, 0..1);
             }
         }
+        self.last_quads = quads;
         if let Some(t) = self.timer.as_mut() {
             t.encode(&mut encoder);
         }

@@ -14,6 +14,7 @@ pub mod chunk;
 pub mod client;
 pub mod coords;
 pub mod governor;
+pub mod greedy;
 pub mod jobs;
 pub mod lod;
 pub mod mesh;

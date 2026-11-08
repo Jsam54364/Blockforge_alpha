@@ -77,12 +77,14 @@ pub struct Settings {
     pub cull: CullMode,
     /// true = FIFO (capped at the display refresh); false = uncapped, for measuring.
     pub vsync: bool,
+    /// true = bit-mask greedy mesher for full opaque cubes; false = one quad per face.
+    pub greedy: bool,
     pub show_stats: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { render_chunks: 6, lod_chunks: 16, fog: true, cull: CullMode::All, vsync: true, show_stats: true }
+        Settings { render_chunks: 6, lod_chunks: 16, fog: true, cull: CullMode::All, vsync: true, greedy: false, show_stats: true }
     }
 }
 
@@ -96,6 +98,7 @@ pub enum Action {
     ToggleFog,
     CycleCull,
     ToggleVsync,
+    ToggleMesher,
     ToggleStats,
 }
 
@@ -195,8 +198,9 @@ pub fn stats_lines(perf: &Perf) -> Vec<String> {
     if let Some(m) = perf.mem_mb {
         v.push(format!("MEM {:.0}MB", m));
     }
-    v.push(format!("CHUNKS {}  MESHED {}", perf.chunks, perf.meshes));
+    v.push(format!("CHUNKS {}", perf.chunks));
     v.push(format!("DRAWN {}/{}", perf.drawn, perf.meshes));
+    v.push(format!("QUADS {}", perf.quads));
     v.push(format!("PRESENT {}", perf.present_mode));
     v
 }
@@ -261,6 +265,10 @@ impl Ui {
             }
             Action::ToggleVsync => {
                 self.settings.vsync = !self.settings.vsync;
+                false
+            }
+            Action::ToggleMesher => {
+                self.settings.greedy = !self.settings.greedy;
                 false
             }
             Action::ToggleStats => {
@@ -338,7 +346,7 @@ impl Ui {
         let pad = 8.0 * dp;
         let bw = 48.0 * dp;
         let gap = 6.0 * dp;
-        let rows = 6usize;
+        let rows = 5usize; // two stepper rows + three rows of two toggle buttons
         // Rows shrink (down to button height) on short screens so the panel stays visible.
         let avail = self.size.1 - top - 8.0 * dp;
         let row_h = (56.0 * dp).min((avail - pad * 2.0) / rows as f32).max(bw);
@@ -355,52 +363,50 @@ impl Ui {
         let minus_x = x0 + panel_w - pad - 2.0 * bw - gap;
         let plus_x = x0 + panel_w - pad - bw;
 
-        for i in 0..rows {
+        // Rows 0 and 1: label, value and -/+ buttons.
+        for i in 0..2usize {
             let ry = top + pad + row_h * i as f32;
             let by = ry + (row_h - bw) * 0.5;
             let ty = ry + (row_h - 7.0 * px) * 0.5;
-            match i {
-                0 => {
-                    text(out, label_x, ty, px, "REND", WHITE);
-                    text(out, value_x, ty, px, &s.render_chunks.to_string(), WHITE);
-                    self.button(out, minus_x, by, bw, bw, "-", px, Action::RenderDist(-1));
-                    self.button(out, plus_x, by, bw, bw, "+", px, Action::RenderDist(1));
-                }
-                1 => {
-                    text(out, label_x, ty, px, "LOD", WHITE);
-                    let v = s.lod_chunks.to_string();
-                    text(out, value_x, ty, px, &v, WHITE);
-                    // Honest label: the setting exists but nothing uses it yet.
-                    text(out, value_x + text_width(px, "00") + 10.0 * dp, ty, px, "SOON", DIM);
-                    self.button(out, minus_x, by, bw, bw, "-", px, Action::LodDist(-1));
-                    self.button(out, plus_x, by, bw, bw, "+", px, Action::LodDist(1));
-                }
-                2 => {
-                    text(out, label_x, ty, px, "FOG", WHITE);
-                    let label = if s.fog { "ON" } else { "OFF" };
-                    self.button(out, minus_x, by, 2.0 * bw + gap, bw, label, px, Action::ToggleFog);
-                }
-                3 => {
-                    text(out, label_x, ty, px, "CULL", WHITE);
-                    self.button(out, minus_x, by, 2.0 * bw + gap, bw, s.cull.label(), px, Action::CycleCull);
-                }
-                4 => {
-                    text(out, label_x, ty, px, "VSYNC", WHITE);
-                    let label = if !self.vsync_supported {
-                        "N/A"
-                    } else if s.vsync {
-                        "ON"
-                    } else {
-                        "OFF"
-                    };
-                    self.button(out, minus_x, by, 2.0 * bw + gap, bw, label, px, Action::ToggleVsync);
-                }
-                _ => {
-                    text(out, label_x, ty, px, "STATS", WHITE);
-                    let label = if s.show_stats { "ON" } else { "OFF" };
-                    self.button(out, minus_x, by, 2.0 * bw + gap, bw, label, px, Action::ToggleStats);
-                }
+            if i == 0 {
+                text(out, label_x, ty, px, "REND", WHITE);
+                text(out, value_x, ty, px, &s.render_chunks.to_string(), WHITE);
+                self.button(out, minus_x, by, bw, bw, "-", px, Action::RenderDist(-1));
+                self.button(out, plus_x, by, bw, bw, "+", px, Action::RenderDist(1));
+            } else {
+                text(out, label_x, ty, px, "LOD", WHITE);
+                let v = s.lod_chunks.to_string();
+                text(out, value_x, ty, px, &v, WHITE);
+                // Honest label: the setting exists but nothing uses it yet.
+                text(out, value_x + text_width(px, "00") + 10.0 * dp, ty, px, "SOON", DIM);
+                self.button(out, minus_x, by, bw, bw, "-", px, Action::LodDist(-1));
+                self.button(out, plus_x, by, bw, bw, "+", px, Action::LodDist(1));
             }
+        }
+
+        // Rows 2-4: toggles in two columns; each button carries its own label.
+        let on_off = |b: bool| if b { "ON" } else { "OFF" };
+        let vsync_label = if !self.vsync_supported { "N/A" } else { on_off(s.vsync) };
+        let toggles: [(Action, String); 5] = [
+            (Action::ToggleFog, format!("FOG {}", on_off(s.fog))),
+            (Action::CycleCull, format!("CULL {}", s.cull.label())),
+            (Action::ToggleVsync, format!("VSYNC {}", vsync_label)),
+            (Action::ToggleMesher, format!("MESH {}", if s.greedy { "GREEDY" } else { "SIMPLE" })),
+            (Action::ToggleStats, format!("STATS {}", on_off(s.show_stats))),
+        ];
+        let cell_w = (panel_w - pad * 3.0) / 2.0;
+        for (i, (action, label)) in toggles.iter().enumerate() {
+            let row = 2 + i / 2;
+            let col = i % 2;
+            let x = x0 + pad + col as f32 * (cell_w + pad);
+            let ry = top + pad + row_h * row as f32;
+            let by = ry + (row_h - bw) * 0.5;
+            // Shrink the text (in whole font pixels) if the label wouldn't fit its button.
+            let mut tpx = px;
+            while tpx > 2.0 && text_width(tpx, label) > cell_w * 0.94 {
+                tpx -= 1.0;
+            }
+            self.button(out, x, by, cell_w, bw, label, tpx, *action);
         }
     }
 }
@@ -452,6 +458,7 @@ mod tests {
             Action::ToggleFog,
             Action::CycleCull,
             Action::ToggleVsync,
+            Action::ToggleMesher,
             Action::ToggleStats,
         ] {
             let (x, y) = center_of(&u, a);
@@ -564,6 +571,34 @@ mod tests {
     }
 
     #[test]
+    fn mesher_toggle_flips() {
+        let mut u = ui();
+        assert!(!u.settings.greedy);
+        assert!(!u.apply(Action::ToggleMesher), "it never asks the server for anything");
+        assert!(u.settings.greedy);
+        u.apply(Action::ToggleMesher);
+        assert!(!u.settings.greedy);
+    }
+
+    #[test]
+    fn every_toggle_label_fits_its_button() {
+        // Longest labels in the grid, at the default density.
+        let mut u = ui();
+        u.menu_open = true;
+        u.settings.cull = CullMode::Frustum;
+        u.settings.greedy = true;
+        build(&mut u);
+        let panel_w = 360.0 * 2.75;
+        let cell_w = (panel_w - 8.0 * 2.75 * 3.0) / 2.0;
+        let px = (2.5f32 * 2.75).round();
+        let mut tpx = px;
+        while tpx > 2.0 && text_width(tpx, "MESH GREEDY") > cell_w * 0.94 {
+            tpx -= 1.0;
+        }
+        assert!(tpx >= 4.0, "label would shrink to {tpx}px");
+    }
+
+    #[test]
     fn toggles_flip() {
         let mut u = ui();
         u.apply(Action::ToggleFog);
@@ -593,6 +628,7 @@ mod tests {
         p.chunks = 885;
         p.meshes = 312;
         p.main_thread = Some(0.42);
+        p.quads = 123_456;
         p.present_mode = "IMMEDIATE";
         let mut all = stats_lines(&p);
         p.cpu_cores = None;
@@ -604,7 +640,7 @@ mod tests {
                 assert!(font::has_art(c), "no glyph for {c:?} in {line:?}");
             }
         }
-        for s in ["REND", "LOD", "FOG", "CULL", "ALL", "FRUST", "BACK", "VSYNC", "N/A", "STATS", "SOON", "ON", "OFF", "+", "-"] {
+        for s in ["REND", "LOD", "FOG", "CULL", "ALL", "FRUST", "BACK", "VSYNC", "N/A", "MESH", "GREEDY", "SIMPLE", "QUADS", "STATS", "SOON", "ON", "OFF", "+", "-"] {
             assert!(s.chars().all(font::has_art), "{s}");
         }
     }

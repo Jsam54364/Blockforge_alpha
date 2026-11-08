@@ -14,7 +14,7 @@ use std::sync::Arc;
 use crate::block::BlockState;
 use crate::coords::{BlockPos, ChunkPos, Face, CHUNK_SIZE};
 use crate::jobs::JobPool;
-use crate::mesh::{mesh_chunk, ChunkMesh, PaddedChunk};
+use crate::mesh::{mesh_chunk_with, ChunkMesh, Mesher, PaddedChunk};
 use crate::protocol::{ClientMsg, Endpoint, ServerMsg};
 use crate::registry::BlockRegistry;
 use crate::world::ChunkStore;
@@ -23,6 +23,7 @@ struct MeshJob {
     pos: ChunkPos,
     version: u64,
     snapshot: PaddedChunk,
+    mesher: Mesher,
 }
 
 struct MeshResult {
@@ -57,6 +58,8 @@ pub struct Client {
     workers: usize,
     /// Max mesh jobs submitted per `update()`, to spread snapshot cost over frames.
     pub mesh_budget: usize,
+    /// Which mesher new jobs use. Change it with `set_mesher` so existing chunks are redone.
+    pub mesher: Mesher,
 }
 
 impl Client {
@@ -78,6 +81,7 @@ impl Client {
             tick_hz: 20,
             workers: workers.max(1),
             mesh_budget: 8,
+            mesher: Mesher::Simple,
         }
     }
 
@@ -130,6 +134,19 @@ impl Client {
         self.collect_mesh_results();
     }
 
+    /// Switches mesher and re-meshes every loaded chunk with it (old meshes stay on screen
+    /// until their replacements arrive).
+    pub fn set_mesher(&mut self, m: Mesher) {
+        if self.mesher == m {
+            return;
+        }
+        self.mesher = m;
+        let all: Vec<ChunkPos> = self.store.positions().collect();
+        for p in all {
+            self.mark_dirty(p);
+        }
+    }
+
     /// Nothing waiting to be meshed and nothing in flight.
     pub fn is_idle(&self) -> bool {
         self.dirty.is_empty() && self.pool.as_ref().map_or(true, |p| p.in_flight() == 0)
@@ -167,7 +184,7 @@ impl Client {
                         let reg = Arc::new(reg);
                         let for_workers = reg.clone();
                         self.pool = Some(JobPool::new(self.workers, move |job: MeshJob| {
-                            let mesh = mesh_chunk(&for_workers, &job.snapshot);
+                            let mesh = mesh_chunk_with(job.mesher, &for_workers, &job.snapshot);
                             MeshResult { pos: job.pos, version: job.version, mesh }
                         }));
                         self.registry = Some(reg);
@@ -256,7 +273,7 @@ impl Client {
             }
             let version = self.versions.get(&p).copied().unwrap_or(0);
             let snapshot = PaddedChunk::capture(&self.store, p);
-            pool.submit(MeshJob { pos: p, version, snapshot }, d.min(u32::MAX as i64) as u32);
+            pool.submit(MeshJob { pos: p, version, snapshot, mesher: self.mesher }, d.min(u32::MAX as i64) as u32);
         }
     }
 
