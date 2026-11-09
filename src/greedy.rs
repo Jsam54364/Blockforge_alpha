@@ -11,14 +11,17 @@
 //!   shapes keep using the per-face mesher in `mesh.rs`, which still decides how they interact
 //!   with these cubes. The occupancy masks below encode exactly the same hiding rules as
 //!   `mesh::face_hidden`, and the tests prove both meshers cover the same unit faces.
-//! * A merged quad has no interior vertices, so it cannot carry varying ambient occlusion. Only
-//!   faces whose four corners are fully lit merge; shaded faces stay unit quads.
+//! * A merged quad has no interior vertices, so it cannot carry ambient occlusion that varies
+//!   along the merge. Faces therefore merge only when their per-corner AO is identical AND
+//!   unchanged across the merge direction (a straight cliff foot, with its dark bottom corners,
+//!   merges along the cliff; a face shaded diagonally stays a unit quad). Linear interpolation
+//!   across such a quad gives exactly the shading the individual faces had.
 //! * Merged quads are flagged so the vertex shader can grow them by a sliver, which hides the
 //!   pixel cracks that T-junctions against smaller neighbours would otherwise show.
 
 use crate::block::{BlockState, UNKNOWN};
 use crate::coords::{Face, CHUNK_SIZE};
-use crate::mesh::{corner_ao, emit_quad, ChunkMesh, MeshLayer, PackedVertex, PaddedChunk, FACE_CORNERS};
+use crate::mesh::{corner_ao, ChunkMesh, MeshLayer, PackedVertex, PaddedChunk, FACE_CORNERS};
 use crate::registry::{BlockRegistry, RenderLayer};
 
 const N: usize = CHUNK_SIZE as usize; // 32
@@ -136,6 +139,11 @@ fn mesh_direction(
     let axis = d / 2; // 0 = X, 1 = Y, 2 = Z
     let t1 = (axis + 1) % 3; // merge plane axes: u along t1, v along t2
     let t2 = (axis + 2) % 3;
+    // Which entry of FACE_CORNERS sits at (u side, v side) of the face.
+    let mut corner_at = [[0usize; 2]; 2];
+    for (i, c) in FACE_CORNERS[d].iter().enumerate() {
+        corner_at[c[t1] as usize][c[t2] as usize] = i;
+    }
 
     // 1. Visible faces for whole columns at once; scatter them into per-slice planes.
     for x in 1..=N {
@@ -160,14 +168,12 @@ fn mesh_direction(
                 let tex = def.tex[d];
                 let emission = def.light_emission;
                 let ao = corner_ao(reg, pc, cx, cy, cz, face);
-                if ao != [3u8; 4] {
-                    // Shaded: keep as a unit quad so its per-corner AO survives.
-                    emit_quad(&mut out.opaque, face, cx * 4, cy * 4, cz * 4, 0, 4, ao, tex, 15, emission);
-                } else {
-                    let row = c[axis] * N + c[t2];
-                    rows[row] |= 1u32 << c[t1];
-                    keys[row * N + c[t1]] = tex as u32 | ((emission as u32) << 16);
-                }
+                // Key = texture | emission | AO of the four corners (2 bits each, in
+                // FACE_CORNERS order). Faces merge only if their keys are equal.
+                let sig = ao[0] as u32 | ((ao[1] as u32) << 2) | ((ao[2] as u32) << 4) | ((ao[3] as u32) << 6);
+                let row = c[axis] * N + c[t2];
+                rows[row] |= 1u32 << c[t1];
+                keys[row * N + c[t1]] = tex as u32 | ((emission as u32) << 16) | (sig << 24);
             }
         }
     }
@@ -182,15 +188,19 @@ fn mesh_direction(
                 // Longest run of adjacent visible faces starting at u0 ...
                 let run = (row >> u0).trailing_ones() as usize;
                 let key = keys[(base + v) * N + u0];
-                // ... shortened to the part sharing the first face's texture.
+                let (same_along_u, same_along_v) = ao_symmetry(key >> 24, &corner_at);
+                // ... shortened to the part sharing the first face's key, and only if widening
+                // cannot change the shading.
                 let mut w = 1;
-                while w < run && keys[(base + v) * N + u0 + w] == key {
-                    w += 1;
+                if same_along_u {
+                    while w < run && keys[(base + v) * N + u0 + w] == key {
+                        w += 1;
+                    }
                 }
                 let mask: u32 = if w == 32 { u32::MAX } else { ((1u32 << w) - 1) << u0 };
                 // Grow downward while the whole run is visible with the same texture.
                 let mut h = 1;
-                while v + h < N {
+                while same_along_v && v + h < N {
                     let r = base + v + h;
                     if rows[r] & mask != mask {
                         break;
@@ -207,6 +217,16 @@ fn mesh_direction(
             }
         }
     }
+}
+
+/// For an AO signature (see the key layout above): is the shading unchanged along the face's
+/// u axis, and along its v axis? Only then can faces merge in that direction without changing
+/// how they are lit.
+fn ao_symmetry(sig: u32, corner_at: &[[usize; 2]; 2]) -> (bool, bool) {
+    let ao = |cu: usize, cv: usize| (sig >> (2 * corner_at[cu][cv])) & 3;
+    let along_u = ao(0, 0) == ao(1, 0) && ao(0, 1) == ao(1, 1);
+    let along_v = ao(0, 0) == ao(0, 1) && ao(1, 0) == ao(1, 1);
+    (along_u, along_v)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -226,18 +246,27 @@ fn emit_merged(
     let t2 = (axis + 2) % 3;
     let tex = (key & 0xFFFF) as u16;
     let emission = (key >> 16) as u8;
+    let sig = key >> 24;
+    let ao_of = |i: usize| ((sig >> (2 * i)) & 3) as u8;
     let grows = w > 1 || h > 1;
-    for c in FACE_CORNERS[d].iter() {
+    let mut verts = [PackedVertex::default(); 4];
+    for (i, c) in FACE_CORNERS[d].iter().enumerate() {
         let mut p = [0i32; 3];
         // c[axis] is 1 on the positive face and 0 on the negative one.
         p[axis] = (slice as i32 + c[axis]) * 4;
         p[t1] = (u0 as i32 + c[t1] * w as i32) * 4;
         p[t2] = (v0 as i32 + c[t2] * h as i32) * 4;
-        let mut vertex = PackedVertex::pack(p[0] as u32, p[1] as u32, p[2] as u32, face, 3, tex, 15, emission);
+        let mut vertex =
+            PackedVertex::pack(p[0] as u32, p[1] as u32, p[2] as u32, face, ao_of(i), tex, 15, emission);
         if grows {
             vertex = vertex.with_grow(c[t1] == 1, c[t2] == 1);
         }
-        layer.vertices.push(vertex);
+        verts[i] = vertex;
+    }
+    // Same diagonal rule as the per-face mesher (rotating the order flips the split).
+    let order: [usize; 4] = if ao_of(0) + ao_of(2) >= ao_of(1) + ao_of(3) { [0, 1, 2, 3] } else { [1, 2, 3, 0] };
+    for &i in &order {
+        layer.vertices.push(verts[i]);
     }
 }
 
@@ -295,11 +324,14 @@ mod tests {
                 let lo = |a: usize| q.iter().map(|v| coord(v, a)).min().unwrap();
                 let hi = |a: usize| q.iter().map(|v| coord(v, a)).max().unwrap();
                 let (plane, a0, a1, b0, b1) = (lo(axis), lo(t1), hi(t1), lo(t2), hi(t2));
+                // AO by corner position (u side, v side), not as a sorted bag, so a mix-up
+                // between corners would be caught.
                 let mut ao = [0u32; 4];
-                for (i, v) in q.iter().enumerate() {
-                    ao[i] = v.ao();
+                for v in q.iter() {
+                    let su = (coord(v, t1) == a1) as usize;
+                    let sv = (coord(v, t2) == b1) as usize;
+                    ao[su + 2 * sv] = v.ao();
                 }
-                ao.sort_unstable();
                 let (la, lb) = (a1 - a0, b1 - b0);
                 let rec = |a_min, b_min, a_len, b_len| Rec {
                     layer: li as u8,
@@ -538,6 +570,58 @@ mod tests {
             }
         }
         assert!(merged_seen > 0, "the scene should contain merged quads");
+    }
+
+    #[test]
+    fn a_straight_cliff_foot_merges_along_the_cliff_despite_its_shading() {
+        let r = reg();
+        let s = stone(&r);
+        // A plateau over half the plate: a straight riser along x = 16 whose bottom corners are
+        // shaded (dark at the foot of the cliff). Only the ends of the strip differ.
+        let mut pc = plate(|_, _| s);
+        for z in 0..CHUNK_SIZE {
+            for x in 0..16 {
+                pc.set(x, 16, z, s);
+            }
+        }
+        let g = mesh_chunk_greedy(&r, &pc);
+        let riser_quads: Vec<&[PackedVertex]> = g
+            .opaque
+            .vertices
+            .chunks(4)
+            .filter(|q| {
+                q[0].face_index() == Face::PosX as u32
+                    && q.iter().all(|v| v.x() == 64 && v.y() >= 64 && v.y() <= 68)
+            })
+            .collect();
+        assert!(riser_quads.len() <= 3, "riser used {} quads instead of merging", riser_quads.len());
+        let longest = riser_quads
+            .iter()
+            .map(|q| q.iter().map(|v| v.z()).max().unwrap() - q.iter().map(|v| v.z()).min().unwrap())
+            .max()
+            .unwrap();
+        assert!(longest >= 29 * 4, "longest merged riser spans only {longest} quarter units");
+        assert_same(&r, &pc, "plateau");
+        assert_outward(&g);
+    }
+
+    #[test]
+    fn ao_symmetry_flags_follow_the_signature() {
+        // Corner order for a +Y face is c0=(0,1,1) c1=(1,1,1) c2=(1,1,0) c3=(0,1,0); there the
+        // merge axes are u = z (t1) and v = x (t2), so corner_at[cu][cv] with cu = z side, cv = x side.
+        let (t1, t2) = (2usize, 0usize);
+        let mut corner_at = [[0usize; 2]; 2];
+        for (i, c) in FACE_CORNERS[Face::PosY.index()].iter().enumerate() {
+            corner_at[c[t1] as usize][c[t2] as usize] = i;
+        }
+        let sig = |ao: [u32; 4]| ao[0] | (ao[1] << 2) | (ao[2] << 4) | (ao[3] << 6);
+        // Uniform shading is symmetric both ways.
+        assert_eq!(ao_symmetry(sig([3, 3, 3, 3]), &corner_at), (true, true));
+        // c1 and c2 are the two corners on the x = 1 edge. Dark there, bright on the x = 0 edge:
+        // unchanged along z (u), changing along x (v).
+        assert_eq!(ao_symmetry(sig([3, 1, 1, 3]), &corner_at), (true, false));
+        // A diagonal pattern is symmetric along neither axis.
+        assert_eq!(ao_symmetry(sig([1, 3, 1, 3]), &corner_at), (false, false));
     }
 
     #[test]

@@ -126,9 +126,12 @@ A hybrid bit-mask greedy mesher, written from the published "binary greedy meshi
 (cgerikj's repository, MIT, and the 0fps article). Full opaque cubes are found with one 64-bit
 integer per column, visible faces with shifts and masks, and same-texture faces merge into
 rectangles. Slabs, water and leaves keep using the per-face mesher, and three occupancy masks
-(full / bottom-anchored / top-anchored) reproduce the slab hiding rules exactly. Only fully lit
-faces merge, because a merged quad can't hold per-corner ambient occlusion. Merged quads are
-flagged so the shader grows them by 0.002 blocks, hiding T-junction cracks.
+(full / bottom-anchored / top-anchored) reproduce the slab hiding rules exactly. Faces merge only
+when their per-corner ambient occlusion is identical and unchanged along the merge direction, which
+is lossless: a straight cliff foot merges along the cliff, a diagonally shaded face stays a unit quad.
+(The first version merged only fully lit faces and saved just ~11% of quads on terraced terrain,
+because nearly every terrace face touches ground and is shaded.) Merged quads are flagged so the
+shader grows them by 0.002 blocks, hiding T-junction cracks.
 
 The tests prove the greedy and simple meshers cover exactly the same unit faces (random blocky
 scenes, flat plates, slab neighbours and real generated terrain) and that every triangle is
