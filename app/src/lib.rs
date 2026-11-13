@@ -12,6 +12,7 @@ mod glyphs;
 mod gpu_timer;
 mod math;
 mod perf;
+mod sky;
 mod texgen;
 mod textures;
 mod tint;
@@ -131,6 +132,7 @@ impl ApplicationHandler for App {
                         vsync: settings.vsync,
                         fog_start,
                         fog_end,
+                        time_of_day: self.game.clock.hours(),
                     };
                     match g.render(&mut self.game.client, &self.game.cam, view_blocks, &opts, &self.hud) {
                         Ok(display_wait) => {

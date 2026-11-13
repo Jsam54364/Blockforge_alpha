@@ -23,7 +23,8 @@ use blockforge::server::{self, ServerConfig, ServerHandle};
 use blockforge::worldgen::{GroundInfo, WorldGen, WORLDGEN_VERSION};
 use winit::event::TouchPhase;
 
-use crate::ui::{Ui, LOD_DISTANCES, LOD_QUALITY};
+use crate::sky::Clock;
+use crate::ui::{Action, Ui, LOD_DISTANCES, LOD_QUALITY};
 
 const LOOK_SENS: f32 = 0.0045;
 const FLY_SPEED: f32 = 14.0;
@@ -118,6 +119,8 @@ pub struct Game {
     pub cam: CameraView,
     pub size: (u32, u32),
     pub ui: Ui,
+    /// The time of day (the sky's sun follows it).
+    pub clock: Clock,
     /// Touches that started on a HUD button; they never reach the game controls.
     ui_touches: HashSet<u64>,
     touches: HashMap<u64, TouchInfo>,
@@ -136,6 +139,8 @@ impl Game {
         let saved = state_path.as_ref().and_then(|p| std::fs::read_to_string(p).ok()).unwrap_or_default();
         let mut ui = Ui::new();
         ui.settings.apply_text(&saved);
+        let clock = Clock::from_text(&saved);
+        ui.hours = clock.hours();
         // A camera saved in a world from an older generator would be over different ground:
         // start over at the spawn (that world's save is kept, under its own name).
         let same_world = saved_generator(&saved) == WORLDGEN_VERSION;
@@ -169,6 +174,7 @@ impl Game {
             cam,
             size: (1, 1),
             ui,
+            clock,
             ui_touches: HashSet::new(),
             touches: HashMap::new(),
             stone,
@@ -190,7 +196,12 @@ impl Game {
 
     fn save_state(&self) {
         let Some(path) = &self.state_path else { return };
-        let text = format!("{}{}gen={WORLDGEN_VERSION}\n", self.ui.settings.to_text(), self.cam.to_text());
+        let text = format!(
+            "{}{}{}gen={WORLDGEN_VERSION}\n",
+            self.ui.settings.to_text(),
+            self.cam.to_text(),
+            self.clock.to_text()
+        );
         let tmp = path.with_extension("tmp");
         if std::fs::write(&tmp, text).is_ok() {
             let _ = std::fs::rename(&tmp, path);
@@ -262,6 +273,8 @@ impl Game {
         let now = Instant::now();
         let dt = now.duration_since(self.last_update).as_secs_f32().min(0.1);
         self.last_update = now;
+        self.clock.advance(dt as f64);
+        self.ui.hours = self.clock.hours();
 
         let (strafe, forward) = self.stick();
         let f = self.cam.forward();
@@ -288,6 +301,10 @@ impl Game {
                     self.ui_touches.insert(id);
                     let greedy_before = self.ui.settings.greedy;
                     let menu_was_open = self.ui.menu_open;
+                    if let Action::Time(h) = action {
+                        self.clock.shift(h as f64);
+                        self.ui.hours = self.clock.hours();
+                    }
                     if self.ui.apply(action) {
                         self.client.set_view_distance(self.ui.settings.render_chunks);
                     }

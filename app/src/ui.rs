@@ -175,6 +175,8 @@ pub enum Action {
     ToggleVsync,
     ToggleMesher,
     ToggleStats,
+    /// Moves the time of day by this many hours (the game owns the clock and does it).
+    Time(i8),
 }
 
 struct Button {
@@ -190,6 +192,8 @@ pub struct Ui {
     pub menu_open: bool,
     /// False when the surface offers no uncapped present mode (the toggle then shows N/A).
     pub vsync_supported: bool,
+    /// The time of day shown in the menu (the game keeps it up to date).
+    pub hours: f64,
     size: (f32, f32),
     dp: f32,
     buttons: Vec<Button>,
@@ -304,6 +308,7 @@ impl Ui {
             settings: Settings::default(),
             menu_open: false,
             vsync_supported: true,
+            hours: crate::sky::START_HOUR,
             size: (1.0, 1.0),
             dp: 1.0,
             buttons: Vec::new(),
@@ -366,6 +371,7 @@ impl Ui {
                 self.settings.show_stats = !self.settings.show_stats;
                 false
             }
+            Action::Time(_) => false,
         }
     }
 
@@ -437,7 +443,7 @@ impl Ui {
         let pad = 8.0 * dp;
         let bw = 48.0 * dp;
         let gap = 6.0 * dp;
-        let rows = 5usize; // two stepper rows + three rows of two toggle buttons
+        let rows = 6usize; // three stepper rows + three rows of two toggle buttons
         // Rows shrink (down to button height) on short screens so the panel stays visible.
         let avail = self.size.1 - top - 8.0 * dp;
         let row_h = (56.0 * dp).min((avail - pad * 2.0) / rows as f32).max(bw);
@@ -454,8 +460,8 @@ impl Ui {
         let minus_x = x0 + panel_w - pad - 2.0 * bw - gap;
         let plus_x = x0 + panel_w - pad - bw;
 
-        // Rows 0 and 1: label, value and -/+ buttons.
-        for i in 0..2usize {
+        // Rows 0-2: label, value and -/+ buttons.
+        for i in 0..3usize {
             let ry = top + pad + row_h * i as f32;
             let by = ry + (row_h - bw) * 0.5;
             let ty = ry + (row_h - 7.0 * px) * 0.5;
@@ -464,15 +470,20 @@ impl Ui {
                 text(out, value_x, ty, px, &s.render_chunks.to_string(), WHITE);
                 self.button(out, minus_x, by, bw, bw, "-", px, Action::RenderDist(-1));
                 self.button(out, plus_x, by, bw, bw, "+", px, Action::RenderDist(1));
-            } else {
+            } else if i == 1 {
                 text(out, label_x, ty, px, "LOD", WHITE);
                 text(out, value_x, ty, px, &lod_label(s.lod_level), WHITE);
                 self.button(out, minus_x, by, bw, bw, "-", px, Action::LodDist(-1));
                 self.button(out, plus_x, by, bw, bw, "+", px, Action::LodDist(1));
+            } else {
+                text(out, label_x, ty, px, "TIME", WHITE);
+                text(out, value_x, ty, px, &crate::sky::time_label(self.hours), WHITE);
+                self.button(out, minus_x, by, bw, bw, "-", px, Action::Time(-1));
+                self.button(out, plus_x, by, bw, bw, "+", px, Action::Time(1));
             }
         }
 
-        // Rows 2-4: toggles in two columns; each button carries its own label.
+        // Rows 3-5: toggles in two columns; each button carries its own label.
         let on_off = |b: bool| if b { "ON" } else { "OFF" };
         let vsync_label = if !self.vsync_supported { "N/A" } else { on_off(s.vsync) };
         let toggles: [(Action, String); 6] = [
@@ -485,7 +496,7 @@ impl Ui {
         ];
         let cell_w = (panel_w - pad * 3.0) / 2.0;
         for (i, (action, label)) in toggles.iter().enumerate() {
-            let row = 2 + i / 2;
+            let row = 3 + i / 2;
             let col = i % 2;
             let x = x0 + pad + col as f32 * (cell_w + pad);
             let ry = top + pad + row_h * row as f32;
@@ -572,6 +583,8 @@ mod tests {
             Action::RenderDist(1),
             Action::LodDist(-1),
             Action::LodDist(1),
+            Action::Time(-1),
+            Action::Time(1),
             Action::ToggleFog,
             Action::CycleCull,
             Action::ToggleVsync,

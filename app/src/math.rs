@@ -85,8 +85,25 @@ pub fn perspective_reverse_z(fovy: f32, aspect: f32, near: f32) -> Mat4 {
 /// Clear value and comparison that go with `perspective_reverse_z`.
 pub const DEPTH_CLEAR: f32 = 0.0;
 
+/// Vertical field of view, radians.
+pub const FOVY: f32 = 1.1;
+
 pub fn view_proj(eye: [f32; 3], forward: [f32; 3], aspect: f32) -> Mat4 {
-    mul(&perspective_reverse_z(1.1, aspect, 0.1), &look_dir(eye, forward))
+    mul(&perspective_reverse_z(FOVY, aspect, 0.1), &look_dir(eye, forward))
+}
+
+/// For drawing the sky: the view ray through a screen point at (ndc x, ndc y) is
+/// `b[2] + x * b[0] + y * b[1]` (right and up scaled to the field of view, then forward).
+pub fn sky_basis(forward: [f32; 3], aspect: f32) -> [[f32; 4]; 3] {
+    let f = normalize(forward);
+    let s = normalize(cross(f, [0.0, 1.0, 0.0]));
+    let u = cross(s, f);
+    let t = (FOVY * 0.5).tan();
+    [
+        [s[0] * t * aspect, s[1] * t * aspect, s[2] * t * aspect, 0.0],
+        [u[0] * t, u[1] * t, u[2] * t, 0.0],
+        [f[0], f[1], f[2], 0.0],
+    ]
 }
 
 /// Six clip planes extracted from a view-projection matrix (Gribb-Hartmann), pointing
@@ -323,5 +340,19 @@ mod tests {
         // A point at the camera's x is dead centre.
         let c = project(&m, [10.0, 0.0, -5.0]);
         assert!((c[0] / c[3]).abs() < 1e-5);
+    }
+
+    #[test]
+    fn sky_rays_land_where_the_projection_puts_them() {
+        let eye = [10.0, 70.0, -5.0];
+        let fwd = [0.3, -0.2, 0.9];
+        let aspect = 2.2;
+        let vp = view_proj(eye, fwd, aspect);
+        let b = sky_basis(fwd, aspect);
+        for (x, y) in [(0.0, 0.0), (0.7, -0.4), (-0.95, 0.9)] {
+            let p: Vec<f32> = (0..3).map(|i| eye[i] + 50.0 * (b[2][i] + x * b[0][i] + y * b[1][i])).collect();
+            let c = transform(&vp, [p[0], p[1], p[2], 1.0]);
+            assert!((c[0] / c[3] - x).abs() < 1e-4 && (c[1] / c[3] - y).abs() < 1e-4, "{x},{y}: {c:?}");
+        }
     }
 }

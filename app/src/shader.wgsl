@@ -8,7 +8,6 @@
 struct Globals {
     view_proj: mat4x4<f32>,
     cam_pos: vec4<f32>,
-    fog_color: vec4<f32>,
     fog_params: vec4<f32>,   // x = fog start, y = fog end, z = alpha, w = aspect ratio
     screen: vec4<f32>,       // x = width px, y = height px
     flags: vec4<f32>,        // x = fog enabled, y = seconds, z = water texture layer, w = tint levels ready (bits)
@@ -16,6 +15,16 @@ struct Globals {
     lod_window: vec4<f32>,   // xy = chunk column at bit 0 of lod_mask
     lod_mask: array<vec4<u32>, 32>, // 64 x 64 bits: chunk columns drawn by real terrain
     tint_window: vec4<f32>,  // tint map level centres in blocks: x0, z0, x1, z1
+    // ---- The sky (see app/src/sky.rs) ----
+    sky_basis: array<vec4<f32>, 3>, // view rays: right, up (scaled to the field of view), forward
+    sun: vec4<f32>,          // xyz: towards the sun; w: how much of its disc shows
+    sun_color: vec4<f32>,    // rgb: direct sunlight; w: daylight (0 night .. 1 day)
+    moon: vec4<f32>,         // xyz: towards the moon; w: how much of its disc shows
+    sky_tint: vec4<f32>,     // x: the photographed sky's brightness; y: wide glow; z: glare; w: sunset colouring
+    glow: array<vec4<f32>, 4>, // glow around the sun: (a, w1), (c1, w2), (c2, -), (e, -)
+    face_light: array<vec4<f32>, 6>, // light on each face direction: sky + sun + moon
+    stars: vec4<f32>,        // xyz: the axis the stars turn around; w: how far they have turned
+    night: vec4<f32>,        // x: star visibility
 };
 
 @group(0) @binding(0) var<uniform> g: Globals;
@@ -25,6 +34,9 @@ struct Globals {
 // Biome colours (rgb) and brightness variation (a) around the camera; see gfx/tint.rs.
 @group(0) @binding(3) var tint_map: texture_2d_array<f32>;
 @group(0) @binding(4) var tint_sampler: sampler;
+// The photographed sky without its sun: upper half of an equirectangular image, mipmapped.
+@group(0) @binding(5) var sky_map: texture_2d<f32>;
+@group(0) @binding(6) var sky_sampler: sampler;
 
 struct VsIn {
     @location(0) packed: vec2<u32>,
@@ -94,15 +106,13 @@ fn vs_main(v: VsIn) -> VsOut {
     let blk = f32((b >> 20u) & 15u) / 15.0;
 
     let world = v.origin.xyz + local;
-    let n = face_normal(face);
-    let sun = normalize(vec3<f32>(0.4, 0.9, 0.3));
-    let diffuse = max(dot(n, sun), 0.0);
-    let light = 0.45 + 0.55 * diffuse;
     let ao_f = 0.55 + 0.15 * f32(ao);
 
     var o: VsOut;
     o.clip = g.view_proj * vec4<f32>(world, 1.0);
-    o.color = vec3<f32>(light * ao_f * max(sky, 0.25) + blk);
+    // Sky, sun and moon light for this face's direction (sky::face_light), dimmed by ambient
+    // occlusion and by how much sky the block sees; block light (glowstone) on top.
+    o.color = g.face_light[min(face, 5u)].rgb * (ao_f * max(sky, 0.25)) + vec3<f32>(blk);
     o.world = world;
     // Side faces: lift the texture so its top row starts at the quad's top (half-slabs).
     let lift = f32((b >> 27u) & 3u) * 0.25;
@@ -166,16 +176,62 @@ fn vs_lod(v: VsIn) -> VsOut {
         world.y -= WATER_SINK; // LOD water (its surface and the tops of its sides) sits as low as real water
     }
 
-    let n = face_normal(face);
-    let sun = normalize(vec3<f32>(0.4, 0.9, 0.3));
-    let light = 0.45 + 0.55 * max(dot(n, sun), 0.0);
     o.clip = g.view_proj * vec4<f32>(world, 1.0);
-    o.color = vec3<f32>(light);
+    o.color = g.face_light[min(face, 5u)].rgb;
     o.world = world;
     o.uv = face_uv(face, world - vec3<f32>(v.origin.x, 0.0, v.origin.y));
     o.layer = tex;
     o.face = face;
     return o;
+}
+
+// ---- Sky ----
+const PI: f32 = 3.14159265;
+// The glow was measured outside this angle from the sun (4 degrees); inside, the sun is drawn.
+const GLOW_FROM: f32 = 0.0698;
+// Sunset colouring (low toward the sun / everywhere else) and the night sky (up / horizon).
+const DUSK_WARM = vec3<f32>(1.55, 0.80, 0.42);
+const DUSK_COOL = vec3<f32>(0.80, 0.82, 1.0);
+const NIGHT_ZENITH = vec3<f32>(0.0012, 0.0020, 0.0055);
+const NIGHT_HORIZON = vec3<f32>(0.0045, 0.0065, 0.0130);
+
+// The photographed sky along a unit direction; below the horizon, the horizon. The caller
+// picks the mip level (an automatic one would jump where the angle wraps around).
+fn sky_base(d: vec3<f32>, lod: f32) -> vec3<f32> {
+    let u = atan2(d.x, d.z) * (0.5 / PI);
+    let v = 1.0 - asin(clamp(d.y, 0.0, 1.0)) * (2.0 / PI);
+    return textureSampleLevel(sky_map, sky_sampler, vec2<f32>(u, v), lod).rgb;
+}
+
+// The sky's colour along a unit direction, without the sun or moon discs or stars: the photo
+// times the glow around the sun, sunset colouring, plus the night sky. Same as sky::radiance.
+fn sky_radiance(d: vec3<f32>, lod: f32) -> vec3<f32> {
+    let base = sky_base(d, lod);
+    let cg = dot(d, g.sun.xyz);
+    let g0 = acos(clamp(cg, -1.0, 1.0));
+    let gam = sqrt(g0 * g0 + GLOW_FROM * GLOW_FROM); // eased off inside GLOW_FROM, no ring
+    let glow = g.glow[0].rgb + g.glow[1].rgb * (exp(-gam / g.glow[0].w) * g.sky_tint.z)
+        + g.glow[2].rgb * (exp(-gam / g.glow[1].w) * g.sky_tint.y) + g.glow[3].rgb * (cg * cg);
+    let hz = pow(1.0 - clamp(d.y, 0.0, 1.0), 3.0);
+    let hl = max(dot(d.xz, d.xz) * dot(g.sun.xz, g.sun.xz), 1e-8);
+    let toward = max(dot(d.xz, g.sun.xz) * inverseSqrt(hl), 0.0);
+    let tint = mix(DUSK_COOL, DUSK_WARM, hz * (0.25 + 0.75 * toward * toward));
+    let dusk = mix(vec3<f32>(1.0), tint, g.sky_tint.w);
+    let night = mix(NIGHT_ZENITH, NIGHT_HORIZON, hz) * (1.0 - g.sun_color.w);
+    return base * glow * dusk * g.sky_tint.x + night;
+}
+
+// What goes to the screen: unchanged up to 0.8, then a soft shoulder up to 1 that keeps the
+// hue (an orange sunset stays orange instead of clipping to yellow or white); only very bright
+// light (the sun, the sky right around it) washes out toward white.
+fn display(c: vec3<f32>) -> vec3<f32> {
+    let k = 0.8;
+    let m = max(c.r, max(c.g, c.b));
+    if (m <= k) {
+        return c;
+    }
+    let top = k + (1.0 - k) * (1.0 - exp(-(m - k) / (1.0 - k)));
+    return mix(c * (top / m), vec3<f32>(top), smoothstep(1.5, 6.0, m) * 0.7);
 }
 
 // Grass colour of the plains (#91BD59, linear), until the tint map has arrived.
@@ -273,13 +329,14 @@ fn water_shade(world: vec3<f32>, face: u32, light: vec3<f32>) -> vec4<f32> {
     let cos_v = clamp(dot(n, v), 0.0, 1.0);
     let fres = 0.03 + 0.97 * pow(1.0 - cos_v, 5.0);
     let r = reflect(-v, n);
-    // The sky in the reflection: hazy and pale at the horizon, deeper blue higher up.
-    let sky = mix(g.fog_color.rgb * 1.05, vec3<f32>(0.16, 0.32, 0.70), clamp(r.y * 1.6, 0.0, 1.0));
+    // The sky in the reflection (a little blurred: the surface is never quite flat).
+    let sky = sky_radiance(r, 1.5);
     // Deep navy, a touch greener where the surface faces the viewer (light from inside).
     let body = mix(vec3<f32>(0.004, 0.016, 0.040), vec3<f32>(0.010, 0.040, 0.070), cos_v * 0.6) * light;
-    let sun = normalize(vec3<f32>(0.4, 0.9, 0.3));
-    let glint = pow(max(dot(n, normalize(sun + v)), 0.0), 300.0) * 1.6;
-    let col = mix(body, sky, fres) + vec3<f32>(glint);
+    // Sun and moon glints.
+    let glint = pow(max(dot(n, normalize(g.sun.xyz + v)), 0.0), 300.0) * 2.2 * g.sun.w * g.sun_color.rgb
+        + pow(max(dot(n, normalize(g.moon.xyz + v)), 0.0), 400.0) * 0.5 * g.moon.w * vec3<f32>(0.80, 0.85, 0.95);
+    let col = mix(body, sky, fres) + glint;
     return vec4<f32>(col, mix(0.95, 0.99, fres));
 }
 
@@ -288,18 +345,115 @@ fn fs_main(f: VsOut) -> @location(0) vec4<f32> {
     // Derivatives first (they need uniform control flow): mip levels for the turned textures.
     let ddx = dpdx(f.uv);
     let ddy = dpdy(f.uv);
+    let tex = textureSampleGrad(blocks, blocks_sampler, block_uv(f.face, f.uv, f.world), f.layer, ddx, ddy);
     let d = distance(f.world, g.cam_pos.xyz);
     let fog = clamp((d - g.fog_params.x) / (g.fog_params.y - g.fog_params.x), 0.0, 1.0) * g.flags.x;
+    var col: vec3<f32>;
+    var alpha = g.fog_params.z;
     if (f.layer == u32(g.flags.z + 0.5)) {
         let w = water_shade(f.world, f.face, f.color);
-        return vec4<f32>(mix(w.rgb, g.fog_color.rgb, fog), w.a);
+        col = w.rgb;
+        alpha = w.a;
+    } else {
+        let t = tint_at(f.world.xz);
+        // Alpha says how much of the biome colour to apply: 0 = all (grass), 1 = none.
+        let albedo = mix(tex.rgb * t.rgb, tex.rgb, tex.a) * mix(0.86, 1.14, t.a);
+        col = albedo * f.color;
     }
-    let tex = textureSampleGrad(blocks, blocks_sampler, block_uv(f.face, f.uv, f.world), f.layer, ddx, ddy);
-    let t = tint_at(f.world.xz);
-    // Alpha says how much of the biome colour to apply: 0 = all (grass), 1 = none.
-    let albedo = mix(tex.rgb * t.rgb, tex.rgb, tex.a) * mix(0.86, 1.14, t.a);
-    let col = mix(albedo * f.color, g.fog_color.rgb, fog);
-    return vec4<f32>(col, g.fog_params.z);
+    // Fog takes on the sky's colour in that direction, so far terrain melts into the sky
+    // behind it (bright toward the sun, orange at sunset, dark at night).
+    if (fog > 0.0) {
+        col = mix(col, sky_radiance((f.world - g.cam_pos.xyz) / max(d, 1e-3), 2.0), fog);
+    }
+    return vec4<f32>(display(col), alpha);
+}
+
+// ---- The sky pass: one triangle over the whole screen, behind everything ----
+struct SkyOut {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) ndc: vec2<f32>,
+};
+
+@vertex
+fn vs_sky(@builtin(vertex_index) i: u32) -> SkyOut {
+    let p = vec2<f32>(f32((i << 1u) & 2u), f32(i & 2u)) * 2.0 - 1.0;
+    var o: SkyOut;
+    o.clip = vec4<f32>(p, 0.0, 1.0); // depth 0: infinitely far with reverse-Z
+    o.ndc = p;
+    return o;
+}
+
+fn hash_u(x: u32) -> u32 {
+    var h = x * 0x9e3779b1u;
+    h = (h ^ (h >> 16u)) * 0x85ebca6bu;
+    h = (h ^ (h >> 13u)) * 0xc2b2ae35u;
+    return h ^ (h >> 16u);
+}
+
+// Stars on a cube around the viewer (no crowding at the poles): one cell in 25 has one, most
+// faint, a few bright, slightly blue or yellow, twinkling. They turn with the sky.
+fn stars(d: vec3<f32>) -> vec3<f32> {
+    let k = g.stars.xyz;
+    let c = cos(g.stars.w);
+    let s = sin(g.stars.w);
+    let q = d * c + cross(k, d) * s + k * (dot(k, d) * (1.0 - c));
+    let m = abs(q);
+    var uv: vec2<f32>;
+    var face: u32;
+    if (m.x >= m.y && m.x >= m.z) {
+        uv = q.yz / m.x;
+        face = select(0u, 1u, q.x < 0.0);
+    } else if (m.y >= m.z) {
+        uv = q.xz / m.y;
+        face = select(2u, 3u, q.y < 0.0);
+    } else {
+        uv = q.xy / m.z;
+        face = select(4u, 5u, q.z < 0.0);
+    }
+    let grid = 160.0;
+    let p = (uv * 0.5 + 0.5) * grid;
+    let cell = vec2<u32>(min(floor(p), vec2<f32>(grid - 1.0)));
+    let h = hash_u(cell.x + cell.y * 256u + face * 65536u + 7u);
+    if ((h & 255u) > 10u) {
+        return vec3<f32>(0.0);
+    }
+    let pos = vec2<f32>(f32((h >> 8u) & 255u), f32((h >> 16u) & 255u)) / 255.0 * 0.6 + 0.2;
+    // About 1.2 pixels across whatever the screen: one cell is (pi / 2) / grid radians.
+    let px = (FOVY_SKY / g.screen.y) / (PI * 0.5 / grid);
+    let dist = length(fract(p) - pos) / px;
+    let r = f32(h >> 24u) / 255.0;
+    let bright = (0.08 + 1.4 * pow(r, 6.0)) * (0.75 + 0.25 * sin(g.flags.y * (2.0 + 3.0 * r) + f32(h & 1023u)));
+    let tint = mix(vec3<f32>(0.75, 0.85, 1.0), vec3<f32>(1.0, 0.9, 0.75), fract(r * 7.0));
+    return tint * bright * smoothstep(1.3, 0.3, dist) * smoothstep(0.0, 0.25, d.y);
+}
+const FOVY_SKY: f32 = 1.1; // math::FOVY
+
+// The sun and moon discs, with glare. Both are drawn bigger than the real ones (about five
+// times), as games do; the ground hides whatever has set.
+fn sun_and_moon(d: vec3<f32>) -> vec3<f32> {
+    let above = smoothstep(-0.004, 0.004, d.y);
+    var c = vec3<f32>(0.0);
+    let warm = smoothstep(0.0, 0.5, g.sun.y);
+    let tint = g.sun_color.rgb / max(g.sun_color.r, 1e-4);
+    let a = acos(clamp(dot(d, g.sun.xyz), -1.0, 1.0));
+    let r = 0.023;
+    let disc = (1.0 - smoothstep(r * 0.85, r, a)) * (1.0 - 0.25 * (a / r) * (a / r));
+    c += tint * (disc * mix(20.0, 30.0, warm) + exp(-a / 0.018) * mix(1.5, 2.5, warm)) * g.sun.w;
+    let am = acos(clamp(dot(d, g.moon.xyz), -1.0, 1.0));
+    let rm = 0.02;
+    let mdisc = (1.0 - smoothstep(rm * 0.85, rm, am)) * (0.82 + 0.18 * cos(am / rm * 2.4));
+    c += (vec3<f32>(0.78, 0.80, 0.76) * mdisc + vec3<f32>(0.02, 0.025, 0.035) * exp(-am / 0.12)) * g.moon.w;
+    return c * above;
+}
+
+@fragment
+fn fs_sky(f: SkyOut) -> @location(0) vec4<f32> {
+    let d = normalize(g.sky_basis[2].xyz + f.ndc.x * g.sky_basis[0].xyz + f.ndc.y * g.sky_basis[1].xyz);
+    var c = sky_radiance(d, 0.0) + sun_and_moon(d);
+    if (g.night.x > 0.001) {
+        c += stars(d) * g.night.x;
+    }
+    return vec4<f32>(display(c), 1.0);
 }
 
 // ---- HUD: coloured triangles in pixel coordinates (origin top-left) ----

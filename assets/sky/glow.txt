@@ -1,0 +1,6 @@
+# Sky glow around the sun, per colour channel, angle g in radians from the sun:
+#   a + c1 * exp(-g / w1) + c2 * exp(-g / w2) + e * cos(g)^2
+# Written by tools/bake_sky.py. Columns: a c1 w1 c2 w2 e
+r 0.549923 361.442003 0.030000 14.025085 0.329962 0.295626
+g 0.672980 149.804390 0.030000 10.248997 0.329962 0.286299
+b 0.784885 47.617961 0.030000 6.134697 0.329962 0.301264

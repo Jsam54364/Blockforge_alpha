@@ -7,7 +7,7 @@ A mobile-first voxel engine in Rust, in two crates:
   architecture lives here and is tested without a GPU.
 * the **app** (`app/`): the Android front-end. winit + wgpu renderer, touch controls and HUD.
 
-> **Status:** 102 unit + 8 end-to-end tests in the core and 52 in the app (including WGSL
+> **Status:** 102 unit + 8 end-to-end tests in the core and 61 in the app (plus WGSL
 > validation) pass. The APK builds on GitHub Actions and has been run and measured on a phone
 > (see the numbers further down).
 
@@ -46,7 +46,9 @@ cargo run --release --bin headless   # stream, mesh, edit; prints stats + an ASC
 
 1. **Renderer**: pooled vertex buffers; leaves are drawn opaque (no alpha-tested cutout pass
    yet); textures are generated at startup (no compressed ASTC/ETC2 yet).
-2. **Lighting**: vertices carry sky/block light fields but values are placeholders.
+2. **Lighting**: sun, moon and sky light follow the day (see "Sky and day cycle"), but there
+   are no shadows yet (a face turned to the sun is lit even under an overhang), and the
+   per-vertex sky/block light fields are still placeholders.
 3. **Greedy meshing**: implemented as a hybrid (see below) but not the default mesher yet.
 4. **LOD terrain** shows the world as generated: edits only show in the real chunks (see below).
 5. **Server**: no reach/anti-cheat checks, undo history is global not per-player, autosave
@@ -103,7 +105,7 @@ public GPU-usage percentage, hence the derived figure.
 
 Top-right menu button: render distance (2-12 chunks, applied to the server stream too),
 LOD distance (OFF, 1K ... 32K blocks) and LOD quality (LODQ: LOW/MED/HIGH, the width of the
-first LOD ring), fog on/off,
+first LOD ring), time of day (TIME: an hour back or forward), fog on/off,
 stats on/off. The overlay's LOD line shows the sections and quads drawn. The HUD is drawn by a tiny immediate-mode layer (`ui.rs`) with its own 5x7 bitmap
 font (`font.rs`, `glyphs.rs`), so there are no UI dependencies.
 
@@ -147,7 +149,7 @@ on a phone yet: compare GPU time with VSYNC off against the figures above.
 
 ### What is kept between launches
 
-`world.bfwj` (block edits) and `state.txt` (menu settings and the camera) live in the app's
+`world.bfwj` (block edits) and `state.txt` (menu settings, the camera, the time of day) live in the app's
 internal data folder. Both are written when the app goes to the background, because Android
 can kill it there without warning; settings are also written when the menu is closed. The
 world file is only rewritten when a block actually changed. When the app comes back, every
@@ -296,12 +298,44 @@ Next: trees and plants per biome, rivers, rain shadows behind mountains.
   variation over tens of blocks.
 * **Water** (`water_shade` in the shader), after open sea under a bright sky: a deep navy body,
   nearly opaque; eight travelling waves whose strength drifts across the sea bend the surface
-  normal (ripples only up close); the sky's reflection takes over toward the horizon (Fresnel)
-  with a soft sun glint. The surface sits 1/8 block (4 of 32 pixels) below the top of its block,
+  normal (ripples only up close); the reflection of the sky (the real one, see below) takes over
+  toward the horizon (Fresnel), with sun and moon glints. The surface sits 1/8 block (4 of 32 pixels) below the top of its block,
   like Minecraft's, so shores show a small lip; LOD water matches.
 * All textures are uploaded as one mipmapped texture array (averaged in linear light) and
   sampled with world-position coordinates, so greedy quads and LOD terrain repeat them once
   per block. Half-slab sides start the texture at their own top.
+
+## Sky and day cycle (`app/src/sky.rs`, `assets/sky`, `tools/bake_sky.py`)
+
+* **A photographed sky with a sun that moves.** The sky is Poly Haven's *Rustig Koppie Pure Sky*
+  HDRI (CC0). The game draws its own sun, so `tools/bake_sky.py` takes the photo's out: a clear
+  sky is close to "sky by elevation" times "glow by angle from the sun" (the shape of the Perez
+  sky model), so the script measures that glow from the photo, fits a small formula to it per
+  colour channel (`assets/sky/glow.txt`, within ~3%), divides it out and paints over the disc.
+  What is left, `assets/sky/sky.png` (the upper half, 2048 x 512, RGBE in a PNG, 0.8 MB), keeps
+  the clouds and the horizon haze; the game multiplies the glow back in around its own sun.
+* **The day** lasts 20 real minutes (`sky::DAY_SECONDS`); a new game starts at 09:00. The sun
+  follows a real path (latitude 35 degrees, spring): it rises in the east, stands 65 degrees
+  high in the south at noon and sets in the west. As it gets low the glare fades and the sky
+  toward it turns gold and orange; then comes a dark blue night with a few thousand stars that
+  turn around the pole, and a moon opposite the sun. The menu's TIME row moves the clock an
+  hour; the time is saved with the camera.
+* **Light**: each of the six face directions gets one light colour per frame (`sky::face_light`):
+  the whole sky as seen facing that way (summed over a small copy of the sky, every 0.01 hours),
+  direct sun and moon, light bounced off the ground, and a little extra at night to keep it
+  playable. Ambient occlusion and the light fields multiply it as before.
+* **Fog** takes the sky's own colour in its direction, so far terrain melts into whatever is
+  behind it: bright toward the sun, golden at sunset, dark at night. **Water** reflects the
+  same sky.
+* **Drawing it**: one full-screen triangle after the terrain, at the far depth, so it only shades
+  the pixels the terrain left empty. The sky is an RGB9E5 texture with all its mip levels, and
+  the shader picks the level itself (an automatic one would show a seam where the angle wraps).
+  On the way to the screen, colours up to 0.8 are left alone and brighter ones roll off softly,
+  keeping their hue (an orange sunset stays orange); only the very brightest, like the sun,
+  wash out to white.
+* **Another sky**: download an equirectangular HDRI (2K is plenty), run
+  `python3 tools/bake_sky.py sky.hdr`, rebuild. Clear or lightly clouded skies work best: clouds
+  stay where they are, lit from where the photo's sun was.
 
 ## Greedy meshing (`greedy.rs`)
 
