@@ -77,19 +77,34 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
           exit $code
+      - name: Align, sign and check the APK
+        shell: bash
+        run: |
+          # cargo-apk runs zipalign and then apksigner, but the apksigner it picks (the newest
+          # build-tools on the runner) rewrites the file and drops the alignment. Android 11+
+          # refuses to install an app whose resources.arsc is not 4-byte aligned ("package
+          # appears to be invalid"), so align and sign again with known tools, then check.
+          bt="$ANDROID_HOME/build-tools/34.0.0"
+          apk=$(find app/target -name '*.apk' | head -n 1)
+          if [ -z "$apk" ]; then echo "No APK produced" >> "$GITHUB_STEP_SUMMARY"; exit 1; fi
+          "$bt/zipalign" -f -p 4 "$apk" aligned.apk
+          "$bt/apksigner" sign --alignment-preserved --ks app/debug.keystore --ks-pass pass:android \
+            --out blockforge-debug.apk aligned.apk
+          # Fail the build rather than publish an APK the phone will reject.
+          if ! "$bt/zipalign" -c -p 4 blockforge-debug.apk; then
+            echo "APK is not aligned; not publishing it" >> "$GITHUB_STEP_SUMMARY"; exit 1
+          fi
+          "$bt/apksigner" verify blockforge-debug.apk
+          # Every build should show the same fingerprint (the key in app/debug.keystore).
+          # If it changes, phones will refuse to update over the installed app.
+          cert=$("$bt/apksigner" verify --print-certs blockforge-debug.apk | grep -m1 'SHA-256' || echo "could not read")
+          echo "Aligned and verified. Signing certificate: $cert" >> "$GITHUB_STEP_SUMMARY"
       - name: Publish APK as a release
         env:
           GH_TOKEN: ${{ github.token }}
           BRANCH: ${{ github.event.workflow_run.head_branch || github.ref_name }}
         shell: bash
         run: |
-          apk=$(find app/target -name '*.apk' | head -n 1)
-          if [ -z "$apk" ]; then echo "No APK produced" >> "$GITHUB_STEP_SUMMARY"; exit 1; fi
-          cp "$apk" blockforge-debug.apk
-          # Every build should show the same fingerprint (the key in app/debug.keystore).
-          # If it changes, phones will refuse to update over the installed app.
-          cert=$("$ANDROID_HOME/build-tools/34.0.0/apksigner" verify --print-certs blockforge-debug.apk | grep -m1 'SHA-256' || echo "could not read")
-          echo "Signing certificate: $cert" >> "$GITHUB_STEP_SUMMARY"
           gh release delete latest-apk --yes --cleanup-tag || true
           gh release create latest-apk blockforge-debug.apk \
             --prerelease --target "$BRANCH" \
