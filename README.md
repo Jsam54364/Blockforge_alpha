@@ -160,6 +160,23 @@ the first update onto a fixed-key build still needs one uninstall. The key is a 
 the standard `android` password and is not a secret; a Play Store release would need its own
 private key kept in a repository secret.
 
+### Icon and Play Protect
+
+The launcher icon is in `app/res` (adaptive icon with a themed-icon layer for Android 13+,
+plus plain PNGs for older launchers); `app/icon-src/make_icon.py` draws it.
+
+Play Protect warnings on this sideloaded APK, and what helps:
+
+* "Built for an older version of Android": shown when `target_sdk_version` is more than two
+  below the phone's API level. The app targets 35, which is clean up to Android 17.
+* "App scan recommended" / unknown developer: expected for a rarely seen APK. Let it scan;
+  keeping one signing key (above) lets Play Protect recognise later builds as the same app.
+* "Harmful app blocked" would be a misclassification (the app asks for no permissions):
+  appeal at https://developers.google.com/android/play-protect/warning-dev-guidance.
+* Longer term, Android developer verification ties apps to a registered developer. The free
+  "limited distribution" account (up to 20 devices, no ID) covers a hobby project; register
+  the package name `com.blockforge.alpha` and this signing key there.
+
 Renderer gaps: pooled vertex buffers, occlusion culling, texture array
 (colours come from a palette keyed by texture name), render-scale governor hookup, LOD meshing.
 
