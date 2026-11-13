@@ -113,3 +113,128 @@ fn greedy_mesher_works_through_the_client() {
     assert!(pump_until(&mut c, Duration::from_secs(60), |c| c.is_idle()));
     assert!(c.stats.meshes_built > before, "switching mesher should rebuild meshes");
 }
+
+/// Pumps until chunks have stopped arriving and every mesh job has finished.
+fn settle(c: &mut Client) {
+    let mut last = (0u64, 0u64, 0u64);
+    let mut last_change = Instant::now();
+    let ok = pump_until(c, Duration::from_secs(60), |c| {
+        let now = (c.stats.chunks_received, c.stats.meshes_built, c.stats.meshes_skipped);
+        if now != last {
+            last = now;
+            last_change = Instant::now();
+        }
+        now.0 >= 100 && c.is_idle() && last_change.elapsed() > Duration::from_millis(500)
+    });
+    assert!(ok, "never settled: {:?}", c.stats);
+}
+
+#[test]
+fn streamed_meshes_are_final_and_cost_about_one_job_each() {
+    let (_h, mut c, reg) = start(7);
+    settle(&mut c);
+
+    // Whatever order chunks arrived in, every mesh must show exactly the faces a fresh mesh
+    // of the final world shows: nothing skipped or deferred may leave a stale or missing mesh.
+    // Ambient occlusion bits are left out of the comparison: chunks at the edge of the
+    // streamed area are not redone when only a diagonal neighbour arrives (see README).
+    fn faces(layer: &blockforge::mesh::MeshLayer) -> Vec<[(u32, u32); 4]> {
+        const AO: u32 = 3 << 27;
+        let mut quads: Vec<[(u32, u32); 4]> = layer
+            .vertices
+            .chunks(4)
+            .map(|q| {
+                let mut v = [(q[0].a & !AO, q[0].b), (q[1].a & !AO, q[1].b), (q[2].a & !AO, q[2].b), (q[3].a & !AO, q[3].b)];
+                v.sort_unstable();
+                v
+            })
+            .collect();
+        quads.sort_unstable();
+        quads
+    }
+    let positions: Vec<_> = c.store.positions().collect();
+    let mut with_geometry = 0u64;
+    for &p in &positions {
+        let fresh = mesh_chunk_with(Mesher::Simple, &reg, &PaddedChunk::capture(&c.store, p));
+        match c.meshes.get(&p) {
+            None => assert!(fresh.is_empty(), "missing mesh at {p:?}"),
+            Some(m) => {
+                with_geometry += 1;
+                assert!(faces(&m.opaque) == faces(&fresh.opaque), "stale opaque mesh at {p:?}");
+                assert!(faces(&m.cutout) == faces(&fresh.cutout), "stale cutout mesh at {p:?}");
+                assert!(faces(&m.translucent) == faces(&fresh.translucent), "stale water mesh at {p:?}");
+            }
+        }
+    }
+    assert!(with_geometry > 0);
+
+    // Sky and buried chunks never became jobs, and the rest were not rebuilt once per
+    // arriving neighbour (that used to be about thirteen jobs per visible chunk).
+    assert!(c.stats.meshes_skipped > 0);
+    let jobs = c.stats.meshes_built + c.stats.stale_meshes;
+    assert!(jobs <= with_geometry * 6, "{jobs} mesh jobs for {with_geometry} visible chunks: {:?}", c.stats);
+}
+
+#[test]
+fn renderer_can_ask_for_every_mesh_again() {
+    let (_h, mut c, _reg) = start(7);
+    settle(&mut c);
+    let _ = c.take_mesh_changes(usize::MAX);
+    assert!(c.take_mesh_changes(usize::MAX).is_empty());
+    // What the app does after Android hands it a new surface.
+    c.requeue_all_meshes();
+    let mut again = c.take_mesh_changes(usize::MAX);
+    let mut have: Vec<_> = c.meshes.keys().copied().collect();
+    again.sort_unstable();
+    have.sort_unstable();
+    assert_eq!(again, have);
+}
+
+#[test]
+fn save_now_writes_edits_that_a_new_server_loads() {
+    let dir = std::env::temp_dir().join(format!("blockforge-save-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("world.bfwj");
+    let _ = std::fs::remove_file(&path);
+    let reg = Arc::new(BlockRegistry::builtin());
+    let cfg = ServerConfig {
+        seed: 7,
+        tick_hz: 50,
+        worker_threads: 2,
+        save_path: Some(path.clone()),
+        ..ServerConfig::default()
+    };
+    let open = |cfg: &ServerConfig| {
+        let handle = server::spawn(cfg.clone(), reg.clone());
+        let mut client = Client::connect(handle.connect(), 2);
+        client.set_view_distance(3);
+        client.set_position([0.0, 10.0, 0.0]);
+        (handle, client)
+    };
+
+    let (h, mut c) = open(&cfg);
+    settle(&mut c);
+    // Nothing changed yet, so asking for a save must not create a file.
+    assert!(h.save_now(Duration::from_secs(5)));
+    assert!(!path.exists());
+
+    let ground = (-64..=95)
+        .rev()
+        .find(|&y| c.store.block(BlockPos::new(0, y, 0)).map_or(false, |s| reg.get(s).solid))
+        .expect("ground at origin");
+    let pos = BlockPos::new(0, ground, 0);
+    c.break_block(pos);
+    assert!(pump_until(&mut c, Duration::from_secs(10), |c| c.store.block(pos).map_or(false, |s| s.is_air())));
+    assert!(h.save_now(Duration::from_secs(5)));
+    assert!(path.exists(), "save_now should have written the world");
+    // Simulate the OS killing the app: the file on disk is all that survives.
+    let saved = std::fs::read(&path).unwrap();
+    drop(c);
+    drop(h);
+    std::fs::write(&path, &saved).unwrap();
+
+    let (_h2, mut c2) = open(&cfg);
+    settle(&mut c2);
+    assert!(c2.store.block(pos).map_or(false, |s| s.is_air()), "the broken block came back");
+    let _ = std::fs::remove_dir_all(&dir);
+}

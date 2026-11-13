@@ -12,13 +12,18 @@
 //! see: events outside it are dropped for now (TODO: re-scan a chunk when it enters
 //! simulation range).
 //!
+//! Saving: the journal is written on shutdown, on autosave, and whenever the owner asks
+//! through `ServerHandle::save_now` (the Android app does that when it goes to the
+//! background, because the OS may kill it without a clean shutdown). Nothing is written
+//! when no block changed since the last save.
+//!
 //! Not yet implemented: reach/anti-cheat validation, per-player undo history, a real
-//! network transport, saving on a background thread (autosave blocks the tick).
+//! network transport, saving on a background thread (a save blocks the tick).
 
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashSet, VecDeque};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -112,6 +117,16 @@ pub struct Server {
     sched_seq: u64,
     stats: ServerStats,
     shared_stats: Arc<Mutex<ServerStats>>,
+    /// Edits since the last successful save.
+    unsaved: bool,
+    save_signal: Option<SaveSignal>,
+}
+
+/// Lets another thread ask for a save and see when it has happened.
+#[derive(Clone, Default)]
+pub struct SaveSignal {
+    requested: Arc<AtomicBool>,
+    completed: Arc<AtomicU64>,
 }
 
 fn load_saved(path: &Option<PathBuf>) -> Option<(u64, EditJournal)> {
@@ -170,6 +185,20 @@ impl Server {
             sched_seq: 0,
             stats: ServerStats::default(),
             shared_stats,
+            unsaved: false,
+            save_signal: None,
+        }
+    }
+
+    pub fn set_save_signal(&mut self, signal: SaveSignal) {
+        self.save_signal = Some(signal);
+    }
+
+    fn serve_save_request(&mut self) {
+        let Some(sig) = self.save_signal.clone() else { return };
+        if sig.requested.swap(false, AtomicOrdering::SeqCst) {
+            self.save_world();
+            sig.completed.fetch_add(1, AtomicOrdering::SeqCst);
         }
     }
 
@@ -180,6 +209,7 @@ impl Server {
             for _ in 0..n {
                 self.step();
             }
+            self.serve_save_request();
             let nap = ts
                 .time_until_next()
                 .min(Duration::from_millis(4))
@@ -250,6 +280,7 @@ impl Server {
                 let welcome = ServerMsg::Welcome {
                     seed: self.cfg.seed,
                     tick_hz: self.cfg.tick_hz,
+                    vertical_view_chunks: self.cfg.vertical_view_chunks,
                     blocks_toml: self.world.registry.source().to_string(),
                 };
                 self.sessions[si].link.send(welcome);
@@ -326,6 +357,7 @@ impl Server {
 
     /// Broadcast the change and queue the events it causes.
     fn after_edit(&mut self, e: Edit) {
+        self.unsaved = true;
         self.stats.block_edits += 1;
         self.broadcast_block(e.pos, e.new);
         if !e.old.is_air() {
@@ -504,13 +536,18 @@ impl Server {
 
     // ---- persistence ----
 
-    fn save_world(&self) {
+    fn save_world(&mut self) {
+        if !self.unsaved {
+            return; // nothing changed: skip the encode and the disk write
+        }
         let Some(path) = &self.cfg.save_path else { return };
         let bytes = save::encode_journal(self.cfg.seed, self.world.journal());
         let tmp = path.with_extension("tmp");
         // Write-then-rename so a crash never leaves a half-written save.
-        if std::fs::write(&tmp, &bytes).is_ok() {
-            let _ = std::fs::rename(&tmp, path);
+        if std::fs::write(&tmp, &bytes).is_ok() && std::fs::rename(&tmp, path).is_ok() {
+            self.unsaved = false;
+        } else {
+            eprintln!("server: could not save to {}", path.display());
         }
     }
 }
@@ -520,9 +557,25 @@ pub struct ServerHandle {
     join: Option<JoinHandle<()>>,
     incoming: mpsc::Sender<Endpoint<ServerMsg, ClientMsg>>,
     stats: Arc<Mutex<ServerStats>>,
+    save_signal: SaveSignal,
 }
 
 impl ServerHandle {
+    /// Asks the server thread to write the world now and waits (up to `timeout`) until it
+    /// has. Returns false on timeout. Cheap when nothing changed since the last save.
+    pub fn save_now(&self, timeout: Duration) -> bool {
+        let before = self.save_signal.completed.load(AtomicOrdering::SeqCst);
+        self.save_signal.requested.store(true, AtomicOrdering::SeqCst);
+        let start = Instant::now();
+        while self.save_signal.completed.load(AtomicOrdering::SeqCst) == before {
+            if start.elapsed() >= timeout {
+                return false;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+        true
+    }
+
     /// Open a new in-process connection to the server.
     pub fn connect(&self) -> Endpoint<ClientMsg, ServerMsg> {
         let (client_end, server_end) = local_pair();
@@ -549,12 +602,15 @@ pub fn spawn(cfg: ServerConfig, registry: Arc<BlockRegistry>) -> ServerHandle {
     let shutdown = Arc::new(AtomicBool::new(false));
     let stats = Arc::new(Mutex::new(ServerStats::default()));
     let (flag, shared) = (shutdown.clone(), stats.clone());
+    let save_signal = SaveSignal::default();
+    let signal = save_signal.clone();
     let join = thread::Builder::new()
         .name("server".to_string())
         .spawn(move || {
             let mut server = Server::new(cfg, registry, in_rx, shared);
+            server.set_save_signal(signal);
             server.run(&flag);
         })
         .expect("failed to spawn server thread");
-    ServerHandle { shutdown, join: Some(join), incoming: in_tx, stats }
+    ServerHandle { shutdown, join: Some(join), incoming: in_tx, stats, save_signal }
 }

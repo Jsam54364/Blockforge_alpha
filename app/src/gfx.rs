@@ -4,7 +4,10 @@
 //!   * depth is discarded after the pass (cheap on tile-based GPUs)
 //!   * opaque + cutout first, translucent water last, far-to-near
 //!
-//! TODO (see README): pooled vertex buffers, frustum planes, ASTC texture array, render scale.
+//!   * solid terrain is drawn nearest chunk first, so the depth test rejects hidden
+//!     fragments before they are shaded (the renderer is GPU-bound on phones)
+//!
+//! TODO (see README): pooled vertex buffers, occlusion culling, ASTC texture array, render scale.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -369,16 +372,31 @@ impl Gfx {
         self.depth_view = make_depth(&self.device, w, h);
     }
 
-    fn upload(&self, v: &[PackedVertex], label: &str) -> Option<GpuLayer> {
-        if v.is_empty() {
+    /// One vertex buffer holding `parts` back to back, written straight into GPU memory
+    /// (no temporary copy on the CPU side).
+    fn upload(&self, parts: &[&[PackedVertex]], label: &str) -> Option<GpuLayer> {
+        let verts: usize = parts.iter().map(|p| p.len()).sum();
+        if verts == 0 {
             return None;
         }
-        let buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        // 8-byte vertices, so the size is always a multiple of wgpu's 4-byte alignment.
+        let buf = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some(label),
-            contents: as_bytes(v),
+            size: (verts * std::mem::size_of::<PackedVertex>()) as u64,
             usage: wgpu::BufferUsages::VERTEX,
+            mapped_at_creation: true,
         });
-        Some(GpuLayer { buf, quads: (v.len() / 4) as u32 })
+        {
+            let mut view = buf.slice(..).get_mapped_range_mut();
+            let mut at = 0;
+            for p in parts {
+                let bytes = as_bytes(p);
+                view[at..at + bytes.len()].copy_from_slice(bytes);
+                at += bytes.len();
+            }
+        }
+        buf.unmap();
+        Some(GpuLayer { buf, quads: (verts / 4) as u32 })
     }
 
     fn sync_meshes(&mut self, client: &mut Client) {
@@ -389,10 +407,8 @@ impl Gfx {
                 }
                 Some(mesh) => {
                     // Cutout (leaves) shares the opaque draw for now.
-                    let mut solid = mesh.opaque.vertices.clone();
-                    solid.extend_from_slice(&mesh.cutout.vertices);
-                    let solid = self.upload(&solid, "chunk solid");
-                    let water = self.upload(&mesh.translucent.vertices, "chunk water");
+                    let solid = self.upload(&[&mesh.opaque.vertices, &mesh.cutout.vertices], "chunk solid");
+                    let water = self.upload(&[&mesh.translucent.vertices], "chunk water");
                     self.chunks.insert(pos, GpuChunk { solid, water });
                 }
             }
@@ -521,7 +537,9 @@ impl Gfx {
 
             pass.set_pipeline(if opts.backface_cull { &self.pipe_solid } else { &self.pipe_solid_nocull });
             pass.set_bind_group(0, &self.bind_solid, &[]);
-            for (i, (_, pos)) in vis.iter().enumerate() {
+            // `vis` is far to near (what the water pass needs). Solid terrain goes the other
+            // way: near chunks fill the depth buffer first and hide most of what is behind them.
+            for (i, (_, pos)) in vis.iter().enumerate().rev() {
                 if let Some(layer) = self.chunks.get(pos).and_then(|c| c.solid.as_ref()) {
                     pass.set_vertex_buffer(0, layer.buf.slice(..));
                     pass.draw_indexed(0..layer.quads.min(MAX_QUADS) * 6, 0, i as u32..i as u32 + 1);

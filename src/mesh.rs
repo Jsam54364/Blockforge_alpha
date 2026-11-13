@@ -14,7 +14,7 @@
 //!   (Implemented in `greedy.rs`: see `Mesher` and `mesh_chunk_greedy`.)
 
 use crate::block::{BlockState, UNKNOWN};
-use crate::coords::{ChunkPos, Face, LocalPos, CHUNK_SIZE};
+use crate::coords::{ChunkPos, Face, LocalPos, CHUNK_SIZE, CHUNK_VOLUME};
 use crate::registry::{BlockRegistry, RenderLayer};
 use crate::world::ChunkStore;
 
@@ -50,8 +50,12 @@ impl PaddedChunk {
         self.blocks[i] = s;
     }
 
+    /// Snapshot of `pos` and the one-voxel shell around it. Runs on the caller's thread
+    /// (the render thread, for the client), so it avoids per-voxel palette lookups where
+    /// it can: uniform chunks are filled, and the centre chunk is decoded in one pass.
     pub fn capture(store: &ChunkStore, pos: ChunkPos) -> PaddedChunk {
         let mut out = PaddedChunk::filled(UNKNOWN);
+        let n = CHUNK_SIZE as usize;
         for dy in -1..=1 {
             for dz in -1..=1 {
                 for dx in -1..=1 {
@@ -59,6 +63,28 @@ impl PaddedChunk {
                     let (sx, nx, ox) = axis_span(dx);
                     let (sy, ny, oy) = axis_span(dy);
                     let (sz, nz, oz) = axis_span(dz);
+                    if let Some(s) = chunk.uniform_state() {
+                        for iy in 0..ny {
+                            for iz in 0..nz {
+                                let row = Self::idx(ox, oy + iy, oz + iz);
+                                out.blocks[row..row + nx as usize].fill(s);
+                            }
+                        }
+                        continue;
+                    }
+                    if (dx, dy, dz) == (0, 0, 0) {
+                        // Both layouts are y-major with x contiguous: copy whole rows.
+                        let mut cells = vec![UNKNOWN; CHUNK_VOLUME];
+                        chunk.decode_into(&mut cells);
+                        for iy in 0..n {
+                            for iz in 0..n {
+                                let src = (iy * n + iz) * n;
+                                let dst = Self::idx(0, iy as i32, iz as i32);
+                                out.blocks[dst..dst + n].copy_from_slice(&cells[src..src + n]);
+                            }
+                        }
+                        continue;
+                    }
                     for iy in 0..ny {
                         for iz in 0..nz {
                             for ix in 0..nx {
@@ -76,6 +102,34 @@ impl PaddedChunk {
         }
         out
     }
+}
+
+/// True when the chunk at `pos` cannot produce a single quad, judged without looking at
+/// individual voxels: it is uniform (all air, or one block that hides its own faces) and
+/// every loaded face neighbour is uniform and hides the faces at the seam. In a cubic-chunk
+/// world that is most chunks (open sky, deep stone), so the client uses this to skip the
+/// snapshot and the mesh job entirely. Gives exactly the answer `mesh_chunk` would.
+pub fn has_no_faces(reg: &BlockRegistry, store: &ChunkStore, pos: ChunkPos) -> bool {
+    let Some(chunk) = store.get(pos) else { return true };
+    let Some(state) = chunk.uniform_state() else { return false };
+    if state.is_air() {
+        return true;
+    }
+    for face in Face::ALL {
+        // Interior faces between identical cells must be hidden too (not true for slabs).
+        if !face_hidden(reg, state, face, state) {
+            return false;
+        }
+        let (dx, dy, dz) = face.normal();
+        match store.get(pos.offset(dx, dy, dz)) {
+            None => {} // unloaded: the mesher hides faces at the seam
+            Some(nb) => match nb.uniform_state() {
+                Some(ns) if face_hidden(reg, state, face, ns) => {}
+                _ => return false,
+            },
+        }
+    }
+    true
 }
 
 /// For a neighbour offset `d` in -1..=1: (source start in that chunk, length,
@@ -403,6 +457,75 @@ mod tests {
 
     fn reg() -> BlockRegistry {
         BlockRegistry::builtin()
+    }
+
+    #[test]
+    fn capture_matches_a_per_voxel_read_of_the_store() {
+        let r = reg();
+        let ids = [r.state("stone").unwrap(), r.state("dirt").unwrap(), r.state("water").unwrap(), AIR];
+        let mut store = ChunkStore::new();
+        // A mix of paletted, uniform and missing chunks around the centre.
+        for dy in -1..=1 {
+            for dz in -1..=1 {
+                for dx in -1..=1 {
+                    let k = (dx + 1) + 3 * (dz + 1) + 9 * (dy + 1);
+                    if k % 5 == 3 {
+                        continue; // unloaded
+                    }
+                    let mut c = Chunk::uniform(ids[(k % 4) as usize]);
+                    if k % 3 != 1 {
+                        for i in (0..CHUNK_VOLUME).step_by(7 + k as usize) {
+                            c.set(i, ids[(i / 3 + k as usize) % 4]);
+                        }
+                    }
+                    store.insert(ChunkPos::new(dx, dy, dz), c);
+                }
+            }
+        }
+        for centre in [ChunkPos::new(0, 0, 0), ChunkPos::new(1, 0, 0), ChunkPos::new(0, -1, 1)] {
+            let pc = PaddedChunk::capture(&store, centre);
+            let o = centre.origin();
+            for y in -1..=CHUNK_SIZE {
+                for z in -1..=CHUNK_SIZE {
+                    for x in -1..=CHUNK_SIZE {
+                        let want = store.block(o.offset(x, y, z)).unwrap_or(UNKNOWN);
+                        assert_eq!(pc.at(x, y, z), want, "centre {centre:?} at {x},{y},{z}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn has_no_faces_agrees_with_the_mesher() {
+        let r = reg();
+        let stone = r.state("stone").unwrap();
+        let water = r.state("water").unwrap();
+        let slab = stone.with_shape(Shape::SlabBottom);
+        let centre = ChunkPos::new(0, 0, 0);
+        let mut mixed = Chunk::uniform(stone);
+        mixed.set(0, AIR);
+        let neighbours = [None, Some(Chunk::air()), Some(Chunk::uniform(stone)), Some(Chunk::uniform(water)), Some(mixed)];
+        for own in [AIR, stone, water, slab] {
+            for face in Face::ALL {
+                for nb in &neighbours {
+                    let mut store = ChunkStore::new();
+                    store.insert(centre, Chunk::uniform(own));
+                    let (dx, dy, dz) = face.normal();
+                    if let Some(c) = nb {
+                        store.insert(centre.offset(dx, dy, dz), c.clone());
+                    }
+                    let empty = mesh_chunk(&r, &PaddedChunk::capture(&store, centre)).is_empty();
+                    let claim = has_no_faces(&r, &store, centre);
+                    // Never claim "empty" for a chunk that has geometry; the reverse is allowed
+                    // only for the mixed neighbour, which the check does not look inside.
+                    assert!(!claim || empty, "wrongly skipped: {own:?} {face:?}");
+                    if nb.as_ref().map_or(true, |c| c.is_uniform()) {
+                        assert_eq!(claim, empty, "{own:?} {face:?} {:?}", nb.as_ref().map(|c| c.uniform_state()));
+                    }
+                }
+            }
+        }
     }
 
     #[test]

@@ -6,11 +6,11 @@
 //! * Thread count is capped at 3 by default: on big.LITTLE phones, using every core
 //!   throttles the device and starves the render thread.
 //! * Dropping the pool discards queued jobs and joins the workers.
-//!
-//! Known gap: if a job closure panics, that worker thread dies and `in_flight`
-//! never decrements. Wrap the closure in `catch_unwind` if jobs can panic.
+//! * A job that panics is reported and dropped: the worker keeps running and
+//!   `in_flight` still goes back down, so one bad chunk cannot stall the pool.
 
 use std::cmp::Ordering;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::collections::BinaryHeap;
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -86,10 +86,17 @@ where
         };
         match job {
             Some(j) => {
-                let r = f(j);
+                // The closure only reads shared data (registry, generator), so a panic cannot
+                // leave anything half-updated behind.
+                let r = catch_unwind(AssertUnwindSafe(|| f(j)));
                 shared.in_flight.fetch_sub(1, AtomicOrdering::SeqCst);
-                if tx.send(r).is_err() {
-                    break;
+                match r {
+                    Ok(r) => {
+                        if tx.send(r).is_err() {
+                            break;
+                        }
+                    }
+                    Err(_) => eprintln!("jobs: a job panicked and was dropped"),
                 }
             }
             None => break,
@@ -227,6 +234,23 @@ mod tests {
             pool.submit(i, i);
         }
         drop(pool);
+    }
+
+    #[test]
+    fn a_panicking_job_does_not_kill_the_pool() {
+        let pool = JobPool::new(1, |x: u32| {
+            if x == 3 {
+                panic!("deliberate test panic");
+            }
+            x
+        });
+        for i in 0..6 {
+            pool.submit(i, i);
+        }
+        let mut got = drain(&pool, 5);
+        got.sort_unstable();
+        assert_eq!(got, vec![0, 1, 2, 4, 5]);
+        assert_eq!(pool.in_flight(), 0);
     }
 
     #[test]

@@ -144,11 +144,12 @@ fn main() {
         raw / 1024
     );
     println!(
-        "  meshes: {} chunks with geometry, {} quads, {} KiB of 8-byte vertices ({} stale results dropped)",
+        "  meshes: {} chunks with geometry, {} quads, {} KiB of 8-byte vertices ({} stale results dropped, {} chunks skipped as empty)",
         mesh_chunks,
         quads,
         vbytes / 1024,
-        client.stats.stale_meshes
+        client.stats.stale_meshes,
+        client.stats.meshes_skipped
     );
 
     print_map(&client, &registry);

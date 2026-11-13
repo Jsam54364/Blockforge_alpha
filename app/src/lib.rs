@@ -62,6 +62,10 @@ impl ApplicationHandler for App {
             Ok(g) => {
                 self.game.set_surface(size.width, size.height, window.scale_factor());
                 self.game.ui.vsync_supported = g.vsync_supported();
+                // A new Gfx has no chunk buffers. After a trip to the background the client
+                // still holds every mesh, so hand them all to the renderer again; without
+                // this the world stays invisible until chunks happen to change.
+                self.game.client.requeue_all_meshes();
                 self.gfx = Some(g);
                 self.window = Some(window);
             }
@@ -75,13 +79,18 @@ impl ApplicationHandler for App {
     // Android destroys the native window when the app goes to the background:
     // the surface must be dropped here and recreated in `resumed`.
     fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
+        // Android may kill a backgrounded app without another callback: save now.
+        self.game.persist();
         self.gfx = None;
         self.window = None;
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => {
+                self.game.persist();
+                event_loop.exit();
+            }
             WindowEvent::Resized(size) => {
                 let scale = self.window.as_ref().map_or(1.0, |w| w.scale_factor());
                 self.game.set_surface(size.width, size.height, scale);

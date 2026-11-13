@@ -145,9 +145,13 @@ impl WorldGen {
     /// Two thin noise "sheets" intersecting give tunnel-like caves. Constants need tuning.
     fn is_cave(&self, x: i32, y: i32, z: i32) -> bool {
         let (fx, fy, fz) = (x as f32, y as f32, z as f32);
+        // Most cells fail the first sheet, so only sample the second one when it matters.
         let a = value_noise_3d(self.seed ^ 0xA5A5, fx / 28.0, fy / 18.0, fz / 28.0);
+        if (a - 0.5).abs() >= 0.055 {
+            return false;
+        }
         let b = value_noise_3d(self.seed ^ 0x5A5A, fx / 28.0, fy / 18.0, fz / 28.0);
-        (a - 0.5).abs() < 0.055 && (b - 0.5).abs() < 0.055
+        (b - 0.5).abs() < 0.055
     }
 
     fn block_at(&self, wx: i32, wy: i32, wz: i32, top: i32, rem: i32, sandy: bool) -> BlockState {

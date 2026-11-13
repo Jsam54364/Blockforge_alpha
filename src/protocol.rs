@@ -27,7 +27,9 @@ pub enum ClientMsg {
 #[derive(Debug)]
 pub enum ServerMsg {
     /// `blocks_toml` is the server's block registry, so numeric ids always match.
-    Welcome { seed: u64, tick_hz: u32, blocks_toml: String },
+    /// `vertical_view_chunks` is the server's vertical streaming cap, so the client can tell
+    /// which neighbours of a chunk are still on their way (see `Client::neighbor_wait`).
+    Welcome { seed: u64, tick_hz: u32, vertical_view_chunks: i32, blocks_toml: String },
     ChunkData { pos: ChunkPos, chunk: Box<Chunk> },
     ChunkUnload { pos: ChunkPos },
     BlockUpdate { pos: BlockPos, state: BlockState },

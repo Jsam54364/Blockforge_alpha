@@ -28,8 +28,13 @@ const FLY_SPEED: f32 = 14.0;
 const REACH: f32 = 8.0;
 const TAP_MAX: Duration = Duration::from_millis(300);
 const DRAG_PIXELS: f32 = 14.0;
+/// Settings and the camera, kept between launches next to the world save.
+const STATE_FILE: &str = "state.txt";
+const START_CAM: CameraView = CameraView { pos: [0.5, 70.0, 0.5], yaw: 0.0, pitch: -0.35 };
+/// A saved camera further out than this is treated as corrupt (f32 loses block precision).
+const MAX_SAVED_COORD: f32 = 1.0e6;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CameraView {
     pub pos: [f32; 3],
     pub yaw: f32,
@@ -48,6 +53,23 @@ impl CameraView {
         let (sy, cy) = self.yaw.sin_cos();
         [cy, 0.0, -sy]
     }
+
+    fn to_text(&self) -> String {
+        format!("cam={},{},{},{},{}\n", self.pos[0], self.pos[1], self.pos[2], self.yaw, self.pitch)
+    }
+
+    /// Reads the `cam=` line written by `to_text`; `None` if it is missing or not sane.
+    fn from_text(text: &str) -> Option<CameraView> {
+        let line = text.lines().find_map(|l| l.trim().strip_prefix("cam="))?;
+        let v: Vec<f32> = line.split(',').filter_map(|p| p.trim().parse().ok()).collect();
+        if v.len() != 5 || v.iter().any(|x| !x.is_finite()) {
+            return None;
+        }
+        if v[..3].iter().any(|x| x.abs() > MAX_SAVED_COORD) {
+            return None;
+        }
+        Some(CameraView { pos: [v[0], v[1], v[2]], yaw: v[3], pitch: v[4].clamp(-1.5, 1.5) })
+    }
 }
 
 struct TouchInfo {
@@ -61,7 +83,9 @@ struct TouchInfo {
 pub struct Game {
     // Field order matters: the client is dropped before the server it talks to.
     pub client: Client,
-    _server: ServerHandle,
+    server: ServerHandle,
+    /// Where `state.txt` lives (None on platforms without a data directory).
+    state_path: Option<PathBuf>,
     registry: Arc<BlockRegistry>,
     pub cam: CameraView,
     pub size: (u32, u32),
@@ -79,6 +103,13 @@ impl Game {
         let registry = Arc::new(BlockRegistry::builtin());
         let stone = registry.state("stone").expect("stone block");
 
+        // Pick up where the last session stopped: settings and camera from the state file.
+        let state_path = save_dir.as_ref().map(|d| d.join(STATE_FILE));
+        let saved = state_path.as_ref().and_then(|p| std::fs::read_to_string(p).ok()).unwrap_or_default();
+        let mut ui = Ui::new();
+        ui.settings.apply_text(&saved);
+        let cam = CameraView::from_text(&saved).unwrap_or(START_CAM);
+
         let cfg = ServerConfig {
             seed: 1337,
             worker_threads: 2,
@@ -87,15 +118,17 @@ impl Game {
         };
         let server = server::spawn(cfg, registry.clone());
         let mut client = Client::connect(server.connect(), 2);
-        let cam = CameraView { pos: [0.5, 70.0, 0.5], yaw: 0.0, pitch: -0.35 };
-        let ui = Ui::new();
+        if ui.settings.greedy {
+            client.set_mesher(Mesher::Greedy);
+        }
         client.set_view_distance(ui.settings.render_chunks);
         client.set_position(cam.pos);
 
         let now = Instant::now();
         Game {
             client,
-            _server: server,
+            server,
+            state_path,
             registry,
             cam,
             size: (1, 1),
@@ -110,6 +143,22 @@ impl Game {
 
     pub fn registry(&self) -> &Arc<BlockRegistry> {
         &self.registry
+    }
+
+    /// Writes the world (if it changed), the settings and the camera to disk. Called when the
+    /// app goes to the background, because Android may kill it there without warning.
+    pub fn persist(&self) {
+        self.server.save_now(Duration::from_millis(500));
+        self.save_state();
+    }
+
+    fn save_state(&self) {
+        let Some(path) = &self.state_path else { return };
+        let text = format!("{}{}", self.ui.settings.to_text(), self.cam.to_text());
+        let tmp = path.with_extension("tmp");
+        if std::fs::write(&tmp, text).is_ok() {
+            let _ = std::fs::rename(&tmp, path);
+        }
     }
 
     /// Far edge of the streamed area, in blocks (used for fog).
@@ -170,12 +219,16 @@ impl Game {
                 if let Some(action) = self.ui.hit(x, y) {
                     self.ui_touches.insert(id);
                     let greedy_before = self.ui.settings.greedy;
+                    let menu_was_open = self.ui.menu_open;
                     if self.ui.apply(action) {
                         self.client.set_view_distance(self.ui.settings.render_chunks);
                     }
                     if self.ui.settings.greedy != greedy_before {
                         let kind = if self.ui.settings.greedy { Mesher::Greedy } else { Mesher::Simple };
                         self.client.set_mesher(kind);
+                    }
+                    if menu_was_open && !self.ui.menu_open {
+                        self.save_state(); // closing the menu keeps what was chosen in it
                     }
                     return;
                 }
@@ -267,6 +320,24 @@ mod tests {
             assert!(dot.abs() < 1e-5);
             assert!((len - 1.0).abs() < 1e-5);
         }
+    }
+
+    #[test]
+    fn camera_survives_a_round_trip_through_text() {
+        let c = CameraView { pos: [-123.25, 64.5, 9001.75], yaw: 2.5, pitch: -0.75 };
+        assert_eq!(CameraView::from_text(&c.to_text()), Some(c));
+        // It shares a file with the settings, which must not confuse either parser.
+        let both = format!("{}{}", crate::ui::Settings::default().to_text(), c.to_text());
+        assert_eq!(CameraView::from_text(&both), Some(c));
+    }
+
+    #[test]
+    fn a_broken_saved_camera_is_rejected() {
+        for bad in ["", "cam=1,2,3", "cam=1,2,3,4,x", "cam=NaN,0,0,0,0", "cam=inf,0,0,0,0", "cam=1e30,0,0,0,0"] {
+            assert_eq!(CameraView::from_text(bad), None, "{bad}");
+        }
+        // A wild pitch is clamped rather than thrown away.
+        assert_eq!(CameraView::from_text("cam=0,0,0,0,9").map(|c| c.pitch), Some(1.5));
     }
 
     #[test]

@@ -40,19 +40,23 @@ fn bits_for(palette_len: usize) -> u8 {
     }
 }
 
+/// `bits` is always a power of two (1/2/4/8/16), so entries-per-word is too and the
+/// divide/modulo become shifts. This is the hottest function in the engine.
 #[inline]
 fn get_idx(data: &[u64], bits: u8, i: usize) -> usize {
-    let per = 64 / bits as usize;
-    let word = data[i / per];
-    let shift = (i % per) * bits as usize;
+    let lb = bits.trailing_zeros() as usize; // log2(bits)
+    let per_shift = 6 - lb; // log2(64 / bits)
+    let word = data[i >> per_shift];
+    let shift = (i & ((1usize << per_shift) - 1)) << lb;
     ((word >> shift) & ((1u64 << bits) - 1)) as usize
 }
 
 #[inline]
 fn set_idx(data: &mut [u64], bits: u8, i: usize, v: usize) {
-    let per = 64 / bits as usize;
-    let w = i / per;
-    let shift = (i % per) * bits as usize;
+    let lb = bits.trailing_zeros() as usize;
+    let per_shift = 6 - lb;
+    let w = i >> per_shift;
+    let shift = (i & ((1usize << per_shift) - 1)) << lb;
     let mask = ((1u64 << bits) - 1) << shift;
     data[w] = (data[w] & !mask) | ((v as u64) << shift);
 }
@@ -129,6 +133,27 @@ impl Chunk {
         }
     }
 
+    /// Writes every block into `out` (length `CHUNK_VOLUME`, same order as `get`).
+    /// Much faster than `CHUNK_VOLUME` calls to `get`: words are unpacked sequentially.
+    pub fn decode_into(&self, out: &mut [BlockState]) {
+        assert_eq!(out.len(), CHUNK_VOLUME);
+        match &self.storage {
+            Storage::Uniform(s) => out.fill(*s),
+            Storage::Paletted(p) => {
+                let bits = p.bits as usize;
+                let per = 64 / bits;
+                let mask = (1u64 << bits) - 1;
+                for (cells, &word) in out.chunks_mut(per).zip(p.data.iter()) {
+                    let mut w = word;
+                    for c in cells {
+                        *c = p.palette[(w & mask) as usize];
+                        w >>= bits;
+                    }
+                }
+            }
+        }
+    }
+
     pub fn get_local(&self, l: LocalPos) -> BlockState {
         self.get(l.index())
     }
@@ -190,6 +215,26 @@ impl Chunk {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decode_into_matches_get_for_every_bit_width() {
+        // 1, 3, 9, 40 and 300 distinct states exercise 1/2/4/8/16-bit palettes.
+        for kinds in [1usize, 2, 3, 9, 40, 300] {
+            let mut c = Chunk::air();
+            for i in 0..CHUNK_VOLUME {
+                let id = ((i * 7 + i / 13) % kinds) as u16;
+                c.set(i, BlockState::full(id));
+            }
+            let mut out = vec![AIR; CHUNK_VOLUME];
+            c.decode_into(&mut out);
+            for i in 0..CHUNK_VOLUME {
+                assert_eq!(out[i], c.get(i), "kinds {kinds}, index {i}");
+            }
+        }
+        let mut out = vec![AIR; CHUNK_VOLUME];
+        Chunk::uniform(BlockState::full(5)).decode_into(&mut out);
+        assert!(out.iter().all(|&s| s == BlockState::full(5)));
+    }
 
     #[test]
     fn uniform_costs_almost_nothing() {

@@ -4,17 +4,24 @@
 //! dirty chunks into padded copies, meshes them on worker threads, and throws away
 //! results that were superseded by a newer edit (version check).
 //!
-//! The renderer (wgpu) would read `meshes`, upload each chunk's vertex data into a
-//! pooled buffer, and draw opaque -> cutout -> translucent.
+//! The renderer reads `meshes`, uploads each changed chunk's vertex data (see
+//! `take_mesh_changes`) and draws opaque -> cutout -> translucent.
+//!
+//! Two things keep meshing work proportional to what is actually visible:
+//!   * chunks that cannot have geometry (open sky, solid rock between solid rock) never
+//!     become a job at all (`mesh::has_no_faces`);
+//!   * a newly arrived chunk waits briefly for the neighbours the server is still sending,
+//!     so it is meshed once with its borders known instead of again per neighbour.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::mpsc;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use crate::block::BlockState;
 use crate::coords::{BlockPos, ChunkPos, Face, CHUNK_SIZE};
 use crate::jobs::JobPool;
-use crate::mesh::{mesh_chunk_with, ChunkMesh, Mesher, PaddedChunk};
+use crate::mesh::{has_no_faces, mesh_chunk_with, ChunkMesh, Mesher, PaddedChunk};
 use crate::protocol::{ClientMsg, Endpoint, ServerMsg};
 use crate::registry::BlockRegistry;
 use crate::world::ChunkStore;
@@ -36,6 +43,8 @@ struct MeshResult {
 pub struct ClientStats {
     pub chunks_received: u64,
     pub meshes_built: u64,
+    /// Dirty chunks resolved without a job because they cannot have geometry.
+    pub meshes_skipped: u64,
     pub stale_meshes: u64,
     pub block_updates: u64,
 }
@@ -49,6 +58,14 @@ pub struct Client {
     mesh_changes: Vec<ChunkPos>,
     versions: HashMap<ChunkPos, u64>,
     dirty: HashSet<ChunkPos>,
+    /// Chunks that arrived and have not been meshed yet, with their arrival time.
+    awaiting_neighbors: HashMap<ChunkPos, Instant>,
+    /// Streaming footprint as the server sees it (horizontal radius, vertical cap).
+    view_chunks: i32,
+    vertical_view: i32,
+    /// How long a new chunk may wait for neighbours that are still expected before it is
+    /// meshed anyway. Zero meshes every chunk the moment it arrives (the old behaviour).
+    pub neighbor_wait: Duration,
     pool: Option<JobPool<MeshJob, MeshResult>>,
     pub camera: [f32; 3],
     pub stats: ClientStats,
@@ -73,6 +90,10 @@ impl Client {
             mesh_changes: Vec::new(),
             versions: HashMap::new(),
             dirty: HashSet::new(),
+            awaiting_neighbors: HashMap::new(),
+            view_chunks: 4, // the server's default until `set_view_distance` is called
+            vertical_view: i32::MAX,
+            neighbor_wait: Duration::from_millis(400),
             pool: None,
             camera: [0.0; 3],
             stats: ClientStats::default(),
@@ -97,6 +118,7 @@ impl Client {
     }
 
     pub fn set_view_distance(&mut self, chunks: u8) {
+        self.view_chunks = (chunks as i32).clamp(2, 32); // same clamp as the server
         self.link.send(ClientMsg::SetViewDistance { chunks });
     }
 
@@ -152,6 +174,17 @@ impl Client {
         self.dirty.is_empty() && self.pool.as_ref().map_or(true, |p| p.in_flight() == 0)
     }
 
+    /// Queues every existing mesh for the renderer again. Call after the GPU resources were
+    /// recreated (Android destroys the surface whenever the app goes to the background),
+    /// otherwise only chunks that change afterwards would be drawn.
+    pub fn requeue_all_meshes(&mut self) {
+        self.mesh_changes.clear();
+        let cam = BlockPos::from_f32(self.camera).chunk();
+        let mut all: Vec<ChunkPos> = self.meshes.keys().copied().collect();
+        all.sort_unstable_by_key(|p| p.dist_sq(cam)); // nearest first
+        self.mesh_changes = all;
+    }
+
     /// Up to `max` chunk positions whose mesh changed (or was removed) since the last call.
     /// The renderer re-uploads `meshes[pos]` if present, or frees its GPU buffers if not.
     pub fn take_mesh_changes(&mut self, max: usize) -> Vec<ChunkPos> {
@@ -176,8 +209,9 @@ impl Client {
 
     fn on_msg(&mut self, msg: ServerMsg) {
         match msg {
-            ServerMsg::Welcome { seed, tick_hz, blocks_toml } => {
+            ServerMsg::Welcome { seed, tick_hz, vertical_view_chunks, blocks_toml } => {
                 self.seed = seed;
+                self.vertical_view = vertical_view_chunks.max(0);
                 self.tick_hz = tick_hz;
                 match BlockRegistry::from_toml(&blocks_toml) {
                     Ok(reg) => {
@@ -195,13 +229,16 @@ impl Client {
             ServerMsg::ChunkData { pos, chunk } => {
                 self.store.insert(pos, *chunk);
                 self.stats.chunks_received += 1;
+                self.awaiting_neighbors.entry(pos).or_insert_with(Instant::now);
                 self.mark_dirty_with_neighbors(pos);
             }
             ServerMsg::ChunkUnload { pos } => {
                 self.store.remove(pos);
-                self.meshes.remove(&pos);
-                self.mesh_changes.push(pos);
+                if self.meshes.remove(&pos).is_some() {
+                    self.mesh_changes.push(pos);
+                }
                 self.dirty.remove(&pos);
+                self.awaiting_neighbors.remove(&pos);
                 self.versions.remove(&pos);
             }
             ServerMsg::BlockUpdate { pos, state } => {
@@ -255,22 +292,69 @@ impl Client {
         }
     }
 
+    /// Is `p` inside the area the server streams around `center`? Mirrors
+    /// `Server::stream_chunks`; being slightly off only costs a short wait.
+    fn is_expected(&self, p: ChunkPos, center: ChunkPos) -> bool {
+        let r = self.view_chunks;
+        let (dx, dy, dz) = (p.x - center.x, p.y - center.y, p.z - center.z);
+        dy.abs() <= r.min(self.vertical_view) && dx * dx + dz * dz <= r * r + r
+    }
+
+    /// A chunk that has never been meshed holds off while any of its 26 neighbours is still
+    /// on its way, up to `neighbor_wait`: face neighbours decide which border faces exist,
+    /// edge and corner neighbours feed ambient occlusion along the border. Neighbours outside
+    /// the streamed area are not waited for, so chunks at its edge mesh straight away (and
+    /// are redone when the player moves and their face neighbours arrive).
+    fn should_wait(&self, p: ChunkPos, center: ChunkPos) -> bool {
+        let Some(arrived) = self.awaiting_neighbors.get(&p) else { return false };
+        if arrived.elapsed() >= self.neighbor_wait {
+            return false;
+        }
+        for dy in -1..=1 {
+            for dz in -1..=1 {
+                for dx in -1..=1 {
+                    let n = p.offset(dx, dy, dz);
+                    if !self.store.contains(n) && self.is_expected(n, center) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
     fn submit_mesh_jobs(&mut self) {
-        let Some(pool) = self.pool.as_ref() else { return };
-        // Keep the queue shallow so priorities stay fresh as the player moves.
-        let max_in_flight = self.workers * 3;
-        let free = max_in_flight.saturating_sub(pool.in_flight());
-        if free == 0 || self.dirty.is_empty() {
+        let (Some(pool), Some(reg)) = (self.pool.as_ref(), self.registry.as_ref()) else { return };
+        if self.dirty.is_empty() {
             return;
         }
+        // Keep the queue shallow so priorities stay fresh as the player moves.
+        let max_in_flight = self.workers * 3;
+        let mut free = max_in_flight.saturating_sub(pool.in_flight()).min(self.mesh_budget);
         let cam = BlockPos::from_f32(self.camera).chunk();
         let mut order: Vec<(i64, ChunkPos)> = self.dirty.iter().map(|&p| (p.dist_sq(cam), p)).collect();
         order.sort_unstable_by_key(|&(d, _)| d);
-        for (d, p) in order.into_iter().take(free.min(self.mesh_budget)) {
-            self.dirty.remove(&p);
+        for (d, p) in order {
             if !self.store.contains(p) {
+                self.dirty.remove(&p);
                 continue;
             }
+            // Free: no snapshot, no job, and it does not use up this frame's budget.
+            if has_no_faces(reg, &self.store, p) {
+                self.dirty.remove(&p);
+                self.awaiting_neighbors.remove(&p);
+                if self.meshes.remove(&p).is_some() {
+                    self.mesh_changes.push(p);
+                }
+                self.stats.meshes_skipped += 1;
+                continue;
+            }
+            if free == 0 || self.should_wait(p, cam) {
+                continue;
+            }
+            free -= 1;
+            self.dirty.remove(&p);
+            self.awaiting_neighbors.remove(&p);
             let version = self.versions.get(&p).copied().unwrap_or(0);
             let snapshot = PaddedChunk::capture(&self.store, p);
             pool.submit(MeshJob { pos: p, version, snapshot, mesher: self.mesher }, d.min(u32::MAX as i64) as u32);
@@ -282,12 +366,15 @@ impl Client {
         for r in pool.poll() {
             let current = self.versions.get(&r.pos).copied();
             if current == Some(r.version) && self.store.contains(r.pos) {
+                // Only tell the renderer when there is something to upload or free.
                 if r.mesh.is_empty() {
-                    self.meshes.remove(&r.pos);
+                    if self.meshes.remove(&r.pos).is_some() {
+                        self.mesh_changes.push(r.pos);
+                    }
                 } else {
                     self.meshes.insert(r.pos, r.mesh);
+                    self.mesh_changes.push(r.pos);
                 }
-                self.mesh_changes.push(r.pos);
                 self.stats.meshes_built += 1;
             } else {
                 // A newer edit superseded this snapshot; its replacement is queued.

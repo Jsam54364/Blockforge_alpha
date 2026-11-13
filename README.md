@@ -1,12 +1,15 @@
 # blockforge
 
-Headless core of a mobile-first voxel engine in Rust. **Std-only, zero dependencies.**
-No renderer yet: this is the part that decides performance and architecture, built so a
-`wgpu` client can be dropped on top.
+A mobile-first voxel engine in Rust, in two crates:
 
-> **Status:** the core compiles and all 61 unit + 3 end-to-end tests pass on GitHub Actions.
-> The `app/` front-end (renderer, touch controls, APK packaging) has been written but not yet
-> built; expect to fix a few compile errors on its first CI run.
+* the **core** (this folder): std-only, zero dependencies. World data, terrain generation,
+  meshing, saves and the server/client pair. Everything that decides performance and
+  architecture lives here and is tested without a GPU.
+* the **app** (`app/`): the Android front-end. winit + wgpu renderer, touch controls and HUD.
+
+> **Status:** 76 unit + 7 end-to-end tests in the core and 44 in the app (including WGSL
+> validation) pass. The APK builds on GitHub Actions and has been run and measured on a phone
+> (see the numbers further down).
 
 ```
 cargo test                           # unit + end-to-end tests
@@ -47,12 +50,30 @@ cargo run --release --bin headless   # stream, mesh, edit; prints stats + an ASC
 4. **LOD meshing**: `lod::select` picks nodes; downsampled meshing + seam handling is not written.
 5. **Server**: no reach/anti-cheat checks, undo history is global not per-player, autosave
    blocks the tick, events outside sim distance are dropped instead of re-scanned.
-6. **Client**: AO at chunk edges/corners isn't refreshed when only a diagonal neighbour arrives;
-   chunk meshes wait for nothing (could delay until the 6 face neighbours are loaded).
+6. **Client**: a new chunk now waits (up to `Client::neighbor_wait`) for the neighbours the
+   server is still sending, so it is meshed once with correct borders and AO. What remains:
+   chunks at the edge of the streamed area are meshed straight away, and their AO at
+   edges/corners isn't refreshed when only a diagonal neighbour arrives later.
 7. **Saves**: block ids are numeric and append-only; add a name→id table to the header.
 8. **Determinism**: worldgen uses `f32`; fine on one platform, switch to fixed-point if you
    need bit-identical worlds across ARM/x86 for multiplayer.
-9. `JobPool` doesn't survive a panicking job (see note in `jobs.rs`).
+
+## How meshing work is kept small
+
+Measured headless at render distance 8 (1125 chunks around the player, 233 with geometry):
+
+| | mesh jobs at startup | mesh jobs in 6 s of flying | time in `Client::update` at startup |
+|---|---|---|---|
+| before | 3082 | 511 | 187 ms |
+| now | 262 | 84 | 40 ms |
+
+* `mesh::has_no_faces` resolves open sky and buried rock without a snapshot or a job
+  (most chunks in a cubic-chunk world).
+* New chunks wait briefly for their neighbours instead of being re-meshed as each one arrives.
+* `PaddedChunk::capture` fills uniform chunks and decodes the centre chunk in one pass
+  (`Chunk::decode_into`); it runs on the render thread, so this is frame time.
+* The renderer is only told about chunks whose mesh really changed, so fewer GPU buffers
+  are created and dropped.
 
 ## Tuning knobs worth measuring on a real phone first
 
@@ -117,6 +138,18 @@ render distance 6 = 7.1 ms (43% busy), 8 = 11.7 ms (70%), 10 = 12.9 ms (77%), 12
 (94%, 56 fps). CPU stayed near 5% of the device; memory 100-220 MB. The renderer is GPU-bound,
 so the next wins after frustum culling are occlusion culling, then LOD meshes.
 
+Solid terrain is drawn nearest chunk first so the depth test can reject hidden fragments
+before they are shaded (water still goes far to near for blending). This has not been measured
+on a phone yet: compare GPU time with VSYNC off against the figures above.
+
+### What is kept between launches
+
+`world.bfwj` (block edits) and `state.txt` (menu settings and the camera) live in the app's
+internal data folder. Both are written when the app goes to the background, because Android
+can kill it there without warning; settings are also written when the menu is closed. The
+world file is only rewritten when a block actually changed. When the app comes back, every
+chunk mesh is handed to the new GPU surface again (`Client::requeue_all_meshes`).
+
 Renderer gaps: pooled vertex buffers, occlusion culling, texture array
 (colours come from a palette keyed by texture name), render-scale governor hookup, LOD meshing.
 
@@ -145,7 +178,8 @@ draw one instance per quad (8 bytes instead of 32), texture repeat across merged
 ## Planned next
 
 
-1. Flip the default mesher to GREEDY once it has been checked on a phone; then one instance per
+1. Flip the default mesher to GREEDY once it has been checked on a phone (the menu choice is
+   now remembered, so switching it once is enough to keep testing it); then one instance per
    quad (8 bytes) and a faster scan for the per-face path.
 2. Occlusion culling (cave-style flood fill) to skip chunks hidden behind terrain, which should
    help most underground.

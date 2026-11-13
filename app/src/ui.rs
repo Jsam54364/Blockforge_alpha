@@ -64,6 +64,10 @@ impl CullMode {
             CullMode::Off => "OFF",
         }
     }
+
+    fn from_label(s: &str) -> Option<CullMode> {
+        [CullMode::All, CullMode::Frustum, CullMode::Back, CullMode::Off].into_iter().find(|m| m.label() == s)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -85,6 +89,58 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Settings { render_chunks: 6, lod_chunks: 16, fog: true, cull: CullMode::All, vsync: true, greedy: false, show_stats: true }
+    }
+}
+
+impl Settings {
+    /// `key=value` lines, one per setting, for the settings file kept between launches.
+    pub fn to_text(&self) -> String {
+        format!(
+            "render_chunks={}\nlod_chunks={}\nfog={}\ncull={}\nvsync={}\ngreedy={}\nshow_stats={}\n",
+            self.render_chunks,
+            self.lod_chunks,
+            self.fog,
+            self.cull.label(),
+            self.vsync,
+            self.greedy,
+            self.show_stats
+        )
+    }
+
+    /// Reads what `to_text` wrote. Unknown keys and bad values are ignored and numbers are
+    /// clamped, so a file from an older or newer version can never produce invalid settings.
+    pub fn apply_text(&mut self, text: &str) {
+        for line in text.lines() {
+            let Some((key, value)) = line.split_once('=') else { continue };
+            let (key, value) = (key.trim(), value.trim());
+            match key {
+                "render_chunks" => {
+                    if let Ok(v) = value.parse::<u8>() {
+                        self.render_chunks = v.clamp(RENDER_MIN, RENDER_MAX);
+                    }
+                }
+                "lod_chunks" => {
+                    if let Ok(v) = value.parse::<u8>() {
+                        self.lod_chunks = v.clamp(LOD_MIN, LOD_MAX);
+                    }
+                }
+                "cull" => {
+                    if let Some(m) = CullMode::from_label(value) {
+                        self.cull = m;
+                    }
+                }
+                "fog" | "vsync" | "greedy" | "show_stats" => {
+                    let Ok(v) = value.parse::<bool>() else { continue };
+                    match key {
+                        "fog" => self.fog = v,
+                        "vsync" => self.vsync = v,
+                        "greedy" => self.greedy = v,
+                        _ => self.show_stats = v,
+                    }
+                }
+                _ => {}
+            }
+        }
     }
 }
 
@@ -430,6 +486,31 @@ mod tests {
     fn center_of(u: &Ui, a: Action) -> (f32, f32) {
         let b = u.buttons.iter().rev().find(|b| b.action == a).expect("button present");
         (b.x + b.w * 0.5, b.y + b.h * 0.5)
+    }
+
+    #[test]
+    fn settings_survive_a_round_trip_through_text() {
+        let s = Settings {
+            render_chunks: 9,
+            lod_chunks: 24,
+            fog: false,
+            cull: CullMode::Frustum,
+            vsync: false,
+            greedy: true,
+            show_stats: false,
+        };
+        let mut back = Settings::default();
+        back.apply_text(&s.to_text());
+        assert_eq!(back, s);
+    }
+
+    #[test]
+    fn bad_settings_text_is_ignored_or_clamped() {
+        let mut s = Settings::default();
+        s.apply_text("render_chunks=200\nlod_chunks=banana\nfog=maybe\ncull=SIDEWAYS\nno equals sign\nfuture_key=1\n");
+        assert_eq!(s, Settings { render_chunks: RENDER_MAX, ..Settings::default() });
+        s.apply_text("render_chunks=0");
+        assert_eq!(s.render_chunks, RENDER_MIN);
     }
 
     #[test]
