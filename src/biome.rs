@@ -18,6 +18,9 @@ pub struct Biome {
     pub surface: &'static str,
     /// The few blocks under the top.
     pub subsurface: &'static str,
+    /// Grass colour (sRGB, 0xRRGGBB): the greyscale grass textures are multiplied by it, and
+    /// it blends smoothly between neighbouring biomes.
+    pub grass: u32,
 }
 
 const ANY: (f32, f32) = (f32::MIN, f32::MAX);
@@ -25,21 +28,26 @@ const ANY_RAIN: (f32, f32) = (0.0, 2.0);
 
 /// Checked in order; the first match wins (the last entry matches everything).
 pub const BIOMES: &[Biome] = &[
-    Biome { name: "snowy peaks", temperature: (f32::MIN, -7.0), rainfall: ANY_RAIN, min_altitude: 70.0, surface: "snow", subsurface: "stone" },
-    Biome { name: "glacier", temperature: (f32::MIN, -7.0), rainfall: ANY_RAIN, min_altitude: f32::MIN, surface: "snow", subsurface: "dirt" },
-    Biome { name: "bare rock", temperature: (-7.0, -1.0), rainfall: ANY_RAIN, min_altitude: 75.0, surface: "stone", subsurface: "stone" },
-    Biome { name: "scree", temperature: (-7.0, 2.0), rainfall: ANY_RAIN, min_altitude: 60.0, surface: "gravel", subsurface: "stone" },
-    Biome { name: "tundra", temperature: (-7.0, 0.0), rainfall: ANY_RAIN, min_altitude: f32::MIN, surface: "cold_grass", subsurface: "dirt" },
-    Biome { name: "boreal forest", temperature: (0.0, 7.0), rainfall: (0.3, 2.0), min_altitude: f32::MIN, surface: "cold_grass", subsurface: "dirt" },
-    Biome { name: "cold steppe", temperature: (0.0, 7.0), rainfall: (0.0, 0.3), min_altitude: f32::MIN, surface: "dry_grass", subsurface: "dirt" },
-    Biome { name: "temperate forest", temperature: (7.0, 19.0), rainfall: (0.5, 2.0), min_altitude: f32::MIN, surface: "grass", subsurface: "dirt" },
-    Biome { name: "grassland", temperature: (7.0, 19.0), rainfall: (0.28, 0.5), min_altitude: f32::MIN, surface: "grass", subsurface: "dirt" },
-    Biome { name: "steppe", temperature: (7.0, 19.0), rainfall: (0.0, 0.28), min_altitude: f32::MIN, surface: "dry_grass", subsurface: "dirt" },
-    Biome { name: "desert", temperature: (19.0, f32::MAX), rainfall: (0.0, 0.2), min_altitude: f32::MIN, surface: "sand", subsurface: "sand" },
-    Biome { name: "savanna", temperature: (19.0, f32::MAX), rainfall: (0.2, 0.52), min_altitude: f32::MIN, surface: "dry_grass", subsurface: "dirt" },
-    Biome { name: "rainforest", temperature: (19.0, f32::MAX), rainfall: (0.52, 2.0), min_altitude: f32::MIN, surface: "lush_grass", subsurface: "dirt" },
-    Biome { name: "grassland", temperature: ANY, rainfall: ANY_RAIN, min_altitude: f32::MIN, surface: "grass", subsurface: "dirt" },
+    Biome { name: "snowy peaks", temperature: (f32::MIN, -7.0), rainfall: ANY_RAIN, min_altitude: 70.0, surface: "snow", subsurface: "stone", grass: 0x86A07A },
+    Biome { name: "glacier", temperature: (f32::MIN, -7.0), rainfall: ANY_RAIN, min_altitude: f32::MIN, surface: "snow", subsurface: "dirt", grass: 0x86A07A },
+    Biome { name: "bare rock", temperature: (-7.0, -1.0), rainfall: ANY_RAIN, min_altitude: 75.0, surface: "stone", subsurface: "stone", grass: 0x8AA67A },
+    Biome { name: "scree", temperature: (-7.0, 2.0), rainfall: ANY_RAIN, min_altitude: 60.0, surface: "gravel", subsurface: "stone", grass: 0x8AA67A },
+    Biome { name: "tundra", temperature: (-7.0, 0.0), rainfall: ANY_RAIN, min_altitude: f32::MIN, surface: "cold_grass", subsurface: "dirt", grass: 0x8FA676 },
+    Biome { name: "boreal forest", temperature: (0.0, 7.0), rainfall: (0.3, 2.0), min_altitude: f32::MIN, surface: "cold_grass", subsurface: "dirt", grass: 0x6F9A5A },
+    Biome { name: "cold steppe", temperature: (0.0, 7.0), rainfall: (0.0, 0.3), min_altitude: f32::MIN, surface: "dry_grass", subsurface: "dirt", grass: 0xA6A766 },
+    Biome { name: "temperate forest", temperature: (7.0, 19.0), rainfall: (0.5, 2.0), min_altitude: f32::MIN, surface: "grass", subsurface: "dirt", grass: 0x79C05A },
+    Biome { name: "grassland", temperature: (7.0, 19.0), rainfall: (0.28, 0.5), min_altitude: f32::MIN, surface: "grass", subsurface: "dirt", grass: 0x91BD59 },
+    Biome { name: "steppe", temperature: (7.0, 19.0), rainfall: (0.0, 0.28), min_altitude: f32::MIN, surface: "dry_grass", subsurface: "dirt", grass: 0xB3B460 },
+    Biome { name: "desert", temperature: (19.0, f32::MAX), rainfall: (0.0, 0.2), min_altitude: f32::MIN, surface: "sand", subsurface: "sand", grass: 0xBFB755 },
+    Biome { name: "savanna", temperature: (19.0, f32::MAX), rainfall: (0.2, 0.52), min_altitude: f32::MIN, surface: "dry_grass", subsurface: "dirt", grass: 0xBFB755 },
+    Biome { name: "rainforest", temperature: (19.0, f32::MAX), rainfall: (0.52, 2.0), min_altitude: f32::MIN, surface: "lush_grass", subsurface: "dirt", grass: 0x59C93C },
+    Biome { name: "grassland", temperature: ANY, rainfall: ANY_RAIN, min_altitude: f32::MIN, surface: "grass", subsurface: "dirt", grass: 0x91BD59 },
 ];
+
+/// A biome's grass colour as sRGB bytes.
+pub fn grass_rgb(b: &Biome) -> [u8; 3] {
+    [(b.grass >> 16) as u8, (b.grass >> 8) as u8, b.grass as u8]
+}
 
 /// The biome for a climate and an altitude (blocks above the sea): its index in `BIOMES`.
 pub fn choose(temperature: f32, rainfall: f32, altitude: f32) -> usize {

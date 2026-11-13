@@ -402,11 +402,13 @@ fn leaves(seed: u64) -> Canvas {
     c.fill(|x, y| {
         let (f1, _, id) = voronoi(seed, x, y, 9);
         let r = 1.6 + 0.9 * ((id >> 20) & 0xFF) as f32 / 255.0;
+        // Greyscale: the game tints leaves with the biome's colour.
         if f1 > r {
-            return ([0.05, 0.11, 0.04], 0.0); // gaps between the leaves
+            return ([0.13, 0.13, 0.13], 0.0); // gaps between the leaves
         }
         let t = ((id >> 32) & 0xFF) as f32 / 255.0;
-        let col = mix([0.12, 0.3, 0.09], [0.28, 0.5, 0.18], t);
+        let g = 0.38 + 0.3 * t;
+        let col = [g, g, g];
         let bump = 1.0 - f1 / r;
         (scale(col, 0.8 + 0.3 * bump), bump * 1.5)
     });

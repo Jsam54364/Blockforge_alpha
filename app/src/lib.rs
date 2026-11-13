@@ -13,6 +13,8 @@ mod gpu_timer;
 mod math;
 mod perf;
 mod texgen;
+mod textures;
+mod tint;
 mod ui;
 
 use std::path::PathBuf;
@@ -60,7 +62,8 @@ impl ApplicationHandler for App {
         };
         let size = window.inner_size();
         match pollster::block_on(gfx::Gfx::new(window.clone(), self.game.registry())) {
-            Ok(g) => {
+            Ok(mut g) => {
+                g.set_generator(self.game.generator());
                 self.game.set_surface(size.width, size.height, window.scale_factor());
                 self.game.ui.vsync_supported = g.vsync_supported();
                 // A new Gfx has no chunk buffers. After a trip to the background the client

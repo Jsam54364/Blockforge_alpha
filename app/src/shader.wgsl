@@ -10,16 +10,20 @@ struct Globals {
     fog_color: vec4<f32>,
     fog_params: vec4<f32>,   // x = fog start, y = fog end, z = alpha, w = aspect ratio
     screen: vec4<f32>,       // x = width px, y = height px
-    flags: vec4<f32>,        // x = fog enabled (1 or 0)
+    flags: vec4<f32>,        // x = fog enabled, y = seconds, z = water texture layer, w = tint levels ready (bits)
     palette: array<vec4<f32>, 32>,
     lod_window: vec4<f32>,   // xy = chunk column at bit 0 of lod_mask
     lod_mask: array<vec4<u32>, 32>, // 64 x 64 bits: chunk columns drawn by real terrain
+    tint_window: vec4<f32>,  // tint map level centres in blocks: x0, z0, x1, z1
 };
 
 @group(0) @binding(0) var<uniform> g: Globals;
 // Block textures: one layer per texture id, mipmapped, repeating (see gfx::block_textures).
 @group(0) @binding(1) var blocks: texture_2d_array<f32>;
 @group(0) @binding(2) var blocks_sampler: sampler;
+// Biome colours (rgb) and brightness variation (a) around the camera; see gfx/tint.rs.
+@group(0) @binding(3) var tint_map: texture_2d_array<f32>;
+@group(0) @binding(4) var tint_sampler: sampler;
 
 struct VsIn {
     @location(0) packed: vec2<u32>,
@@ -33,6 +37,7 @@ struct VsOut {
     @location(1) world: vec3<f32>,
     @location(2) uv: vec2<f32>,
     @location(3) @interpolate(flat) layer: u32,
+    @location(4) @interpolate(flat) face: u32,
 };
 
 // Texture coordinates for a face, from a position in blocks: one texture per block, upright
@@ -97,6 +102,7 @@ fn vs_main(v: VsIn) -> VsOut {
     let lift = f32((b >> 27u) & 3u) * 0.25;
     o.uv = face_uv(face, local + vec3<f32>(0.0, lift, 0.0));
     o.layer = tex;
+    o.face = face;
     return o;
 }
 
@@ -159,15 +165,116 @@ fn vs_lod(v: VsIn) -> VsOut {
     o.world = world;
     o.uv = face_uv(face, world - vec3<f32>(v.origin.x, 0.0, v.origin.y));
     o.layer = tex;
+    o.face = face;
     return o;
+}
+
+// Grass colour of the plains (#91BD59, linear), until the tint map has arrived.
+const DEFAULT_TINT = vec3<f32>(0.283, 0.509, 0.100);
+
+// Biome colour (rgb) and brightness variation (a, 0.5 = none) at a world position: the fine
+// level near the camera, fading into the coarse one before the fine one ends.
+fn tint_at(p: vec2<f32>) -> vec4<f32> {
+    let ready = u32(g.flags.w + 0.5);
+    var t = vec4<f32>(DEFAULT_TINT, 0.5);
+    if ((ready & 2u) != 0u) {
+        t = textureSampleLevel(tint_map, tint_sampler, p / (128.0 * 256.0), 1, 0.0);
+    }
+    if ((ready & 1u) != 0u) {
+        let d = max(abs(p.x - g.tint_window.x), abs(p.y - g.tint_window.y));
+        let w = 1.0 - smoothstep(1700.0, 1950.0, d);
+        if (w > 0.0) {
+            t = mix(t, textureSampleLevel(tint_map, tint_sampler, p / (16.0 * 256.0), 0, 0.0), w);
+        }
+    }
+    return t;
+}
+
+fn hash_block(p: vec3<f32>) -> u32 {
+    let q = vec3<i32>(floor(p));
+    var h = (u32(q.x) * 0x8da6b343u) ^ (u32(q.y) * 0xd8163841u) ^ (u32(q.z) * 0xcb1ab31fu);
+    h = (h ^ (h >> 15u)) * 0x2c1b3c6du;
+    return h ^ (h >> 12u);
+}
+
+// Every block turns and mirrors its texture its own way (tops: 8 ways; sides: mirrored or
+// not, so grass fringes stay on top), which makes the repeats much harder to see.
+fn block_uv(face: u32, uv: vec2<f32>, world: vec3<f32>) -> vec2<f32> {
+    let h = hash_block(world - face_normal(face) * 0.1);
+    let cell = floor(uv);
+    var f = uv - cell;
+    if (face == 2u || face == 3u) {
+        if ((h & 4u) != 0u) {
+            f.x = 1.0 - f.x;
+        }
+        let r = h & 3u;
+        if (r == 1u) {
+            f = vec2<f32>(f.y, 1.0 - f.x);
+        } else if (r == 2u) {
+            f = vec2<f32>(1.0 - f.x, 1.0 - f.y);
+        } else if (r == 3u) {
+            f = vec2<f32>(1.0 - f.y, f.x);
+        }
+    } else if ((h & 1u) != 0u) {
+        f.x = 1.0 - f.x;
+    }
+    return cell + f;
+}
+
+// One travelling wave: adds its slope (d height / dx, d height / dz) to s.
+fn wave(s: ptr<function, vec2<f32>>, p: vec2<f32>, dir: vec2<f32>, wavelength: f32, amp: f32, speed: f32) {
+    let k = 6.2831853 / wavelength;
+    let c = cos(k * (dot(dir, p) - speed * g.flags.y));
+    *s += dir * (amp * k * c);
+}
+
+// Water: waves bend the surface normal; the surface shows the deep water colour looking down
+// and the sky's reflection at grazing angles (Fresnel), plus the sun's glint. Returns the
+// colour and how opaque it is (the translucent pass blends with it; LOD water is opaque).
+fn water_shade(world: vec3<f32>, face: u32, light: vec3<f32>) -> vec4<f32> {
+    let to_cam = g.cam_pos.xyz - world;
+    let v = normalize(to_cam);
+    var n = face_normal(face);
+    if (face == 2u) {
+        var s = vec2<f32>(0.0);
+        let p = world.xz;
+        wave(&s, p, vec2<f32>(0.8, 0.6), 7.0, 0.09, 1.4);
+        wave(&s, p, vec2<f32>(-0.42, 0.91), 4.3, 0.05, 1.1);
+        // Small ripples only up close: further out they would only shimmer.
+        let near = 1.0 / (1.0 + length(to_cam) / 25.0);
+        wave(&s, p, vec2<f32>(0.96, -0.28), 2.1, 0.022 * near, 0.8);
+        wave(&s, p, vec2<f32>(-0.71, -0.71), 1.3, 0.011 * near, 0.6);
+        // Far away the waves average out: calmer, more mirror-like.
+        s *= 1.0 / (1.0 + length(to_cam) / 60.0);
+        n = normalize(vec3<f32>(-s.x, 1.0, -s.y));
+    }
+    let fres = 0.02 + 0.98 * pow(1.0 - clamp(dot(n, v), 0.0, 1.0), 5.0);
+    let r = reflect(-v, n);
+    let sky = mix(g.fog_color.rgb, vec3<f32>(0.12, 0.28, 0.72), clamp(r.y * 1.4, 0.0, 1.0));
+    // The water body's own colour, which also tints whatever is seen through it.
+    let deep = vec3<f32>(0.018, 0.11, 0.16) * light;
+    let sun = normalize(vec3<f32>(0.4, 0.9, 0.3));
+    let glint = pow(max(dot(n, normalize(sun + v)), 0.0), 220.0) * 2.5;
+    let col = mix(deep, sky, fres) + vec3<f32>(glint);
+    return vec4<f32>(col, mix(0.8, 0.97, fres));
 }
 
 @fragment
 fn fs_main(f: VsOut) -> @location(0) vec4<f32> {
+    // Derivatives first (they need uniform control flow): mip levels for the turned textures.
+    let ddx = dpdx(f.uv);
+    let ddy = dpdy(f.uv);
     let d = distance(f.world, g.cam_pos.xyz);
-    let t = clamp((d - g.fog_params.x) / (g.fog_params.y - g.fog_params.x), 0.0, 1.0) * g.flags.x;
-    let albedo = textureSample(blocks, blocks_sampler, f.uv, f.layer).rgb;
-    let col = mix(albedo * f.color, g.fog_color.rgb, t);
+    let fog = clamp((d - g.fog_params.x) / (g.fog_params.y - g.fog_params.x), 0.0, 1.0) * g.flags.x;
+    if (f.layer == u32(g.flags.z + 0.5)) {
+        let w = water_shade(f.world, f.face, f.color);
+        return vec4<f32>(mix(w.rgb, g.fog_color.rgb, fog), w.a);
+    }
+    let tex = textureSampleGrad(blocks, blocks_sampler, block_uv(f.face, f.uv, f.world), f.layer, ddx, ddy);
+    let t = tint_at(f.world.xz);
+    // Alpha says how much of the biome colour to apply: 0 = all (grass), 1 = none.
+    let albedo = mix(tex.rgb * t.rgb, tex.rgb, tex.a) * mix(0.86, 1.14, t.a);
+    let col = mix(albedo * f.color, g.fog_color.rgb, fog);
     return vec4<f32>(col, g.fog_params.z);
 }
 

@@ -24,6 +24,9 @@ use blockforge::mesh::quad_indices;
 use blockforge::registry::BlockRegistry;
 
 use crate::texgen;
+use crate::textures;
+use crate::tint::{self, TintMap};
+use blockforge::worldgen::WorldGen;
 use wgpu::util::DeviceExt;
 use winit::window::Window;
 
@@ -62,6 +65,8 @@ struct Globals {
     lod_window: [f32; 4],
     /// One bit per chunk column: set where LOD terrain must not be drawn.
     lod_mask: [[u32; 4]; 32],
+    /// The tint map's level centres in blocks: x0, z0, x1, z1 (see `tint`).
+    tint_window: [f32; 4],
 }
 
 /// Per-frame toggles chosen in the settings menu.
@@ -92,12 +97,42 @@ fn srgb_to_linear(c: f32) -> f32 {
 fn build_palette(reg: &BlockRegistry) -> [[f32; 4]; 32] {
     let mut p = [[1.0f32, 0.0, 1.0, 1.0]; 32]; // magenta = missing texture
     for (i, name) in reg.texture_names().iter().enumerate().take(32) {
-        if texgen::known(name) {
-            let c = texgen::average_linear(&texgen::generate(name));
+        if textures::known(name) {
+            let c = texgen::average_linear(&textures::load(name));
             p[i] = [c[0], c[1], c[2], 1.0];
         }
     }
     p
+}
+
+/// The biome tint map's texture (two levels as array layers, see `tint`) and its sampler:
+/// bilinear and repeating, so colours blend between texels and wrap like the storage does.
+fn tint_texture(device: &wgpu::Device) -> (wgpu::Texture, wgpu::TextureView, wgpu::Sampler) {
+    let n = tint::TEXELS as u32;
+    let tex = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("tint map"),
+        size: wgpu::Extent3d { width: n, height: n, depth_or_array_layers: 2 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let view = tex.create_view(&wgpu::TextureViewDescriptor {
+        label: Some("tint map"),
+        dimension: Some(wgpu::TextureViewDimension::D2Array),
+        ..Default::default()
+    });
+    let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("tint sampler"),
+        address_mode_u: wgpu::AddressMode::Repeat,
+        address_mode_v: wgpu::AddressMode::Repeat,
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        ..Default::default()
+    });
+    (tex, view, sampler)
 }
 
 /// Mip levels of the block textures: 32, 16, 8, 4, 2, 1 texels.
@@ -122,7 +157,7 @@ fn block_textures(device: &wgpu::Device, queue: &wgpu::Queue, reg: &BlockRegistr
     });
     for layer in 0..layers {
         let name = names.get(layer as usize).map(String::as_str).unwrap_or("");
-        let mut px = texgen::generate(name);
+        let mut px = textures::load(name);
         let mut s = texgen::SIZE;
         for mip in 0..TEXTURE_MIPS {
             queue.write_texture(
@@ -219,6 +254,13 @@ pub struct Gfx {
     last_lod_drawn: usize,
     last_lod_quads: u64,
     palette: [[f32; 4]; 32],
+    /// Biome colours around the camera (two levels, see `tint`), once the world is known.
+    tint: Option<TintMap>,
+    tint_tex: wgpu::Texture,
+    /// Seconds since start, for animated water.
+    start: Instant,
+    /// The water texture's layer (the shader shades it as water).
+    water_layer: u32,
 }
 
 impl Gfx {
@@ -307,8 +349,25 @@ impl Gfx {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
             ],
         });
+        let (tint_tex, tint_view, tint_sampler) = tint_texture(&device);
         let (block_view, block_sampler) = block_textures(&device, &queue, reg);
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("pipeline layout"),
@@ -334,6 +393,8 @@ impl Gfx {
                     wgpu::BindGroupEntry { binding: 0, resource: buf.as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&block_view) },
                     wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&block_sampler) },
+                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&tint_view) },
+                    wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&tint_sampler) },
                 ],
             })
         };
@@ -416,7 +477,18 @@ impl Gfx {
             last_lod_drawn: 0,
             last_lod_quads: 0,
             palette: build_palette(reg),
+            tint: None,
+            tint_tex,
+            start: Instant::now(),
+            water_layer: reg.texture_names().iter().position(|n| n == "water").unwrap_or(usize::MAX) as u32,
         })
+    }
+
+    /// Starts the biome tint map once the world's generator is known.
+    pub fn set_generator(&mut self, gen: Arc<WorldGen>) {
+        if self.tint.is_none() {
+            self.tint = Some(TintMap::new(gen));
+        }
     }
 
     pub fn size(&self) -> (u32, u32) {
@@ -652,16 +724,42 @@ impl Gfx {
             lod_mask[i / 4][i % 4] = *w;
         }
 
+        // Biome colours: upload any level the worker finished.
+        let (tint_window, tint_ready) = match self.tint.as_mut() {
+            Some(t) => {
+                for (level, data) in t.update(cam.pos) {
+                    let n = tint::TEXELS as u32;
+                    self.queue.write_texture(
+                        wgpu::ImageCopyTexture {
+                            texture: &self.tint_tex,
+                            mip_level: 0,
+                            origin: wgpu::Origin3d { x: 0, y: 0, z: level as u32 },
+                            aspect: wgpu::TextureAspect::All,
+                        },
+                        &data,
+                        wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(4 * n), rows_per_image: Some(n) },
+                        wgpu::Extent3d { width: n, height: n, depth_or_array_layers: 1 },
+                    );
+                }
+                (t.window(), t.ready_bits())
+            }
+            None => ([0.0; 4], 0),
+        };
+        let time = self.start.elapsed().as_secs_f32() % 3600.0;
+
         let mut globals = Globals {
             view_proj: vp,
             cam_pos: [cam.pos[0], cam.pos[1], cam.pos[2], 1.0],
             fog_color: [sky[0], sky[1], sky[2], 1.0],
             fog_params: [opts.fog_start, opts.fog_end.max(opts.fog_start + 1.0), 1.0, aspect],
             screen: [self.config.width as f32, self.config.height as f32, 0.0, 0.0],
-            flags: [if opts.fog { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
+            // x: fog on, y: seconds (animated water), z: the water texture's layer,
+            // w: which tint map levels are ready (bits).
+            flags: [if opts.fog { 1.0 } else { 0.0 }, time, self.water_layer as f32, tint_ready as f32],
             palette: self.palette,
             lod_window: [cov.origin.0 as f32, cov.origin.1 as f32, 0.0, 0.0],
             lod_mask,
+            tint_window,
         };
         self.queue.write_buffer(&self.globals_solid, 0, as_bytes(std::slice::from_ref(&globals)));
         globals.fog_params[2] = 0.65;
@@ -946,7 +1044,8 @@ mod tests {
     #[test]
     fn globals_layout_matches_the_wgsl_struct() {
         // 64 (mat4) + 5 * 16 (vec4s) + 32 * 16 (palette) + 16 (lod window) + 32 * 16 (lod mask)
-        assert_eq!(std::mem::size_of::<Globals>(), 64 + 80 + 512 + 16 + 512);
+        // + 16 (tint window)
+        assert_eq!(std::mem::size_of::<Globals>(), 64 + 80 + 512 + 16 + 512 + 16);
         assert_eq!(std::mem::size_of::<HudVertex>(), 12);
     }
 

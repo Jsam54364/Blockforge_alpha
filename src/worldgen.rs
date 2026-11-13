@@ -15,6 +15,7 @@ use crate::chunk::Chunk;
 use crate::coords::{ChunkPos, LocalPos, CHUNK_SIZE};
 use crate::registry::BlockRegistry;
 use crate::climate::{Climate, ClimateSample};
+use crate::noise::Fbm;
 use crate::rng::hash3;
 use crate::terrain::{Terrain, TerrainSample};
 
@@ -58,6 +59,8 @@ pub struct WorldGen {
     bedrock: u16,
     /// (surface, subsurface) block per entry of `biome::BIOMES`.
     biome_blocks: Vec<(u16, u16)>,
+    /// Gentle large-scale brightness variation of the ground (see `ground_tint`).
+    variation: Fbm,
 }
 
 /// What the ground at a column is like (see `WorldGen::describe`).
@@ -113,6 +116,7 @@ impl WorldGen {
             water: id("water"),
             bedrock: id("bedrock"),
             biome_blocks: BIOMES.iter().map(|b| (id(b.surface), id(b.subsurface))).collect(),
+            variation: Fbm::new(seed ^ 0x7A11_7E5D, 60.0, 2, 0.5),
         }
     }
 
@@ -149,6 +153,17 @@ impl WorldGen {
         }
         let c = self.climate.at(x as f32, z as f32, t.smooth, t.inland, cell);
         self.biome_blocks[biome::choose(c.temperature, c.rainfall, t.smooth)]
+    }
+
+    /// How the ground at `(x, z)` is coloured, for terrain drawn in cells `cell` blocks wide:
+    /// the biome's grass colour (sRGB) and, in the last byte, a brightness variation (128 is
+    /// neutral) that varies over tens of blocks and hides how textures repeat.
+    pub fn ground_tint(&self, x: i32, z: i32, cell: i32) -> [u8; 4] {
+        let t = self.terrain.sample(x as f32, z as f32, cell as f32);
+        let c = self.climate.at(x as f32, z as f32, t.smooth.max(0.0), t.inland, cell as f32);
+        let [r, g, b] = biome::grass_rgb(&BIOMES[biome::choose(c.temperature, c.rainfall, t.smooth.max(0.0))]);
+        let v = self.variation.at(x as f32, z as f32, cell as f32);
+        [r, g, b, (128.0 + 127.0 * v.clamp(-1.0, 1.0)) as u8]
     }
 
     /// Biome, landform, height and climate of the column at `(x, z)`.
@@ -458,6 +473,18 @@ mod tests {
         let info = g.describe(x.floor() as i32, z.floor() as i32);
         assert!(matches!(info.biome, "grassland" | "temperate forest"), "{info:?}");
         assert!((3.0..40.0).contains(&y) && x.abs() < 6000.0 && z.abs() < 6000.0, "{x},{y},{z}");
+    }
+
+    #[test]
+    fn ground_tints_follow_the_biomes_and_vary_gently() {
+        let (_r, g) = make();
+        let [x, _, z] = g.find_spawn();
+        let t = g.ground_tint(x as i32, z as i32, 1);
+        let b = crate::biome::BIOMES.iter().find(|b| b.name == g.describe(x as i32, z as i32).biome).unwrap();
+        assert_eq!(&t[..3], &crate::biome::grass_rgb(b)[..]);
+        let v: Vec<u8> = (0..200).map(|i| g.ground_tint(i * 7, 0, 1)[3]).collect();
+        assert!(v.iter().any(|&a| a < 110) && v.iter().any(|&a| a > 146), "some variation: {v:?}");
+        assert_eq!(g.ground_tint(5, 5, 4096)[3], 128, "far away the variation averages out");
     }
 
     #[test]

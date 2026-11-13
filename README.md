@@ -7,7 +7,7 @@ A mobile-first voxel engine in Rust, in two crates:
   architecture lives here and is tested without a GPU.
 * the **app** (`app/`): the Android front-end. winit + wgpu renderer, touch controls and HUD.
 
-> **Status:** 99 unit + 8 end-to-end tests in the core and 47 in the app (including WGSL
+> **Status:** 100 unit + 8 end-to-end tests in the core and 52 in the app (including WGSL
 > validation) pass. The APK builds on GitHub Actions and has been run and measured on a phone
 > (see the numbers further down).
 
@@ -273,16 +273,30 @@ cover decided separately.
 
 Next: trees and plants per biome, rivers, rain shadows behind mountains.
 
-## Block textures (`app/src/texgen.rs`)
+## Block textures (`assets/textures`, `app/src/textures.rs`)
 
-Every block texture is painted in code at startup: 32 x 32, seamless, in a muted, realistic
-style (stone with fine cracks, dirt with pebbles, grass of four kinds with hanging fringes,
-sand, gravel, snow, water, bark, rings, leaves). They come from tileable noise, Voronoi cells
-and strokes, shaded by a height field so they read with some relief; nothing is copied from a
-texture pack and nothing is loaded from files. They are uploaded as one mipmapped texture array
-(averaged in linear light, so distant terrain doesn't darken) and sampled with world-position
-coordinates, so greedy-merged quads and LOD terrain repeat them once per block. Half-slab sides
-start the texture at their own top, so they show the grass fringe instead of dirt.
+* **Photo-based, 32 x 32**: stone, dirt, sand, gravel, snow, bark, bedrock and the four grasses
+  are made from public-domain (CC0) ambientCG photo textures by `tools/make_textures.py`:
+  averaged 4 x 4 per texel in linear light, sharpened a little (the crisp, pixelated look),
+  made seamless, and pulled toward a target colour and contrast. Sources are listed in
+  `assets/textures/CREDITS.md`; the PNGs can be edited or replaced directly.
+* **Greyscale grass, coloured by biome** (Minecraft's way): grass tops and leaves are
+  greyscale; a grass side is dirt plus `<name>_overlay.png`, the fringe. Each biome has a
+  grass colour (`biome::BIOMES`). A **tint map** around the camera (`app/src/tint.rs`), one
+  texel per 16 blocks out to ~2 km and one per 128 blocks out to 16 km, is built on a
+  background thread from the world generator and sampled with bilinear filtering, so colours
+  blend smoothly between biomes, on LOD terrain too.
+* **Hiding the tiling**: every block turns and mirrors its texture its own way (tops 8 ways,
+  sides mirrored only, so fringes stay on top), and the tint map carries a gentle brightness
+  variation over tens of blocks.
+* **Water** (`water_shade` in the shader): travelling waves bend the surface normal (small
+  ripples only up close); the surface shows the water's blue-green body when looking down and
+  the sky's reflection at grazing angles (Fresnel), plus the sun's glint, and is more opaque at
+  grazing angles. LOD water uses the same shading, opaque.
+* Textures without a file (log tops, leaves, glowstone, water) are painted in code
+  (`app/src/texgen.rs`). All are uploaded as one mipmapped texture array (averaged in linear
+  light) and sampled with world-position coordinates, so greedy quads and LOD terrain repeat
+  them once per block. Half-slab sides start the texture at their own top.
 
 ## Greedy meshing (`greedy.rs`)
 

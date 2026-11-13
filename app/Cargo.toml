@@ -16,6 +16,8 @@ blockforge = { path = ".." }
 wgpu = "22.1"
 winit = "0.30"
 pollster = "0.3"
+# Decodes the block textures in assets/textures (pure Rust).
+png = "0.17"
 
 [target.'cfg(target_os = "android")'.dependencies]
 winit = { version = "0.30", features = ["android-native-activity"] }

@@ -198,6 +198,11 @@ impl Game {
     }
 
     /// Far edge of the streamed area, in blocks: real chunks are drawn up to here.
+    /// The world's generator (the renderer's biome colours come from it).
+    pub fn generator(&self) -> Arc<WorldGen> {
+        self.gen.clone()
+    }
+
     /// The stats overlay's lines about the ground under the camera.
     pub fn place(&self) -> Vec<String> {
         place_lines(&self.gen.describe(self.cam.pos[0].floor() as i32, self.cam.pos[2].floor() as i32))
