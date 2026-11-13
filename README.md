@@ -7,7 +7,7 @@ A mobile-first voxel engine in Rust, in two crates:
   architecture lives here and is tested without a GPU.
 * the **app** (`app/`): the Android front-end. winit + wgpu renderer, touch controls and HUD.
 
-> **Status:** 102 unit + 8 end-to-end tests in the core and 63 in the app (plus WGSL
+> **Status:** 102 unit + 9 end-to-end tests in the core and 63 in the app (plus WGSL
 > validation) pass. The APK builds on GitHub Actions and has been run and measured on a phone
 > (see the numbers further down).
 
@@ -225,6 +225,10 @@ phones; no code was copied from it or from other LOD mods.
   is built *and uploaded to the GPU* (a coarser parent stands in for unready children, or finer
   children for a parent). A test flies the camera with uploads throttled to two sections a
   frame and checks every frame for holes and doubles.
+* A chunk column counts as covered by real terrain once its chunks are drawn down to one that
+  blocks the view from above in every block column (a cave under the ground does not uncover
+  it). LOD terrain also loses depth ties, so the moment both are drawn while chunks arrive
+  does not flicker.
 * Fog spans the far part of the LOD view, so the horizon fades into the sky.
 
 Measured on the build machine (headless demo; render distance 6, whole view before culling,

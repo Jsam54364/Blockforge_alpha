@@ -318,3 +318,28 @@ fn lod_terrain_streams_in_and_stops_exactly_where_real_chunks_are_drawn() {
     c.requeue_all_meshes();
     assert_eq!(c.lod_coverage(draw).count(), 0);
 }
+
+#[test]
+fn real_terrain_near_the_camera_always_replaces_lod_terrain() {
+    // LOD terrain is hidden only in "covered" columns. A column near the camera that never
+    // becomes covered is drawn twice, real and LOD on top of each other (flickering, LOD
+    // blocks inside real ones). That happened wherever a cave crossed the bottom layer of
+    // the chunks under the ground. The game's own seed and settings, near its spawn.
+    let reg = Arc::new(BlockRegistry::builtin());
+    let handle = server::spawn(ServerConfig { seed: 1337, worker_threads: 2, ..ServerConfig::default() }, reg.clone());
+    let mut c = Client::connect(handle.connect(), 2);
+    c.set_view_distance(6);
+    let (_, _, cam) = spawn(1337, &reg);
+    for offset in [[0.0, 14.0, 0.0], [150.0, 30.0, -90.0]] {
+        c.set_position([cam[0] + offset[0], cam[1] + offset[1], cam[2] + offset[2]]);
+        settle(&mut c);
+        let _ = c.take_mesh_changes(usize::MAX);
+        let cov = c.lod_coverage(6.5 * 32.0);
+        let at = BlockPos::from_f32(c.camera).chunk();
+        for dz in -4..=4 {
+            for dx in -4..=4 {
+                assert!(cov.covered(at.x + dx, at.z + dz), "column {dx},{dz} from the camera is not covered");
+            }
+        }
+    }
+}

@@ -87,21 +87,25 @@ pub struct Client {
     /// Chunks whose current geometry is known: meshed (empty or not) at least once since they
     /// arrived. Their mesh may be an older version while an edit is re-meshed.
     resolved: HashSet<ChunkPos>,
-    /// Resolved chunks whose bottom layer is solid all over: nothing below them shows from
-    /// above (see `lod_coverage`).
+    /// Resolved chunks that block the view from above all over (see `bottom_is_closed` and
+    /// `lod_coverage`).
     closed_bottom: HashSet<ChunkPos>,
     /// Level-of-detail terrain past the loaded chunks.
     pub lod: LodManager,
 }
 
-/// Whether nothing below `chunk` can be seen from above through it: every cell of its bottom
-/// layer holds an opaque block that fills the bottom of the cell.
+/// Whether nothing below `chunk` can be seen from above through it: each of its 32 x 32
+/// columns holds an opaque block somewhere (every block shape covers its whole footprint).
+/// Not "its bottom layer is solid": a cave crossing the bottom layer far under the ground
+/// would then leave the column uncovered for good, and LOD terrain drawn over the real one.
 fn bottom_is_closed(reg: &BlockRegistry, chunk: &Chunk) -> bool {
-    let closes = |s: BlockState| reg.get(s).opaque && s.shape().y_range_q().0 == 0;
+    let closes = |s: BlockState| reg.get(s).opaque;
     if let Some(s) = chunk.uniform_state() {
         return closes(s);
     }
-    (0..CHUNK_SIZE as u8).all(|z| (0..CHUNK_SIZE as u8).all(|x| closes(chunk.get(LocalPos { x, y: 0, z }.index()))))
+    let n = CHUNK_SIZE as u8;
+    // Bottom-up: in ground chunks the first block already settles most columns.
+    (0..n).all(|z| (0..n).all(|x| (0..n).any(|y| closes(chunk.get(LocalPos { x, y, z }.index())))))
 }
 
 /// Which chunk columns around the camera show their real surface (meshed and within the
@@ -273,7 +277,7 @@ impl Client {
                 let (cx, cz) = (cam.x + dx, cam.z + dz);
                 // From the top of the streamed window down: skip the sky, then every chunk the
                 // ground passes through must be drawn (known, uploaded, within the draw
-                // distance), down to one whose bottom is solid all over. Hilly ground often
+                // distance), down to one that blocks the view all over. Hilly ground often
                 // dips into the chunk below, which is further away when seen from above.
                 let mut ground = false;
                 for cy in (cam.y - vv..=cam.y + vv).rev() {
