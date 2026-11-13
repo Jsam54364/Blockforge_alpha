@@ -12,19 +12,25 @@
 //!     become a job at all (`mesh::has_no_faces`);
 //!   * a newly arrived chunk waits briefly for the neighbours the server is still sending,
 //!     so it is meshed once with its borders known instead of again per neighbour.
+//!
+//! Past the loaded chunks, `lod` keeps level-of-detail terrain built from the world seed
+//! (see `lod.rs`), and `lod_coverage` tells the renderer where the real terrain already
+//! shows the surface, so LOD terrain is hidden exactly there.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::block::BlockState;
+use crate::block::{BlockState, AIR};
 use crate::coords::{BlockPos, ChunkPos, Face, CHUNK_SIZE};
 use crate::jobs::JobPool;
+use crate::lod::LodManager;
 use crate::mesh::{has_no_faces, mesh_chunk_with, ChunkMesh, Mesher, PaddedChunk};
 use crate::protocol::{ClientMsg, Endpoint, ServerMsg};
 use crate::registry::BlockRegistry;
 use crate::world::ChunkStore;
+use crate::worldgen::WorldGen;
 
 struct MeshJob {
     pos: ChunkPos,
@@ -77,6 +83,51 @@ pub struct Client {
     pub mesh_budget: usize,
     /// Which mesher new jobs use. Change it with `set_mesher` so existing chunks are redone.
     pub mesher: Mesher,
+    /// Chunks whose current geometry is known: meshed (empty or not) at least once since they
+    /// arrived. Their mesh may be an older version while an edit is re-meshed.
+    resolved: HashSet<ChunkPos>,
+    /// Level-of-detail terrain past the loaded chunks.
+    pub lod: LodManager,
+}
+
+/// Which chunk columns around the camera show their real surface (meshed and within the
+/// renderer's draw distance), one bit per column in a 64 x 64 window. LOD terrain is hidden
+/// in these columns and drawn everywhere else, so there is neither overlap nor a hole.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LodCoverage {
+    /// Chunk column at bit 0.
+    pub origin: (i32, i32),
+    /// Row-major (z then x), 64 bits per row.
+    pub bits: [u32; 128],
+}
+
+impl LodCoverage {
+    pub const SIZE: i32 = 64;
+
+    pub fn empty(origin: (i32, i32)) -> LodCoverage {
+        LodCoverage { origin, bits: [0; 128] }
+    }
+
+    pub fn covered(&self, cx: i32, cz: i32) -> bool {
+        let (x, z) = (cx - self.origin.0, cz - self.origin.1);
+        if x < 0 || z < 0 || x >= Self::SIZE || z >= Self::SIZE {
+            return false;
+        }
+        let bit = (z * Self::SIZE + x) as usize;
+        self.bits[bit / 32] >> (bit % 32) & 1 == 1
+    }
+
+    fn set(&mut self, cx: i32, cz: i32) {
+        let (x, z) = (cx - self.origin.0, cz - self.origin.1);
+        if x >= 0 && z >= 0 && x < Self::SIZE && z < Self::SIZE {
+            let bit = (z * Self::SIZE + x) as usize;
+            self.bits[bit / 32] |= 1 << (bit % 32);
+        }
+    }
+
+    pub fn count(&self) -> u32 {
+        self.bits.iter().map(|w| w.count_ones()).sum()
+    }
 }
 
 impl Client {
@@ -103,6 +154,10 @@ impl Client {
             workers: workers.max(1),
             mesh_budget: 8,
             mesher: Mesher::Simple,
+            resolved: HashSet::new(),
+            // One worker: a section is a few hundred microseconds of noise sampling, and
+            // chunk meshing near the player matters more.
+            lod: LodManager::new(1),
         }
     }
 
@@ -154,6 +209,7 @@ impl Client {
         }
         self.submit_mesh_jobs();
         self.collect_mesh_results();
+        self.lod.update(self.camera);
     }
 
     /// Switches mesher and re-meshes every loaded chunk with it (old meshes stay on screen
@@ -183,6 +239,44 @@ impl Client {
         let mut all: Vec<ChunkPos> = self.meshes.keys().copied().collect();
         all.sort_unstable_by_key(|p| p.dist_sq(cam)); // nearest first
         self.mesh_changes = all;
+        self.lod.requeue_all();
+    }
+
+    /// See `LodCoverage`. Call after the renderer took this frame's mesh changes: chunks it
+    /// has not uploaded yet don't count. `draw_distance` is the renderer's cut-off for real
+    /// chunks (centre distance from the camera, in blocks).
+    pub fn lod_coverage(&self, draw_distance: f32) -> LodCoverage {
+        let cam = BlockPos::from_f32(self.camera).chunk();
+        let half = LodCoverage::SIZE / 2;
+        let mut cov = LodCoverage::empty((cam.x - half, cam.z - half));
+        let not_uploaded: HashSet<ChunkPos> = self.mesh_changes.iter().copied().collect();
+        let vv = self.view_chunks.min(self.vertical_view);
+        let r = (self.view_chunks + 1).min(half - 1);
+        let d2_max = draw_distance * draw_distance;
+        for dz in -r..=r {
+            for dx in -r..=r {
+                let (cx, cz) = (cam.x + dx, cam.z + dz);
+                // From the top of the streamed window down to the first chunk with blocks:
+                // that one draws the surface, provided everything above it is known too.
+                for cy in (cam.y - vv..=cam.y + vv).rev() {
+                    let p = ChunkPos::new(cx, cy, cz);
+                    let Some(chunk) = self.store.get(p) else { break };
+                    if !self.resolved.contains(&p) || not_uploaded.contains(&p) {
+                        break;
+                    }
+                    if chunk.uniform_state() != Some(AIR) {
+                        let o = p.origin();
+                        let h = CHUNK_SIZE as f32 * 0.5;
+                        let c = [o.x as f32 + h - self.camera[0], o.y as f32 + h - self.camera[1], o.z as f32 + h - self.camera[2]];
+                        if c[0] * c[0] + c[1] * c[1] + c[2] * c[2] <= d2_max {
+                            cov.set(cx, cz);
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+        cov
     }
 
     /// Up to `max` chunk positions whose mesh changed (or was removed) since the last call.
@@ -216,6 +310,7 @@ impl Client {
                 match BlockRegistry::from_toml(&blocks_toml) {
                     Ok(reg) => {
                         let reg = Arc::new(reg);
+                        self.lod.start(Arc::new(WorldGen::new(seed, &reg)), reg.clone());
                         let for_workers = reg.clone();
                         self.pool = Some(JobPool::new(self.workers, move |job: MeshJob| {
                             let mesh = mesh_chunk_with(job.mesher, &for_workers, &job.snapshot);
@@ -240,6 +335,7 @@ impl Client {
                 self.dirty.remove(&pos);
                 self.awaiting_neighbors.remove(&pos);
                 self.versions.remove(&pos);
+                self.resolved.remove(&pos);
             }
             ServerMsg::BlockUpdate { pos, state } => {
                 if self.store.set_block(pos, state).is_some() {
@@ -346,6 +442,7 @@ impl Client {
                 if self.meshes.remove(&p).is_some() {
                     self.mesh_changes.push(p);
                 }
+                self.resolved.insert(p);
                 self.stats.meshes_skipped += 1;
                 continue;
             }
@@ -375,6 +472,7 @@ impl Client {
                     self.meshes.insert(r.pos, r.mesh);
                     self.mesh_changes.push(r.pos);
                 }
+                self.resolved.insert(r.pos);
                 self.stats.meshes_built += 1;
             } else {
                 // A newer edit superseded this snapshot; its replacement is queued.

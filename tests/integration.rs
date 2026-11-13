@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use blockforge::client::Client;
-use blockforge::coords::BlockPos;
+use blockforge::coords::{BlockPos, ChunkPos};
 use blockforge::mesh::{mesh_chunk_with, Mesher, PaddedChunk};
 use blockforge::registry::BlockRegistry;
 use blockforge::server::{self, ServerConfig};
@@ -237,4 +237,50 @@ fn save_now_writes_edits_that_a_new_server_loads() {
     settle(&mut c2);
     assert!(c2.store.block(pos).map_or(false, |s| s.is_air()), "the broken block came back");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn lod_terrain_streams_in_and_stops_exactly_where_real_chunks_are_drawn() {
+    use blockforge::lod::LodSettings;
+    let (_h, mut c, _reg) = start(7);
+    c.lod.set_settings(LodSettings::new(4096.0, 64.0));
+    settle(&mut c);
+    let start_t = Instant::now();
+    while !c.lod.is_idle() {
+        c.update();
+        assert!(start_t.elapsed() < Duration::from_secs(60), "LODs never finished");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    c.update();
+    assert!(c.lod.render_set().len() > 50, "{:?}", c.lod.stats);
+    assert!(c.lod.stats.drawn_quads > 10_000);
+
+    // The renderer uploads everything first; then coverage is asked for.
+    let _ = c.take_mesh_changes(usize::MAX);
+    let draw = 3.0 * 32.0 + 16.0;
+    let cov = c.lod_coverage(draw);
+    let cam = BlockPos::from_f32(c.camera).chunk();
+    assert!(cov.covered(cam.x, cam.z), "the camera's own column shows real terrain");
+    assert!(cov.count() >= 9);
+    assert!(!cov.covered(cam.x + 10, cam.z), "beyond the loaded chunks LODs must show");
+    // Every covered column really has its surface meshed in the client.
+    for dz in -5..=5 {
+        for dx in -5..=5 {
+            let (cx, cz) = (cam.x + dx, cam.z + dz);
+            if !cov.covered(cx, cz) {
+                continue;
+            }
+            let surface = (-8..8)
+                .rev()
+                .map(|cy| ChunkPos::new(cx, cy, cz))
+                .find(|p| c.store.get(*p).map_or(false, |ch| ch.uniform_state() != Some(blockforge::block::AIR)))
+                .expect("a covered column has ground loaded");
+            let has_mesh = c.meshes.contains_key(&surface);
+            let fresh = mesh_chunk_with(Mesher::Simple, &_reg, &PaddedChunk::capture(&c.store, surface));
+            assert_eq!(has_mesh, !fresh.is_empty(), "column {cx},{cz}: surface chunk not drawn");
+        }
+    }
+    // Not uploaded yet means not covered: the hole would show for a frame otherwise.
+    c.requeue_all_meshes();
+    assert_eq!(c.lod_coverage(draw).count(), 0);
 }

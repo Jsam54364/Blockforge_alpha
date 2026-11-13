@@ -20,8 +20,10 @@ pub const MAX_HUD_VERTS: usize = 30_000;
 
 pub const RENDER_MIN: u8 = 2;
 pub const RENDER_MAX: u8 = 12;
-pub const LOD_MIN: u8 = 4;
-pub const LOD_MAX: u8 = 32;
+/// LOD view distances in blocks, as menu steps; 0 = LODs off.
+pub const LOD_DISTANCES: [u32; 7] = [0, 1024, 2048, 4096, 8192, 16384, 32768];
+/// LOD quality steps: names and Distant Horizons-style distance units (see blockforge::lod).
+pub const LOD_QUALITY: [(&str, f32); 3] = blockforge::lod::LodSettings::QUALITY;
 
 /// Android draws the status bar over the top edge and the navigation bar over the right
 /// edge in landscape. These fixed insets come from a real phone's screenshots (status bar
@@ -74,9 +76,10 @@ impl CullMode {
 pub struct Settings {
     /// Chunks streamed and drawn around the player.
     pub render_chunks: u8,
-    /// Where LOD terrain should start, in chunks. Stored and shown, but nothing consumes
-    /// it yet: LOD meshing isn't built (see README).
-    pub lod_chunks: u8,
+    /// Index into `LOD_DISTANCES`: how far level-of-detail terrain reaches.
+    pub lod_level: u8,
+    /// Index into `LOD_QUALITY`.
+    pub lod_quality: u8,
     pub fog: bool,
     pub cull: CullMode,
     /// true = FIFO (capped at the display refresh); false = uncapped, for measuring.
@@ -88,7 +91,16 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { render_chunks: 6, lod_chunks: 16, fog: true, cull: CullMode::All, vsync: true, greedy: false, show_stats: true }
+        Settings {
+            render_chunks: 6,
+            lod_level: 5, // 16 km
+            lod_quality: 1,
+            fog: true,
+            cull: CullMode::All,
+            vsync: true,
+            greedy: false,
+            show_stats: true,
+        }
     }
 }
 
@@ -96,9 +108,10 @@ impl Settings {
     /// `key=value` lines, one per setting, for the settings file kept between launches.
     pub fn to_text(&self) -> String {
         format!(
-            "render_chunks={}\nlod_chunks={}\nfog={}\ncull={}\nvsync={}\ngreedy={}\nshow_stats={}\n",
+            "render_chunks={}\nlod_level={}\nlod_quality={}\nfog={}\ncull={}\nvsync={}\ngreedy={}\nshow_stats={}\n",
             self.render_chunks,
-            self.lod_chunks,
+            self.lod_level,
+            self.lod_quality,
             self.fog,
             self.cull.label(),
             self.vsync,
@@ -119,9 +132,14 @@ impl Settings {
                         self.render_chunks = v.clamp(RENDER_MIN, RENDER_MAX);
                     }
                 }
-                "lod_chunks" => {
+                "lod_level" => {
                     if let Ok(v) = value.parse::<u8>() {
-                        self.lod_chunks = v.clamp(LOD_MIN, LOD_MAX);
+                        self.lod_level = v.min(LOD_DISTANCES.len() as u8 - 1);
+                    }
+                }
+                "lod_quality" => {
+                    if let Ok(v) = value.parse::<u8>() {
+                        self.lod_quality = v.min(LOD_QUALITY.len() as u8 - 1);
                     }
                 }
                 "cull" => {
@@ -151,6 +169,7 @@ pub enum Action {
     ToggleMenu,
     RenderDist(i8),
     LodDist(i8),
+    CycleLodQuality,
     ToggleFog,
     CycleCull,
     ToggleVsync,
@@ -177,7 +196,6 @@ pub struct Ui {
 }
 
 const WHITE: [u8; 4] = [255, 255, 255, 255];
-const DIM: [u8; 4] = [190, 195, 205, 170];
 const PANEL: [u8; 4] = [8, 10, 14, 205];
 const BTN: [u8; 4] = [255, 255, 255, 48];
 const XHAIR: [u8; 4] = [255, 255, 255, 215];
@@ -227,6 +245,14 @@ fn text_centered(out: &mut Vec<HudVertex>, cx: f32, cy: f32, px: f32, s: &str, c
     text(out, cx - w * 0.5, cy - 3.5 * px, px, s, c);
 }
 
+/// "OFF", "1K" ... "32K": the LOD distance in thousands of blocks.
+pub fn lod_label(level: u8) -> String {
+    match LOD_DISTANCES[(level as usize).min(LOD_DISTANCES.len() - 1)] {
+        0 => "OFF".to_string(),
+        d => format!("{}K", d / 1024),
+    }
+}
+
 fn step(v: u8, d: i8, lo: u8, hi: u8) -> u8 {
     (v as i16 + d as i16).clamp(lo as i16, hi as i16) as u8
 }
@@ -257,6 +283,10 @@ pub fn stats_lines(perf: &Perf) -> Vec<String> {
     v.push(format!("CHUNKS {}", perf.chunks));
     v.push(format!("DRAWN {}/{}", perf.drawn, perf.meshes));
     v.push(format!("QUADS {}", perf.quads));
+    v.push(format!("LOD {} SECT {}K QUADS", perf.lod_drawn, perf.lod_quads / 1000));
+    if perf.lod_pending > 0 {
+        v.push(format!("LOD BUILDING {}", perf.lod_pending));
+    }
     v.push(format!("PRESENT {}", perf.present_mode));
     v
 }
@@ -308,7 +338,11 @@ impl Ui {
                 self.settings.render_chunks != old
             }
             Action::LodDist(d) => {
-                self.settings.lod_chunks = step(self.settings.lod_chunks, d * 2, LOD_MIN, LOD_MAX);
+                self.settings.lod_level = step(self.settings.lod_level, d, 0, LOD_DISTANCES.len() as u8 - 1);
+                false
+            }
+            Action::CycleLodQuality => {
+                self.settings.lod_quality = (self.settings.lod_quality + 1) % LOD_QUALITY.len() as u8;
                 false
             }
             Action::ToggleFog => {
@@ -431,10 +465,7 @@ impl Ui {
                 self.button(out, plus_x, by, bw, bw, "+", px, Action::RenderDist(1));
             } else {
                 text(out, label_x, ty, px, "LOD", WHITE);
-                let v = s.lod_chunks.to_string();
-                text(out, value_x, ty, px, &v, WHITE);
-                // Honest label: the setting exists but nothing uses it yet.
-                text(out, value_x + text_width(px, "00") + 10.0 * dp, ty, px, "SOON", DIM);
+                text(out, value_x, ty, px, &lod_label(s.lod_level), WHITE);
                 self.button(out, minus_x, by, bw, bw, "-", px, Action::LodDist(-1));
                 self.button(out, plus_x, by, bw, bw, "+", px, Action::LodDist(1));
             }
@@ -443,12 +474,13 @@ impl Ui {
         // Rows 2-4: toggles in two columns; each button carries its own label.
         let on_off = |b: bool| if b { "ON" } else { "OFF" };
         let vsync_label = if !self.vsync_supported { "N/A" } else { on_off(s.vsync) };
-        let toggles: [(Action, String); 5] = [
+        let toggles: [(Action, String); 6] = [
             (Action::ToggleFog, format!("FOG {}", on_off(s.fog))),
             (Action::CycleCull, format!("CULL {}", s.cull.label())),
             (Action::ToggleVsync, format!("VSYNC {}", vsync_label)),
             (Action::ToggleMesher, format!("MESH {}", if s.greedy { "GREEDY" } else { "SIMPLE" })),
             (Action::ToggleStats, format!("STATS {}", on_off(s.show_stats))),
+            (Action::CycleLodQuality, format!("LODQ {}", LOD_QUALITY[s.lod_quality as usize % LOD_QUALITY.len()].0)),
         ];
         let cell_w = (panel_w - pad * 3.0) / 2.0;
         for (i, (action, label)) in toggles.iter().enumerate() {
@@ -492,7 +524,8 @@ mod tests {
     fn settings_survive_a_round_trip_through_text() {
         let s = Settings {
             render_chunks: 9,
-            lod_chunks: 24,
+            lod_level: 3,
+            lod_quality: 2,
             fog: false,
             cull: CullMode::Frustum,
             vsync: false,
@@ -507,8 +540,10 @@ mod tests {
     #[test]
     fn bad_settings_text_is_ignored_or_clamped() {
         let mut s = Settings::default();
-        s.apply_text("render_chunks=200\nlod_chunks=banana\nfog=maybe\ncull=SIDEWAYS\nno equals sign\nfuture_key=1\n");
-        assert_eq!(s, Settings { render_chunks: RENDER_MAX, ..Settings::default() });
+        s.apply_text("render_chunks=200\nlod_level=banana\nlod_quality=99\nfog=maybe\ncull=SIDEWAYS\nno equals sign\nfuture_key=1\nlod_chunks=16\n");
+        assert_eq!(s, Settings { render_chunks: RENDER_MAX, lod_quality: LOD_QUALITY.len() as u8 - 1, ..Settings::default() });
+        s.apply_text("lod_level=200");
+        assert_eq!(s.lod_level, LOD_DISTANCES.len() as u8 - 1);
         s.apply_text("render_chunks=0");
         assert_eq!(s.render_chunks, RENDER_MIN);
     }
@@ -541,6 +576,7 @@ mod tests {
             Action::ToggleVsync,
             Action::ToggleMesher,
             Action::ToggleStats,
+            Action::CycleLodQuality,
         ] {
             let (x, y) = center_of(&u, a);
             assert_eq!(u.hit(x, y), Some(a), "{a:?}");
@@ -598,14 +634,27 @@ mod tests {
     }
 
     #[test]
-    fn lod_steps_by_two_and_never_asks_the_server_for_anything() {
+    fn lod_steps_through_the_distances_and_never_asks_the_server_for_anything() {
         let mut u = ui();
+        assert_eq!(lod_label(u.settings.lod_level), "16K");
         assert!(!u.apply(Action::LodDist(1)));
-        assert_eq!(u.settings.lod_chunks, 18);
+        assert_eq!(lod_label(u.settings.lod_level), "32K");
+        assert!(!u.apply(Action::LodDist(1)));
+        assert_eq!(lod_label(u.settings.lod_level), "32K", "stops at the top");
         for _ in 0..50 {
             u.apply(Action::LodDist(-1));
         }
-        assert_eq!(u.settings.lod_chunks, LOD_MIN);
+        assert_eq!(lod_label(u.settings.lod_level), "OFF");
+        assert_eq!(u.settings.lod_level, 0);
+        u.apply(Action::LodDist(1));
+        assert_eq!(lod_label(u.settings.lod_level), "1K");
+        let q = u.settings.lod_quality;
+        assert!(!u.apply(Action::CycleLodQuality));
+        assert_ne!(u.settings.lod_quality, q);
+        for _ in 0..LOD_QUALITY.len() - 1 {
+            u.apply(Action::CycleLodQuality);
+        }
+        assert_eq!(u.settings.lod_quality, q, "cycles back round");
     }
 
     #[test]
@@ -721,7 +770,7 @@ mod tests {
                 assert!(font::has_art(c), "no glyph for {c:?} in {line:?}");
             }
         }
-        for s in ["REND", "LOD", "FOG", "CULL", "ALL", "FRUST", "BACK", "VSYNC", "N/A", "MESH", "GREEDY", "SIMPLE", "QUADS", "STATS", "SOON", "ON", "OFF", "+", "-"] {
+        for s in ["REND", "LOD", "FOG", "CULL", "ALL", "FRUST", "BACK", "VSYNC", "N/A", "MESH", "GREEDY", "SIMPLE", "QUADS", "STATS", "ON", "OFF", "+", "-", "LODQ", "LOW", "MED", "HIGH", "32K", "SECT", "BUILDING"] {
             assert!(s.chars().all(font::has_art), "{s}");
         }
     }

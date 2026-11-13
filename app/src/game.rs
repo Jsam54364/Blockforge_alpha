@@ -18,10 +18,11 @@ use blockforge::coords::{BlockPos, CHUNK_SIZE};
 use blockforge::mesh::Mesher;
 use blockforge::raycast::{raycast, RayHit};
 use blockforge::registry::BlockRegistry;
+use blockforge::lod::LodSettings;
 use blockforge::server::{self, ServerConfig, ServerHandle};
 use winit::event::TouchPhase;
 
-use crate::ui::Ui;
+use crate::ui::{Ui, LOD_DISTANCES, LOD_QUALITY};
 
 const LOOK_SENS: f32 = 0.0045;
 const FLY_SPEED: f32 = 14.0;
@@ -161,9 +162,29 @@ impl Game {
         }
     }
 
-    /// Far edge of the streamed area, in blocks (used for fog).
+    /// Far edge of the streamed area, in blocks: real chunks are drawn up to here.
     pub fn view_blocks(&self) -> f32 {
         (self.ui.settings.render_chunks as f32 + 0.5) * CHUNK_SIZE as f32
+    }
+
+    /// The level-of-detail terrain the menu asks for.
+    pub fn lod_settings(&self) -> LodSettings {
+        let s = self.ui.settings;
+        let radius = LOD_DISTANCES[(s.lod_level as usize).min(LOD_DISTANCES.len() - 1)] as f32;
+        let unit = LOD_QUALITY[(s.lod_quality as usize).min(LOD_QUALITY.len() - 1)].1;
+        LodSettings::new(radius, unit)
+    }
+
+    /// Where fog starts and ends: over the far part of the LOD terrain when it is on (the
+    /// horizon fades into the sky), else over the edge of the real chunks.
+    pub fn fog_range(&self) -> (f32, f32) {
+        let lod = self.lod_settings();
+        if lod.enabled() {
+            (lod.radius * 0.3, lod.radius * 0.97)
+        } else {
+            let v = self.view_blocks();
+            (v * 0.55, v * 0.92)
+        }
     }
 
     /// Call when the window is (re)created or resized.
@@ -209,6 +230,7 @@ impl Game {
         } else {
             self.client.camera = self.cam.pos;
         }
+        self.client.lod.set_settings(self.lod_settings()); // a no-op unless the menu changed it
         self.client.update();
     }
 

@@ -6,6 +6,10 @@
 //!
 //!   * solid terrain is drawn nearest chunk first, so the depth test rejects hidden
 //!     fragments before they are shaded (the renderer is GPU-bound on phones)
+//!   * level-of-detail terrain (see blockforge::lod) is drawn after the real terrain, nearest
+//!     section first, so it only shades pixels the real terrain left empty; its vertex
+//!     shader drops quads in chunk columns where the real terrain is drawn
+//!   * reverse-Z depth with no far plane (math::perspective_reverse_z), for 30 km views
 //!
 //! TODO (see README): pooled vertex buffers, occlusion culling, ASTC texture array, render scale.
 
@@ -13,9 +17,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use blockforge::client::Client;
+use blockforge::client::{Client, LodCoverage};
 use blockforge::coords::{ChunkPos, CHUNK_SIZE};
-use blockforge::mesh::{quad_indices, PackedVertex};
+use blockforge::lod::{SectionKey, MASKED_MAX_LEVEL};
+use blockforge::mesh::quad_indices;
 use blockforge::registry::BlockRegistry;
 use wgpu::util::DeviceExt;
 use winit::window::Window;
@@ -31,6 +36,9 @@ const MAX_QUADS: u32 = 100_000;
 const MAX_INSTANCES: usize = 4096;
 /// Mesh uploads per frame, so a burst of finished meshes doesn't cause a hitch.
 const UPLOADS_PER_FRAME: usize = 24;
+/// LOD section uploads per frame (each is up to ~100 KB).
+const LOD_UPLOADS_PER_FRAME: usize = 8;
+const MAX_LOD_INSTANCES: usize = 2048;
 const SHADER: &str = include_str!("shader.wgsl");
 const SKY_SRGB: [f32; 3] = [0.55, 0.74, 0.95];
 
@@ -48,6 +56,10 @@ struct Globals {
     screen: [f32; 4],
     flags: [f32; 4],
     palette: [[f32; 4]; 32],
+    /// x, y: chunk column at bit 0 of `lod_mask` (see `LodCoverage`).
+    lod_window: [f32; 4],
+    /// One bit per chunk column: set where LOD terrain must not be drawn.
+    lod_mask: [[u32; 4]; 32],
 }
 
 /// Per-frame toggles chosen in the settings menu.
@@ -60,6 +72,9 @@ pub struct RenderOptions {
     pub backface_cull: bool,
     /// true = FIFO (capped at the display rate); false = the fastest uncapped mode available.
     pub vsync: bool,
+    /// Where fog starts and where it is complete, in blocks from the camera.
+    pub fog_start: f32,
+    pub fog_end: f32,
 }
 
 fn as_bytes<T>(s: &[T]) -> &[u8] {
@@ -132,6 +147,12 @@ struct GpuChunk {
     water: Option<GpuLayer>,
 }
 
+struct GpuLod {
+    layer: Option<GpuLayer>,
+    min_y: f32,
+    max_y: f32,
+}
+
 pub struct Gfx {
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
@@ -143,6 +164,7 @@ pub struct Gfx {
     pipe_solid: wgpu::RenderPipeline,
     pipe_solid_nocull: wgpu::RenderPipeline,
     pipe_water: wgpu::RenderPipeline,
+    pipe_lod: wgpu::RenderPipeline,
     pipe_hud: wgpu::RenderPipeline,
     hud_buf: wgpu::Buffer,
     timer: Option<GpuTimer>,
@@ -152,9 +174,13 @@ pub struct Gfx {
     bind_water: wgpu::BindGroup,
     index_buf: wgpu::Buffer,
     instance_buf: wgpu::Buffer,
+    lod_instance_buf: wgpu::Buffer,
     chunks: HashMap<ChunkPos, GpuChunk>,
+    lods: HashMap<SectionKey, GpuLod>,
     last_drawn: usize,
     last_quads: u64,
+    last_lod_drawn: usize,
+    last_lod_quads: u64,
     palette: [[f32; 4]; 32],
 }
 
@@ -256,19 +282,23 @@ impl Gfx {
 
         // Solid terrain is one-sided: cull back faces (the winding is covered by tests).
         let pipe_solid =
-            voxel_pipeline(&device, &layout, &shader, format, None, true, Some(wgpu::Face::Back), "solid");
+            voxel_pipeline(&device, &layout, &shader, "vs_main", format, None, true, Some(wgpu::Face::Back), "solid");
         let pipe_solid_nocull =
-            voxel_pipeline(&device, &layout, &shader, format, None, true, None, "solid (no culling)");
+            voxel_pipeline(&device, &layout, &shader, "vs_main", format, None, true, None, "solid (no culling)");
         let pipe_water = voxel_pipeline(
             &device,
             &layout,
             &shader,
+            "vs_main",
             format,
             Some(wgpu::BlendState::ALPHA_BLENDING),
             false,
             None, // double-sided: from underwater the surface is a back face
             "water",
         );
+        // LOD terrain: same vertex size and instance slot, its own vertex shader.
+        let pipe_lod =
+            voxel_pipeline(&device, &layout, &shader, "vs_lod", format, None, true, Some(wgpu::Face::Back), "lod");
         let pipe_hud = hud_pipeline(&device, &layout, &shader, format);
 
         let index_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -279,6 +309,13 @@ impl Gfx {
         let instance_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("chunk origins"),
             size: (MAX_INSTANCES * 16) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let lod_instance_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("lod sections"),
+            size: (MAX_LOD_INSTANCES * 16) as u64,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -301,6 +338,7 @@ impl Gfx {
             pipe_solid,
             pipe_solid_nocull,
             pipe_water,
+            pipe_lod,
             pipe_hud,
             hud_buf,
             timer,
@@ -310,9 +348,13 @@ impl Gfx {
             bind_water,
             index_buf,
             instance_buf,
+            lod_instance_buf,
             chunks: HashMap::new(),
+            lods: HashMap::new(),
             last_drawn: 0,
             last_quads: 0,
+            last_lod_drawn: 0,
+            last_lod_quads: 0,
             palette: build_palette(reg),
         })
     }
@@ -357,6 +399,11 @@ impl Gfx {
         self.last_quads
     }
 
+    /// LOD sections and quads drawn last frame.
+    pub fn drawn_lod(&self) -> (usize, u64) {
+        (self.last_lod_drawn, self.last_lod_quads)
+    }
+
     /// Newest GPU frame time in ms, if the device supports timing and a result arrived.
     pub fn take_gpu_ms(&mut self) -> Option<f32> {
         self.timer.as_mut().and_then(|t| t.take())
@@ -374,7 +421,7 @@ impl Gfx {
 
     /// One vertex buffer holding `parts` back to back, written straight into GPU memory
     /// (no temporary copy on the CPU side).
-    fn upload(&self, parts: &[&[PackedVertex]], label: &str) -> Option<GpuLayer> {
+    fn upload<V>(&self, parts: &[&[V]], label: &str) -> Option<GpuLayer> {
         let verts: usize = parts.iter().map(|p| p.len()).sum();
         if verts == 0 {
             return None;
@@ -382,7 +429,7 @@ impl Gfx {
         // 8-byte vertices, so the size is always a multiple of wgpu's 4-byte alignment.
         let buf = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some(label),
-            size: (verts * std::mem::size_of::<PackedVertex>()) as u64,
+            size: (verts * std::mem::size_of::<V>()) as u64,
             usage: wgpu::BufferUsages::VERTEX,
             mapped_at_creation: true,
         });
@@ -413,6 +460,60 @@ impl Gfx {
                 }
             }
         }
+        for key in client.lod.take_evicted() {
+            self.lods.remove(&key);
+        }
+        for mesh in client.lod.take_built(LOD_UPLOADS_PER_FRAME) {
+            let layer = self.upload(&[&mesh.vertices], "lod section");
+            self.lods.insert(mesh.key, GpuLod { layer, min_y: mesh.min_y, max_y: mesh.max_y });
+        }
+    }
+
+    /// LOD sections to draw: uploaded, in the frustum, not entirely under real terrain.
+    /// Nearest first. Each entry is (instance data, section).
+    fn visible_lods(
+        &self,
+        client: &Client,
+        cam: [f32; 3],
+        frustum: &math::Frustum,
+        cov: &LodCoverage,
+        frustum_cull: bool,
+    ) -> Vec<([f32; 4], SectionKey)> {
+        let mut out: Vec<(f32, [f32; 4], SectionKey)> = Vec::new();
+        let chunk = CHUNK_SIZE;
+        for &key in client.lod.render_set() {
+            let Some(g) = self.lods.get(&key) else { continue };
+            if g.layer.is_none() {
+                continue;
+            }
+            let (ox, oz) = key.origin();
+            let w = key.width();
+            if frustum_cull
+                && !frustum.contains_aabb(
+                    [ox as f32, g.min_y, oz as f32],
+                    [(ox + w) as f32, g.max_y, (oz + w) as f32],
+                )
+            {
+                continue;
+            }
+            // Sections that can meet real chunks are masked per chunk column; skip those
+            // whose every column is drawn by real terrain (nothing of them would show).
+            let (c0x, c0z) = (ox.div_euclid(chunk), oz.div_euclid(chunk));
+            let n = (w / chunk).max(1);
+            let in_window = c0x + n > cov.origin.0
+                && c0z + n > cov.origin.1
+                && c0x < cov.origin.0 + LodCoverage::SIZE
+                && c0z < cov.origin.1 + LodCoverage::SIZE;
+            let masked = key.level <= MASKED_MAX_LEVEL && in_window;
+            if masked && (0..n).all(|a| (0..n).all(|b| cov.covered(c0x + a, c0z + b))) {
+                continue;
+            }
+            let d = key.distance_to(cam[0], cam[2]);
+            out.push((d, [ox as f32, oz as f32, key.cell() as f32, if masked { 1.0 } else { 0.0 }], key));
+        }
+        out.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        out.truncate(MAX_LOD_INSTANCES);
+        out.into_iter().map(|(_, i, k)| (i, k)).collect()
     }
 
     /// Draws a frame. On success returns how long we were blocked on the display (waiting
@@ -478,14 +579,29 @@ impl Gfx {
             srgb_to_linear(SKY_SRGB[1]),
             srgb_to_linear(SKY_SRGB[2]),
         ];
+        // LOD sections, after this frame's uploads so coverage matches what is on the GPU.
+        let lod_on = client.lod.settings().enabled();
+        let cov = if lod_on { client.lod_coverage(view_blocks) } else { LodCoverage::empty((0, 0)) };
+        let lod_vis = if lod_on { self.visible_lods(client, cam.pos, &frustum, &cov, opts.frustum_cull) } else { Vec::new() };
+        let lod_instances: Vec<[f32; 4]> = lod_vis.iter().map(|(i, _)| *i).collect();
+        if !lod_instances.is_empty() {
+            self.queue.write_buffer(&self.lod_instance_buf, 0, as_bytes(&lod_instances));
+        }
+        let mut lod_mask = [[0u32; 4]; 32];
+        for (i, w) in cov.bits.iter().enumerate() {
+            lod_mask[i / 4][i % 4] = *w;
+        }
+
         let mut globals = Globals {
             view_proj: vp,
             cam_pos: [cam.pos[0], cam.pos[1], cam.pos[2], 1.0],
             fog_color: [sky[0], sky[1], sky[2], 1.0],
-            fog_params: [view_blocks * 0.55, view_blocks * 0.92, 1.0, aspect],
+            fog_params: [opts.fog_start, opts.fog_end.max(opts.fog_start + 1.0), 1.0, aspect],
             screen: [self.config.width as f32, self.config.height as f32, 0.0, 0.0],
             flags: [if opts.fog { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
             palette: self.palette,
+            lod_window: [cov.origin.0 as f32, cov.origin.1 as f32, 0.0, 0.0],
+            lod_mask,
         };
         self.queue.write_buffer(&self.globals_solid, 0, as_bytes(std::slice::from_ref(&globals)));
         globals.fog_params[2] = 0.65;
@@ -523,7 +639,7 @@ impl Gfx {
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: &self.depth_view,
                     depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
+                        load: wgpu::LoadOp::Clear(math::DEPTH_CLEAR),
                         store: wgpu::StoreOp::Discard,
                     }),
                     stencil_ops: None,
@@ -546,6 +662,23 @@ impl Gfx {
                     quads += layer.quads as u64;
                 }
             }
+
+            // LOD terrain fills what the real terrain left empty (depth-tested against it).
+            let mut lod_quads = 0u64;
+            if !lod_vis.is_empty() {
+                pass.set_pipeline(&self.pipe_lod);
+                pass.set_vertex_buffer(1, self.lod_instance_buf.slice(..));
+                for (i, (_, key)) in lod_vis.iter().enumerate() {
+                    if let Some(layer) = self.lods.get(key).and_then(|g| g.layer.as_ref()) {
+                        pass.set_vertex_buffer(0, layer.buf.slice(..));
+                        pass.draw_indexed(0..layer.quads.min(MAX_QUADS) * 6, 0, i as u32..i as u32 + 1);
+                        lod_quads += layer.quads as u64;
+                    }
+                }
+                pass.set_vertex_buffer(1, self.instance_buf.slice(..));
+            }
+            self.last_lod_drawn = lod_vis.len();
+            self.last_lod_quads = lod_quads;
 
             pass.set_pipeline(&self.pipe_water);
             pass.set_bind_group(0, &self.bind_water, &[]);
@@ -584,6 +717,7 @@ fn voxel_pipeline(
     device: &wgpu::Device,
     layout: &wgpu::PipelineLayout,
     shader: &wgpu::ShaderModule,
+    vertex_entry: &str,
     format: wgpu::TextureFormat,
     blend: Option<wgpu::BlendState>,
     depth_write: bool,
@@ -595,7 +729,7 @@ fn voxel_pipeline(
         layout: Some(layout),
         vertex: wgpu::VertexState {
             module: shader,
-            entry_point: "vs_main",
+            entry_point: vertex_entry,
             compilation_options: wgpu::PipelineCompilationOptions::default(),
             buffers: &[
                 wgpu::VertexBufferLayout {
@@ -632,7 +766,8 @@ fn voxel_pipeline(
         depth_stencil: Some(wgpu::DepthStencilState {
             format: DEPTH_FORMAT,
             depth_write_enabled: depth_write,
-            depth_compare: wgpu::CompareFunction::Less,
+            // Reverse-Z: nearer is larger.
+            depth_compare: wgpu::CompareFunction::Greater,
             stencil: wgpu::StencilState::default(),
             bias: wgpu::DepthBiasState::default(),
         }),
@@ -689,6 +824,7 @@ fn hud_pipeline(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use blockforge::mesh::PackedVertex;
 
     #[test]
     fn every_face_is_front_facing_when_seen_from_outside() {
@@ -742,8 +878,8 @@ mod tests {
 
     #[test]
     fn globals_layout_matches_the_wgsl_struct() {
-        // 64 (mat4) + 5 * 16 (vec4s) + 32 * 16 (palette)
-        assert_eq!(std::mem::size_of::<Globals>(), 64 + 80 + 512);
+        // 64 (mat4) + 5 * 16 (vec4s) + 32 * 16 (palette) + 16 (lod window) + 32 * 16 (lod mask)
+        assert_eq!(std::mem::size_of::<Globals>(), 64 + 80 + 512 + 16 + 512);
         assert_eq!(std::mem::size_of::<HudVertex>(), 12);
     }
 

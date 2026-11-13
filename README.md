@@ -7,7 +7,7 @@ A mobile-first voxel engine in Rust, in two crates:
   architecture lives here and is tested without a GPU.
 * the **app** (`app/`): the Android front-end. winit + wgpu renderer, touch controls and HUD.
 
-> **Status:** 76 unit + 7 end-to-end tests in the core and 44 in the app (including WGSL
+> **Status:** 87 unit + 8 end-to-end tests in the core and 45 in the app (including WGSL
 > validation) pass. The APK builds on GitHub Actions and has been run and measured on a phone
 > (see the numbers further down).
 
@@ -35,7 +35,7 @@ cargo run --release --bin headless   # stream, mesh, edit; prints stats + an ASC
 | `worldgen` | Deterministic terrain, pure function of (seed, chunk). Heights in **quarter-blocks**, so the surface ends in **half-slabs**. Caves, sea level, bedrock, `Column` heightmap layer |
 | `world`, `save` | Procedural base + **edit journal** (undo/redo, tiny saves, delta sync). Versioned + CRC32 formats, atomic write-then-rename |
 | `mesh` | Padded 34³ snapshot (no locks), **8-byte packed vertices**, shape-aware face culling, per-vertex AO, 3 render layers, index-free quads |
-| `lod` | Watertight **octree LOD selection** (detail rings double in size) |
+| `lod` | **Level-of-detail terrain** to the horizon: quadtree of sections built from the seed, mesher, streaming (see below) |
 | `behavior` | Event-driven blocks emitting commands (deterministic, budgeted). Example: falling sand |
 | `server`, `client`, `protocol` | **Client/server split even in singleplayer**; sim distance independent of view distance |
 | `jobs` | Priority worker pool, thread count capped at 3 for big.LITTLE phones |
@@ -47,7 +47,7 @@ cargo run --release --bin headless   # stream, mesh, edit; prints stats + an ASC
    (`mesh::quad_indices`), opaque → cutout → translucent, ASTC/ETC2 texture array, fog.
 2. **Lighting**: vertices carry sky/block light fields but values are placeholders.
 3. **Greedy meshing**: implemented as a hybrid (see below) but not the default mesher yet.
-4. **LOD meshing**: `lod::select` picks nodes; downsampled meshing + seam handling is not written.
+4. **LOD terrain** shows the world as generated: edits only show in the real chunks (see below).
 5. **Server**: no reach/anti-cheat checks, undo history is global not per-player, autosave
    blocks the tick, events outside sim distance are dropped instead of re-scanned.
 6. **Client**: a new chunk now waits (up to `Client::neighbor_wait`) for the neighbours the
@@ -101,8 +101,8 @@ without them) with a derived busy%, memory (VmRSS) and chunk/mesh counts. Androi
 public GPU-usage percentage, hence the derived figure.
 
 Top-right menu button: render distance (2-12 chunks, applied to the server stream too),
-LOD distance (stored and shown but **not used yet**: LOD meshing isn't built), fog on/off,
-stats on/off. The HUD is drawn by a tiny immediate-mode layer (`ui.rs`) with its own 5x7 bitmap
+LOD distance (OFF, 1K ... 32K blocks) and LOD quality (LODQ: LOW/MED/HIGH), fog on/off,
+stats on/off. The overlay's LOD line shows the sections and quads drawn. The HUD is drawn by a tiny immediate-mode layer (`ui.rs`) with its own 5x7 bitmap
 font (`font.rs`, `glyphs.rs`), so there are no UI dependencies.
 
 Back-face culling is on for solid terrain (water stays double-sided so the surface is visible
@@ -136,7 +136,8 @@ the GPU is the bottleneck and geometry per chunk is what to cut.
 Measured earlier on a mid-range phone, fog off, flying over terrain (GPU time of the main pass):
 render distance 6 = 7.1 ms (43% busy), 8 = 11.7 ms (70%), 10 = 12.9 ms (77%), 12 = 16.7 ms
 (94%, 56 fps). CPU stayed near 5% of the device; memory 100-220 MB. The renderer is GPU-bound,
-so the next wins after frustum culling are occlusion culling, then LOD meshes.
+so the next wins after frustum culling are occlusion culling and fewer real chunks (a lower render
+distance, now that LOD terrain carries the view past it).
 
 Solid terrain is drawn nearest chunk first so the depth test can reject hidden fragments
 before they are shaded (water still goes far to near for blending). This has not been measured
@@ -178,7 +179,51 @@ Play Protect warnings on this sideloaded APK, and what helps:
   the package name `com.blockforge.alpha` and this signing key there.
 
 Renderer gaps: pooled vertex buffers, occlusion culling, texture array
-(colours come from a palette keyed by texture name), render-scale governor hookup, LOD meshing.
+(colours come from a palette keyed by texture name), render-scale governor hookup.
+
+## Level-of-detail terrain (`lod.rs`)
+
+Terrain past the real chunks, out to 32 km, for the look of an endless view. The design is
+Distant Horizons' (the Minecraft LOD mod, LGPL), rewritten from scratch for this engine and for
+phones; no code was copied from it or from other LOD mods.
+
+* **Quadtree of sections.** A section is 32 x 32 cells; a level-L cell is a column 2^L blocks
+  wide. Detail follows Distant Horizons' rule, `level = floor(log(distance / unit) / log(base))`,
+  so each doubling of distance adds one ring of sections with about the same number of cells:
+  the cost grows with the logarithm of the distance (4 km to 16 km costs about +25%).
+* **Built from the seed, not from chunks.** The generator is a pure function of the seed, so a
+  cell is one height sample (`WorldGen::lod_surface`, exactly the generated surface at full
+  detail). Octaves of the height noise finer than a cell are faded to their average instead of
+  aliasing, and heights are rounded to steps that grow with the cell (a quarter of its width),
+  which roughly halves the quads.
+* **Blocky meshes like Distant Horizons':** a box per column, sides only where the neighbour is
+  lower, equal faces merged. Border sides reach down to the lowest height a neighbour one level
+  finer or coarser can have, so there are no cracks between levels (the quadtree keeps
+  neighbours within one level; tested).
+* **No holes and no overlap with the real chunks.** Distant Horizons draws its LODs from a
+  distance setting, so they either overlap the real terrain or leave holes while chunks stream
+  in. Here the client reports, per chunk column, whether the real surface is meshed, uploaded
+  and drawn (`Client::lod_coverage`); the LOD vertex shader drops quads exactly in those
+  columns. Near the real chunks faces are merged only within a chunk column so every corner of
+  a quad agrees. Sections whose columns are all covered aren't drawn at all.
+* **Drawn after the real terrain**, nearest first, so LOD pixels behind real terrain are rejected
+  by the depth test before shading. Reverse-Z depth with no far plane keeps precision at 30 km.
+* **Never a gap while detail changes:** a section is replaced only when everything replacing it
+  is built (a coarser parent stands in for unbuilt children, or finer children for a parent).
+* Fog spans the far part of the LOD view, so the horizon fades into the sky.
+
+Measured on the build machine (headless demo; whole view, before culling): medium quality at
+16 km is 340 sections, about 330k quads (10.5 MB), built in ~60 ms on one thread; per frame the
+CPU spends ~30 us on it (coverage + planning). Only the sections in view are drawn.
+
+Limits and next steps:
+
+* Edits don't show in LOD terrain yet. The next step is to keep a column summary of the chunks the
+  client has seen (or have the server send one for edited areas) and use it instead of the seed.
+* The current world has no landforms larger than ~100 blocks, so past ~8 km the LOD terrain is a
+  plain. Larger-scale noise (continents, mountain ranges) would make the far view far more
+  interesting, but it changes every existing world, so it is a deliberate separate step.
+* Not yet measured on a phone: GPU time with LODs on at each quality.
 
 ## Greedy meshing (`greedy.rs`)
 
@@ -210,6 +255,6 @@ draw one instance per quad (8 bytes instead of 32), texture repeat across merged
    quad (8 bytes) and a faster scan for the per-face path.
 2. Occlusion culling (cave-style flood fill) to skip chunks hidden behind terrain, which should
    help most underground.
-3. LOD meshes behind the (currently inert) LOD distance setting.
+3. Show edits in LOD terrain (see "Level-of-detail terrain").
 4. Pooled vertex buffers instead of one buffer per chunk.
 5. Immersive mode / real window insets instead of the fixed HUD insets.

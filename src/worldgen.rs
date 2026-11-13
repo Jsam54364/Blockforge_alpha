@@ -107,6 +107,10 @@ impl WorldGen {
         }
     }
 
+    pub fn water_id(&self) -> u16 {
+        self.water
+    }
+
     pub fn seed(&self) -> u64 {
         self.seed
     }
@@ -125,6 +129,51 @@ impl WorldGen {
         let n = sum / norm; // roughly 0..1
         let h = 6.0 + (n - 0.5) * 2.0 * 36.0; // blocks
         (h * 4.0).floor() as i32
+    }
+
+    /// `height_q` as seen from far away, for terrain drawn as cells `cell` blocks wide.
+    ///
+    /// Each octave of the height noise is faded towards its average as its wavelength
+    /// approaches the cell size: detail finer than a cell would only alias (a random-looking
+    /// bump per cell that changes when the cell size changes). Octaves well above the cell
+    /// size are untouched, so neighbouring detail levels agree closely and switching between
+    /// them barely moves the terrain. `cell <= 1` is exactly `height_q`.
+    pub fn height_q_filtered(&self, x: i32, z: i32, cell: i32) -> i32 {
+        if cell <= 1 {
+            return self.height_q(x, z);
+        }
+        let (fx, fz) = (x as f32, z as f32);
+        let (mut amp, mut freq) = (1.0f32, 1.0f32 / 96.0);
+        let (mut sum, mut norm) = (0.0f32, 0.0f32);
+        for o in 0..4u64 {
+            // 1 at four cells per wavelength or more, 0 at one cell per wavelength or less.
+            let keep = ((1.0 / freq / cell as f32 - 0.5) / 1.5).clamp(0.0, 1.0);
+            let v = if keep > 0.0 { value_noise_2d(self.seed.wrapping_add(o), fx * freq, fz * freq) } else { 0.5 };
+            sum += amp * (0.5 + (v - 0.5) * keep);
+            norm += amp;
+            amp *= 0.5;
+            freq *= 2.0;
+        }
+        let n = sum / norm;
+        let h = 6.0 + (n - 0.5) * 2.0 * 36.0;
+        (h * 4.0).floor() as i32
+    }
+
+    /// The visible surface of the column at block `(x, z)` for level-of-detail terrain:
+    /// its top in quarter blocks and the block it is made of. Matches `generate_chunk`
+    /// (slab tops, sand near the sea, water up to the sea surface; caves are never visible
+    /// from above) for `cell == 1`, and uses `height_q_filtered` for coarser cells.
+    pub fn lod_surface(&self, x: i32, z: i32, cell: i32) -> (i32, u16) {
+        let hq = self.height_q_filtered(x, z, cell);
+        let top = hq.div_euclid(4);
+        let slab = hq.rem_euclid(4) >= 2;
+        // Water fills every block above the terrain up to SEA_LEVEL (see `block_at`).
+        let water = if slab { top < SEA_LEVEL } else { top <= SEA_LEVEL };
+        if water {
+            return (4 * (SEA_LEVEL + 1), self.water);
+        }
+        let surf = if top - 1 <= SEA_LEVEL { self.sand } else { self.grass };
+        (4 * top + if slab { 2 } else { 0 }, surf)
     }
 
     pub fn column(&self, cx: i32, cz: i32) -> Column {
@@ -263,6 +312,70 @@ mod tests {
             }
         }
         assert!(slabs > 0, "expected some half-slab surface cells");
+    }
+
+    #[test]
+    fn lod_surface_at_full_detail_matches_the_generated_blocks() {
+        let (reg, g) = make();
+        let water = reg.id("water").unwrap();
+        let mut seen_water = false;
+        for cx in -2..2 {
+            for cz in -2..2 {
+                let col = g.column(cx, cz);
+                let mut chunks = std::collections::HashMap::new();
+                for lz in 0..CHUNK_SIZE {
+                    for lx in 0..CHUNK_SIZE {
+                        let (x, z) = (cx * CHUNK_SIZE + lx, cz * CHUNK_SIZE + lz);
+                        let (surf_q, block) = g.lod_surface(x, z, 1);
+                        // Find the real top: the highest non-air block, scanning down.
+                        let mut found = None;
+                        for y in (-64i32..64).rev() {
+                            let cy = y.div_euclid(CHUNK_SIZE);
+                            let chunk = chunks
+                                .entry(cy)
+                                .or_insert_with(|| g.generate_chunk(ChunkPos::new(cx, cy, cz), &col));
+                            let l = LocalPos { x: lx as u8, y: y.rem_euclid(CHUNK_SIZE) as u8, z: lz as u8 };
+                            let s = chunk.get(l.index());
+                            if !s.is_air() {
+                                let top_q = 4 * y + s.shape().y_range_q().1;
+                                found = Some((top_q, s.id()));
+                                break;
+                            }
+                        }
+                        let (top_q, id) = found.expect("solid ground");
+                        assert_eq!((surf_q, block), (top_q, id), "column {x},{z}");
+                        seen_water |= block == water;
+                    }
+                }
+            }
+        }
+        assert!(seen_water, "test area should include some sea");
+    }
+
+    #[test]
+    fn filtered_heights_keep_the_average_and_smooth_out_detail() {
+        let (_r, g) = make();
+        for cell in [1, 2, 4, 16, 64, 256] {
+            let (mut sum, mut n) = (0i64, 0i64);
+            for i in 0..400 {
+                let (x, z) = (i * 37 - 7000, i * 53 + 900);
+                sum += g.height_q_filtered(x, z, cell) as i64;
+                n += 1;
+            }
+            let mean_blocks = sum as f32 / n as f32 / 4.0;
+            assert!((mean_blocks - 6.0).abs() < 6.0, "cell {cell}: mean {mean_blocks}");
+        }
+        // Coarse cells vary less between neighbours than full detail does.
+        let rough = |cell: i32| -> f32 {
+            let mut d = 0i64;
+            for i in 0..2000 {
+                let x = i * cell;
+                d += (g.height_q_filtered(x + cell, 300, cell) - g.height_q_filtered(x, 300, cell)).abs() as i64;
+            }
+            d as f32 / 2000.0
+        };
+        assert!(rough(64) < rough(16) * 1.5 + 4.0);
+        assert_eq!(g.height_q_filtered(123, -45, 1), g.height_q(123, -45));
     }
 
     #[test]

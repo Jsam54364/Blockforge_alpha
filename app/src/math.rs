@@ -68,8 +68,25 @@ pub fn look_dir(eye: [f32; 3], forward: [f32; 3]) -> Mat4 {
     ]
 }
 
+/// Reverse-Z perspective with no far plane: depth is 1 at `near` and falls towards 0 with
+/// distance (`near / distance`). With a 32-bit float depth buffer this spreads precision
+/// evenly over the whole range, so terrain 30 km away still sorts correctly, which a
+/// standard projection with a far plane that far would not manage.
+pub fn perspective_reverse_z(fovy: f32, aspect: f32, near: f32) -> Mat4 {
+    let f = 1.0 / (fovy * 0.5).tan();
+    let mut m = [0.0f32; 16];
+    m[0] = f / aspect;
+    m[5] = f;
+    m[11] = -1.0;
+    m[14] = near;
+    m
+}
+
+/// Clear value and comparison that go with `perspective_reverse_z`.
+pub const DEPTH_CLEAR: f32 = 0.0;
+
 pub fn view_proj(eye: [f32; 3], forward: [f32; 3], aspect: f32) -> Mat4 {
-    mul(&perspective(1.1, aspect, 0.1, 1000.0), &look_dir(eye, forward))
+    mul(&perspective_reverse_z(1.1, aspect, 0.1), &look_dir(eye, forward))
 }
 
 /// Six clip planes extracted from a view-projection matrix (Gribb-Hartmann), pointing
@@ -146,6 +163,28 @@ mod tests {
     }
 
     #[test]
+    fn depth_is_reversed_and_never_clipped_far_away() {
+        let m = view_proj([0.0, 0.0, 0.0], [0.0, 0.0, -1.0], 1.0);
+        let depth = |d: f32| {
+            let c = project(&m, [0.0, 0.0, -d]);
+            c[2] / c[3]
+        };
+        assert!((depth(0.1) - 1.0).abs() < 1e-5, "near plane maps to 1");
+        let mut last = 1.0;
+        for d in [1.0, 10.0, 300.0, 5000.0, 40_000.0] {
+            let z = depth(d);
+            assert!(z > 0.0 && z < last, "depth {z} at {d}");
+            last = z;
+        }
+        // Neighbouring surfaces 30 km out still get distinct depths in an f32 buffer.
+        assert!(depth(30_000.0) != depth(30_001.0));
+        // The far "plane" of the frustum never rejects anything in front of the camera.
+        let f = Frustum::from_view_proj(&m);
+        assert!(f.contains_aabb([-1.0, -1.0, -60_001.0], [1.0, 1.0, -60_000.0]));
+        assert!(!f.contains_aabb([-1.0, -1.0, 5.0], [1.0, 1.0, 6.0]));
+    }
+
+    #[test]
     fn point_behind_has_negative_w() {
         let m = view_proj([0.0, 0.0, 0.0], [0.0, 0.0, -1.0], 1.0);
         assert!(project(&m, [0.0, 0.0, 5.0])[3] < 0.0);
@@ -193,7 +232,8 @@ mod tests {
         assert!(!check([80.0, 0.0, -20.0], 2.0), "far right");
         assert!(!check([0.0, 80.0, -20.0], 2.0), "far above");
         assert!(!check([0.0, -80.0, -20.0], 2.0), "far below");
-        assert!(!check([0.0, 0.0, -1500.0], 2.0), "beyond the far plane");
+        // No far plane (reverse-Z): level-of-detail terrain is drawn tens of km out.
+        assert!(check([0.0, 0.0, -30_000.0], 2.0), "far ahead stays visible");
         assert!(check([-14.0, 0.0, -20.0], 6.0), "straddling the left edge stays visible");
         assert!(check([0.0, 0.0, 0.0], 16.0), "a box containing the camera stays visible");
     }

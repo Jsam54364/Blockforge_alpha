@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 use blockforge::client::Client;
 use blockforge::coords::{BlockPos, CHUNK_VOLUME};
 use blockforge::jobs::default_worker_threads;
+use blockforge::lod::{build_section, LodSettings};
 use blockforge::mesh::{mesh_chunk_with, Mesher, PaddedChunk};
 use blockforge::registry::BlockRegistry;
 use blockforge::server::{self, ServerConfig};
@@ -108,6 +109,28 @@ fn print_map(c: &Client, reg: &BlockRegistry) {
     }
 }
 
+/// Level-of-detail terrain around the spawn: how much of it there is per quality and
+/// distance, and how long it takes to build on one thread.
+fn lod_figures(reg: &BlockRegistry, seed: u64) {
+    let gen = blockforge::worldgen::WorldGen::new(seed, reg);
+    println!("\nLOD terrain from the seed (whole view around the spawn, before culling):");
+    for (name, unit) in LodSettings::QUALITY {
+        for radius in [4096.0f32, 16384.0] {
+            let keys = LodSettings::new(radius, unit).select([0.5, 40.0, 0.5]);
+            let t = Instant::now();
+            let quads: usize = keys.iter().map(|k| build_section(&gen, reg, *k).quads()).sum();
+            println!(
+                "  {name:4} {:>2} km: {:3} sections, {:4}k quads ({:4.1} MB), built in {:.0?} on one thread",
+                radius as u32 / 1024,
+                keys.len(),
+                quads / 1000,
+                quads as f32 * 32.0 / 1.0e6,
+                t.elapsed()
+            );
+        }
+    }
+}
+
 fn main() {
     let registry = Arc::new(BlockRegistry::builtin());
     let sand = registry.state("sand").expect("sand block");
@@ -154,6 +177,7 @@ fn main() {
 
     print_map(&client, &registry);
     compare_meshers(&client, &registry);
+    lod_figures(&registry, client.seed);
 
     if let Some(g) = highest_solid(&client, &registry, 0, 0) {
         let name = &registry.get(client.store.block(BlockPos::new(0, g, 0)).unwrap()).name;

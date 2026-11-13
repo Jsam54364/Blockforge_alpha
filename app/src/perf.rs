@@ -37,6 +37,10 @@ pub struct Perf {
     pub drawn: usize,
     /// Quads in the chunk meshes drawn last frame.
     pub quads: u64,
+    /// LOD sections and quads drawn last frame, and sections still being built.
+    pub lod_drawn: usize,
+    pub lod_quads: u64,
+    pub lod_pending: usize,
     /// Name of the active present mode (FIFO = vsync).
     pub present_mode: &'static str,
     /// Fraction of one core the main (render) thread used over the last second.
@@ -72,6 +76,9 @@ impl Perf {
             meshes: 0,
             drawn: 0,
             quads: 0,
+            lod_drawn: 0,
+            lod_quads: 0,
+            lod_pending: 0,
             present_mode: "FIFO",
             main_thread: None,
         }

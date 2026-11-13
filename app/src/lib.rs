@@ -113,14 +113,19 @@ impl ApplicationHandler for App {
                     }
                     self.perf.drawn = g.drawn_chunks();
                     self.perf.quads = g.drawn_quads();
+                    (self.perf.lod_drawn, self.perf.lod_quads) = g.drawn_lod();
+                    self.perf.lod_pending = self.game.client.lod.stats.pending;
                     self.perf.present_mode = g.present_mode_name();
                     self.game.ui.build(&self.perf, &mut self.hud);
                     let settings = self.game.ui.settings;
+                    let (fog_start, fog_end) = self.game.fog_range();
                     let opts = gfx::RenderOptions {
                         fog: settings.fog,
                         frustum_cull: settings.cull.frustum(),
                         backface_cull: settings.cull.backface(),
                         vsync: settings.vsync,
+                        fog_start,
+                        fog_end,
                     };
                     match g.render(&mut self.game.client, &self.game.cam, view_blocks, &opts, &self.hud) {
                         Ok(display_wait) => {
