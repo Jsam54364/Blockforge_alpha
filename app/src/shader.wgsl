@@ -23,8 +23,10 @@ struct Globals {
     sky_tint: vec4<f32>,     // x: the photographed sky's brightness; y: wide glow; z: glare; w: sunset colouring
     glow: array<vec4<f32>, 4>, // glow around the sun: (a, w1), (c1, w2), (c2, -), (e, -)
     face_light: array<vec4<f32>, 6>, // light on each face direction: sky + sun + moon
-    stars: vec4<f32>,        // xyz: the axis the stars turn around; w: how far they have turned
-    night: vec4<f32>,        // x: star visibility
+    night_rot: array<vec4<f32>, 3>, // rows: view direction -> the night photo's frame (turns with the sky)
+    night_zenith: vec4<f32>, // night background straight up (rgb)
+    night_horizon: vec4<f32>, // ... and at the horizon
+    night: vec4<f32>,        // x: how much of the night photo (stars, moon) shows
 };
 
 @group(0) @binding(0) var<uniform> g: Globals;
@@ -37,6 +39,8 @@ struct Globals {
 // The photographed sky without its sun: upper half of an equirectangular image, mipmapped.
 @group(0) @binding(5) var sky_map: texture_2d<f32>;
 @group(0) @binding(6) var sky_sampler: sampler;
+// The night sky photo: stars, Milky Way and moon (background taken out), the whole sphere.
+@group(0) @binding(7) var night_map: texture_2d<f32>;
 
 struct VsIn {
     @location(0) packed: vec2<u32>,
@@ -189,11 +193,9 @@ fn vs_lod(v: VsIn) -> VsOut {
 const PI: f32 = 3.14159265;
 // The glow was measured outside this angle from the sun (4 degrees); inside, the sun is drawn.
 const GLOW_FROM: f32 = 0.0698;
-// Sunset colouring (low toward the sun / everywhere else) and the night sky (up / horizon).
+// Sunset colouring (low toward the sun / everywhere else).
 const DUSK_WARM = vec3<f32>(1.55, 0.80, 0.42);
 const DUSK_COOL = vec3<f32>(0.80, 0.82, 1.0);
-const NIGHT_ZENITH = vec3<f32>(0.0012, 0.0020, 0.0055);
-const NIGHT_HORIZON = vec3<f32>(0.0045, 0.0065, 0.0130);
 
 // The photographed sky along a unit direction; below the horizon, the horizon. The caller
 // picks the mip level (an automatic one would jump where the angle wraps around).
@@ -203,8 +205,18 @@ fn sky_base(d: vec3<f32>, lod: f32) -> vec3<f32> {
     return textureSampleLevel(sky_map, sky_sampler, vec2<f32>(u, v), lod).rgb;
 }
 
-// The sky's colour along a unit direction, without the sun or moon discs or stars: the photo
-// times the glow around the sun, sunset colouring, plus the night sky. Same as sky::radiance.
+// Stars, Milky Way and moon from the night photo, turned with the sky (its moon is the game's
+// moon), fading out toward the horizon and gone below it.
+fn night_photo(d: vec3<f32>, lod: f32) -> vec3<f32> {
+    let p = vec3<f32>(dot(g.night_rot[0].xyz, d), dot(g.night_rot[1].xyz, d), dot(g.night_rot[2].xyz, d));
+    let u = atan2(p.x, p.z) * (0.5 / PI);
+    let v = 0.5 - asin(clamp(p.y, -1.0, 1.0)) / PI;
+    return textureSampleLevel(night_map, sky_sampler, vec2<f32>(u, v), lod).rgb * smoothstep(-0.02, 0.12, d.y);
+}
+
+// The sky's colour along a unit direction, without the sun's disc: the day photo times the
+// glow around the sun, sunset colouring, plus the night (its background is the same as in
+// sky::radiance; the stars and moon only exist here).
 fn sky_radiance(d: vec3<f32>, lod: f32) -> vec3<f32> {
     let base = sky_base(d, lod);
     let cg = dot(d, g.sun.xyz);
@@ -217,7 +229,10 @@ fn sky_radiance(d: vec3<f32>, lod: f32) -> vec3<f32> {
     let toward = max(dot(d.xz, g.sun.xz) * inverseSqrt(hl), 0.0);
     let tint = mix(DUSK_COOL, DUSK_WARM, hz * (0.25 + 0.75 * toward * toward));
     let dusk = mix(vec3<f32>(1.0), tint, g.sky_tint.w);
-    let night = mix(NIGHT_ZENITH, NIGHT_HORIZON, hz) * (1.0 - g.sun_color.w);
+    var night = mix(g.night_zenith.rgb, g.night_horizon.rgb, hz) * (1.0 - g.sun_color.w);
+    if (g.night.x > 0.001) {
+        night += night_photo(d, lod) * g.night.x;
+    }
     return base * glow * dusk * g.sky_tint.x + night;
 }
 
@@ -383,77 +398,22 @@ fn vs_sky(@builtin(vertex_index) i: u32) -> SkyOut {
     return o;
 }
 
-fn hash_u(x: u32) -> u32 {
-    var h = x * 0x9e3779b1u;
-    h = (h ^ (h >> 16u)) * 0x85ebca6bu;
-    h = (h ^ (h >> 13u)) * 0xc2b2ae35u;
-    return h ^ (h >> 16u);
-}
-
-// Stars on a cube around the viewer (no crowding at the poles): one cell in 25 has one, most
-// faint, a few bright, slightly blue or yellow, twinkling. They turn with the sky.
-fn stars(d: vec3<f32>) -> vec3<f32> {
-    let k = g.stars.xyz;
-    let c = cos(g.stars.w);
-    let s = sin(g.stars.w);
-    let q = d * c + cross(k, d) * s + k * (dot(k, d) * (1.0 - c));
-    let m = abs(q);
-    var uv: vec2<f32>;
-    var face: u32;
-    if (m.x >= m.y && m.x >= m.z) {
-        uv = q.yz / m.x;
-        face = select(0u, 1u, q.x < 0.0);
-    } else if (m.y >= m.z) {
-        uv = q.xz / m.y;
-        face = select(2u, 3u, q.y < 0.0);
-    } else {
-        uv = q.xy / m.z;
-        face = select(4u, 5u, q.z < 0.0);
-    }
-    let grid = 160.0;
-    let p = (uv * 0.5 + 0.5) * grid;
-    let cell = vec2<u32>(min(floor(p), vec2<f32>(grid - 1.0)));
-    let h = hash_u(cell.x + cell.y * 256u + face * 65536u + 7u);
-    if ((h & 255u) > 10u) {
-        return vec3<f32>(0.0);
-    }
-    let pos = vec2<f32>(f32((h >> 8u) & 255u), f32((h >> 16u) & 255u)) / 255.0 * 0.6 + 0.2;
-    // About 1.2 pixels across whatever the screen: one cell is (pi / 2) / grid radians.
-    let px = (FOVY_SKY / g.screen.y) / (PI * 0.5 / grid);
-    let dist = length(fract(p) - pos) / px;
-    let r = f32(h >> 24u) / 255.0;
-    let bright = (0.08 + 1.4 * pow(r, 6.0)) * (0.75 + 0.25 * sin(g.flags.y * (2.0 + 3.0 * r) + f32(h & 1023u)));
-    let tint = mix(vec3<f32>(0.75, 0.85, 1.0), vec3<f32>(1.0, 0.9, 0.75), fract(r * 7.0));
-    return tint * bright * smoothstep(1.3, 0.3, dist) * smoothstep(0.0, 0.25, d.y);
-}
-const FOVY_SKY: f32 = 1.1; // math::FOVY
-
-// The sun and moon discs, with glare. Both are drawn bigger than the real ones (about five
-// times), as games do; the ground hides whatever has set.
-fn sun_and_moon(d: vec3<f32>) -> vec3<f32> {
+// The sun's disc, with glare: drawn bigger than the real one (about five times), as games do;
+// the ground hides it once it has set. (The moon is in the night photo.)
+fn sun_disc(d: vec3<f32>) -> vec3<f32> {
     let above = smoothstep(-0.004, 0.004, d.y);
-    var c = vec3<f32>(0.0);
     let warm = smoothstep(0.0, 0.5, g.sun.y);
     let tint = g.sun_color.rgb / max(g.sun_color.r, 1e-4);
     let a = acos(clamp(dot(d, g.sun.xyz), -1.0, 1.0));
     let r = 0.023;
     let disc = (1.0 - smoothstep(r * 0.85, r, a)) * (1.0 - 0.25 * (a / r) * (a / r));
-    c += tint * (disc * mix(20.0, 30.0, warm) + exp(-a / 0.018) * mix(1.5, 2.5, warm)) * g.sun.w;
-    let am = acos(clamp(dot(d, g.moon.xyz), -1.0, 1.0));
-    let rm = 0.02;
-    let mdisc = (1.0 - smoothstep(rm * 0.85, rm, am)) * (0.82 + 0.18 * cos(am / rm * 2.4));
-    c += (vec3<f32>(0.78, 0.80, 0.76) * mdisc + vec3<f32>(0.02, 0.025, 0.035) * exp(-am / 0.12)) * g.moon.w;
-    return c * above;
+    return tint * (disc * mix(20.0, 30.0, warm) + exp(-a / 0.018) * mix(1.5, 2.5, warm)) * (g.sun.w * above);
 }
 
 @fragment
 fn fs_sky(f: SkyOut) -> @location(0) vec4<f32> {
     let d = normalize(g.sky_basis[2].xyz + f.ndc.x * g.sky_basis[0].xyz + f.ndc.y * g.sky_basis[1].xyz);
-    var c = sky_radiance(d, 0.0) + sun_and_moon(d);
-    if (g.night.x > 0.001) {
-        c += stars(d) * g.night.x;
-    }
-    return vec4<f32>(display(c), 1.0);
+    return vec4<f32>(display(sky_radiance(d, 0.0) + sun_disc(d)), 1.0);
 }
 
 // ---- HUD: coloured triangles in pixel coordinates (origin top-left) ----

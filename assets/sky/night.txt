@@ -1,0 +1,6 @@
+# Night sky photo (night.png). Written by tools/bake_sky.py.
+# moon: towards the moon in the photo (x y z; y up, as the game)
+# zenith, horizon: the background straight up and at the horizon (linear rgb)
+moon 0.001568 0.707156 -0.707056
+zenith 0.007199 0.011208 0.017193
+horizon 0.012184 0.014061 0.017453

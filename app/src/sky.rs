@@ -3,8 +3,10 @@
 //! The sky is a photograph (`assets/sky`, baked from an HDRI by `tools/bake_sky.py`) with its
 //! sun taken out. The game moves its own sun through the day and puts the sun's glow back
 //! around wherever it is: a clear sky is close to "base sky" times "glow by angle from the
-//! sun", and the bake measured that glow from the photo (`Glow`). On top come sunset colours,
-//! a night sky with stars that turn with it, and a moon opposite the sun.
+//! sun", and the bake measured that glow from the photo (`Glow`). On top come sunset colours
+//! and, at night, a second photograph: stars, the Milky Way and a moon (`Night`). It turns
+//! with the sky through the night, aligned so that its moon is the game's moon, which is
+//! always opposite the sun.
 //!
 //! The same sky lights the terrain (`face_light`: one colour per block-face direction, from
 //! the whole sky plus the sun and the moon), colours the fog, and is what water reflects.
@@ -36,9 +38,6 @@ const NIGHT_FACE: [f32; 6] = [0.8, 0.8, 1.0, 0.5, 0.8, 0.8];
 /// Sunset colouring: low toward the sun, and everywhere else.
 const DUSK_WARM: [f32; 3] = [1.55, 0.80, 0.42];
 const DUSK_COOL: [f32; 3] = [0.80, 0.82, 1.0];
-/// Night sky, straight up and at the horizon.
-const NIGHT_ZENITH: [f32; 3] = [0.0012, 0.0020, 0.0055];
-const NIGHT_HORIZON: [f32; 3] = [0.0045, 0.0065, 0.0130];
 /// How much light the ground reflects back up (onto sides and bottoms).
 const GROUND_ALBEDO: f32 = 0.4;
 /// How much of what a face sees is ground (cosine-weighted): none for tops, half for sides.
@@ -50,6 +49,8 @@ pub const FACE_NORMALS: [[f32; 3]; 6] =
 
 const SKY_PNG: &[u8] = include_bytes!("../../assets/sky/sky.png");
 const GLOW_TXT: &str = include_str!("../../assets/sky/glow.txt");
+const NIGHT_PNG: &[u8] = include_bytes!("../../assets/sky/night.png");
+const NIGHT_TXT: &str = include_str!("../../assets/sky/night.txt");
 
 fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
@@ -147,6 +148,45 @@ pub fn pole() -> [f32; 3] {
     [0.0, lat.sin(), -lat.cos()]
 }
 
+type Mat3 = [[f32; 3]; 3];
+
+/// Rotation by `angle` radians around the unit vector `axis` (right-handed), as a matrix
+/// (rows: `m * v` = (row0 . v, row1 . v, row2 . v)).
+fn rotation(axis: [f32; 3], angle: f32) -> Mat3 {
+    let x = rotate([1.0, 0.0, 0.0], axis, angle);
+    let y = rotate([0.0, 1.0, 0.0], axis, angle);
+    let z = rotate([0.0, 0.0, 1.0], axis, angle);
+    [[x[0], y[0], z[0]], [x[1], y[1], z[1]], [x[2], y[2], z[2]]]
+}
+
+fn mat_mul(a: &Mat3, b: &Mat3) -> Mat3 {
+    let mut m = [[0.0f32; 3]; 3];
+    for (i, row) in m.iter_mut().enumerate() {
+        for (j, v) in row.iter_mut().enumerate() {
+            *v = (0..3).map(|k| a[i][k] * b[k][j]).sum();
+        }
+    }
+    m
+}
+
+fn mat_vec(m: &Mat3, v: [f32; 3]) -> [f32; 3] {
+    [dot(m[0], v), dot(m[1], v), dot(m[2], v)]
+}
+
+/// The smallest rotation taking unit vector `a` to unit vector `b`.
+fn rotation_between(a: [f32; 3], b: [f32; 3]) -> Mat3 {
+    let axis = [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+    let s = dot(axis, axis).sqrt();
+    let c = dot(a, b).clamp(-1.0, 1.0);
+    if s < 1e-6 {
+        // Same direction, or opposite: any perpendicular axis does for the half turn.
+        let perp = if a[0].abs() < 0.9 { [0.0, -a[2], a[1]] } else { [-a[2], 0.0, a[0]] };
+        let n = dot(perp, perp).sqrt();
+        return if c > 0.0 { rotation([0.0, 1.0, 0.0], 0.0) } else { rotation(scale3(perp, 1.0 / n), PI) };
+    }
+    rotation(scale3(axis, 1.0 / s), s.atan2(c))
+}
+
 /// `v` turned by `angle` radians around the unit vector `axis` (right-handed).
 pub fn rotate(v: [f32; 3], axis: [f32; 3], angle: f32) -> [f32; 3] {
     let (s, c) = angle.sin_cos();
@@ -212,7 +252,15 @@ impl SkyMap {
         })
     }
 
-    /// Reads the baked sky: an RGBA PNG holding RGBE.
+    /// The night sky photo (the whole sphere; see `Night`), or a black one.
+    pub fn load_night() -> SkyMap {
+        SkyMap::decode(NIGHT_PNG).unwrap_or_else(|e| {
+            eprintln!("blockforge: night.png: {e}; no stars");
+            SkyMap::with_mips(Level { width: 4, height: 2, texels: vec![[0.0; 3]; 8] })
+        })
+    }
+
+    /// Reads a baked sky: an RGBA PNG holding RGBE.
     pub fn decode(bytes: &[u8]) -> Result<SkyMap, String> {
         let dec = png::Decoder::new(bytes);
         let mut reader = dec.read_info().map_err(|e| e.to_string())?;
@@ -388,6 +436,71 @@ impl Glow {
     }
 }
 
+// ---- The night sky ----
+
+/// About the night sky photo (`night.txt`, written by the bake with `night.png`): where its
+/// moon is, and the smooth background it was taken off, straight up and at the horizon (the
+/// game draws that background itself, by elevation in the world).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Night {
+    pub moon: [f32; 3],
+    pub zenith: [f32; 3],
+    pub horizon: [f32; 3],
+}
+
+impl Night {
+    /// If night.txt is unreadable: a plain dark blue night.
+    pub const PLAIN: Night =
+        Night { moon: [0.0, 1.0, 0.0], zenith: [0.0012, 0.0020, 0.0055], horizon: [0.0045, 0.0065, 0.0130] };
+
+    pub fn load() -> Night {
+        Night::parse(NIGHT_TXT).unwrap_or_else(|e| {
+            eprintln!("blockforge: night.txt: {e}; plain night");
+            Night::PLAIN
+        })
+    }
+
+    /// Lines `moon|zenith|horizon x y z`; `#` starts a comment.
+    pub fn parse(text: &str) -> Result<Night, String> {
+        let mut vals: [Option<[f32; 3]>; 3] = [None; 3];
+        for line in text.lines() {
+            let line = line.split('#').next().unwrap_or("").trim();
+            if line.is_empty() {
+                continue;
+            }
+            let mut parts = line.split_whitespace();
+            let i = match parts.next() {
+                Some("moon") => 0,
+                Some("zenith") => 1,
+                Some("horizon") => 2,
+                other => return Err(format!("unknown key {other:?}")),
+            };
+            let v: Vec<f32> = parts.map(|p| p.parse::<f32>().map_err(|e| e.to_string())).collect::<Result<_, _>>()?;
+            if v.len() != 3 || v.iter().any(|x| !x.is_finite()) {
+                return Err(format!("bad line: {line}"));
+            }
+            vals[i] = Some([v[0], v[1], v[2]]);
+        }
+        let [Some(moon), Some(zenith), Some(horizon)] = vals else { return Err("missing a line".into()) };
+        let n = dot(moon, moon).sqrt();
+        if n < 0.5 || zenith.iter().chain(horizon.iter()).any(|c| *c < 0.0) {
+            return Err("bad values".into());
+        }
+        Ok(Night { moon: scale3(moon, 1.0 / n), zenith, horizon })
+    }
+
+    /// Turns a view direction (world) into the night photo's own frame at a time of day: the
+    /// starry sky turns around the pole with the sun (see `rotate`), and the photo is placed
+    /// on it so that its moon lands where the game's moon is (opposite the sun) at every hour.
+    pub fn rotation(&self, hours: f64) -> Mat3 {
+        // Where the moon sits on the turning sky: the world direction at noon (hour angle 0).
+        let at_noon = sun_dir(12.0);
+        let moon_on_sky = [-at_noon[0], -at_noon[1], -at_noon[2]];
+        let place = rotation_between(moon_on_sky, self.moon);
+        mat_mul(&place, &rotation(pole(), hour_angle(hours)))
+    }
+}
+
 // ---- Per-frame state ----
 
 /// Everything about the sky that depends on the time of day (cheap: computed every frame).
@@ -410,9 +523,8 @@ pub struct SkyParams {
     pub glare: f32,
     pub glow: f32,
     pub dusk: f32,
-    /// Star visibility, and how far the starry sky has turned (radians around `pole`).
+    /// How much of the night photo (stars, moon) shows.
     pub stars: f32,
-    pub star_angle: f32,
 }
 
 pub fn params(hours: f64) -> SkyParams {
@@ -436,14 +548,13 @@ pub fn params(hours: f64) -> SkyParams {
         glow: 0.3 + 0.7 * smoothstep(0.0, 0.45, s),
         dusk: smoothstep(-0.18, 0.0, s) * (1.0 - smoothstep(0.02, 0.32, s)),
         stars: 1.0 - smoothstep(-0.22, -0.04, s),
-        star_angle: hour_angle(hours),
     }
 }
 
-/// The sky's colour along a direction (no sun or moon disc, no stars): the photographed sky
+/// The sky's colour along a direction (no sun disc, no night photo): the photographed sky
 /// times the glow around the sun, sunset colouring, plus the night sky. Below the horizon it
 /// continues the horizon. Mirrors `sky_radiance` in shader.wgsl.
-pub fn radiance(map: &SkyMap, glow: &Glow, p: &SkyParams, d: [f32; 3], level: usize) -> [f32; 3] {
+pub fn radiance(map: &SkyMap, glow: &Glow, night: &Night, p: &SkyParams, d: [f32; 3], level: usize) -> [f32; 3] {
     let base = map.sample(level, d);
     let gl = glow.eval(dot(d, p.sun), p.glare, p.glow);
     let hz = (1.0 - d[1].clamp(0.0, 1.0)).powi(3);
@@ -451,18 +562,18 @@ pub fn radiance(map: &SkyMap, glow: &Glow, p: &SkyParams, d: [f32; 3], level: us
     let hl = ((d[0] * d[0] + d[2] * d[2]) * (p.sun[0] * p.sun[0] + p.sun[2] * p.sun[2])).max(1e-8);
     let toward = (hd / hl.sqrt()).max(0.0);
     let tint = lerp3(DUSK_COOL, DUSK_WARM, hz * (0.25 + 0.75 * toward * toward));
-    let night = lerp3(NIGHT_ZENITH, NIGHT_HORIZON, hz);
+    let dark = lerp3(night.zenith, night.horizon, hz);
     let mut out = [0.0; 3];
     for c in 0..3 {
         let dusk = 1.0 + (tint[c] - 1.0) * p.dusk;
-        out[c] = base[c] * gl[c] * dusk * p.brightness + night[c] * (1.0 - p.day);
+        out[c] = base[c] * gl[c] * dusk * p.brightness + dark[c] * (1.0 - p.day);
     }
     out
 }
 
 /// Light from the sky (the half above the horizon, cosine-weighted) on a surface facing each
 /// block-face direction. The slow part: a few hundred sky samples.
-pub fn sky_ambient(map: &SkyMap, glow: &Glow, p: &SkyParams) -> [[f32; 3]; 6] {
+pub fn sky_ambient(map: &SkyMap, glow: &Glow, night: &Night, p: &SkyParams) -> [[f32; 3]; 6] {
     const N_AZ: usize = 32;
     const N_EL: usize = 8;
     let level = map.level_for_width(64);
@@ -474,7 +585,7 @@ pub fn sky_ambient(map: &SkyMap, glow: &Glow, p: &SkyParams) -> [[f32; 3]; 6] {
         for i in 0..N_AZ {
             let (sin_az, cos_az) = ((i as f32 + 0.5) * d_az).sin_cos();
             let d = [cos_el * sin_az, sin_el, cos_el * cos_az];
-            let l = radiance(map, glow, p, d, level).map(|v| v.min(AMBIENT_MAX));
+            let l = radiance(map, glow, night, p, d, level).map(|v| v.min(AMBIENT_MAX));
             let w = cos_el * d_az * d_el;
             for (f, n) in FACE_NORMALS.iter().enumerate() {
                 let k = dot(*n, d).max(0.0) * w;
@@ -533,14 +644,19 @@ pub struct SkyUniforms {
     pub glow: [[f32; 4]; 4],
     /// Light on each block-face direction (`face_light`).
     pub face_light: [[f32; 4]; 6],
-    /// xyz: the axis the stars turn around; w: how far they have turned.
-    pub stars: [f32; 4],
-    /// x: star visibility.
+    /// Rows of `Night::rotation`: view direction to the night photo's frame.
+    pub night_rot: [[f32; 4]; 3],
+    /// The night background straight up and at the horizon (rgb).
+    pub night_zenith: [f32; 4],
+    pub night_horizon: [f32; 4],
+    /// x: how much of the night photo shows (stars, moon).
     pub night: [f32; 4],
 }
 
-pub fn uniforms(glow: &Glow, p: &SkyParams, faces: [[f32; 4]; 6]) -> SkyUniforms {
-    let k = pole();
+pub fn uniforms(glow: &Glow, night: &Night, p: &SkyParams, faces: [[f32; 4]; 6]) -> SkyUniforms {
+    let r = night.rotation(p.hours);
+    let row = |i: usize| [r[i][0], r[i][1], r[i][2], 0.0];
+    let rgb = |c: [f32; 3]| [c[0], c[1], c[2], 0.0];
     SkyUniforms {
         sun: [p.sun[0], p.sun[1], p.sun[2], p.sun_disc],
         sun_color: [p.sun_light[0], p.sun_light[1], p.sun_light[2], p.day],
@@ -548,7 +664,9 @@ pub fn uniforms(glow: &Glow, p: &SkyParams, faces: [[f32; 4]; 6]) -> SkyUniforms
         sky_tint: [p.brightness, p.glow, p.glare, p.dusk],
         glow: glow.uniforms(),
         face_light: faces,
-        stars: [k[0], k[1], k[2], p.star_angle],
+        night_rot: [row(0), row(1), row(2)],
+        night_zenith: rgb(night.zenith),
+        night_horizon: rgb(night.horizon),
         night: [p.stars, 0.0, 0.0, 0.0],
     }
 }
@@ -559,23 +677,24 @@ pub fn uniforms(glow: &Glow, p: &SkyParams, faces: [[f32; 4]; 6]) -> SkyUniforms
 pub struct Sky {
     pub map: SkyMap,
     pub glow: Glow,
+    pub night: Night,
     lit_at: f64,
     faces: [[f32; 4]; 6],
 }
 
 impl Sky {
     pub fn new() -> Sky {
-        Sky { map: SkyMap::load(), glow: Glow::load(), lit_at: f64::NAN, faces: [[0.0; 4]; 6] }
+        Sky { map: SkyMap::load(), glow: Glow::load(), night: Night::load(), lit_at: f64::NAN, faces: [[0.0; 4]; 6] }
     }
 
     pub fn uniforms(&mut self, hours: f64) -> SkyUniforms {
         let p = params(hours);
         let moved = (hours - self.lit_at).abs();
         if self.lit_at.is_nan() || (0.01..=23.99).contains(&moved) {
-            self.faces = face_light(&sky_ambient(&self.map, &self.glow, &p), &p);
+            self.faces = face_light(&sky_ambient(&self.map, &self.glow, &self.night, &p), &p);
             self.lit_at = hours;
         }
-        uniforms(&self.glow, &p, self.faces)
+        uniforms(&self.glow, &self.night, &p, self.faces)
     }
 }
 
@@ -630,7 +749,7 @@ mod tests {
     #[test]
     fn the_sun_turns_with_the_starry_sky() {
         // The sun is fixed on the turning sky: turning noon's sun by minus the hour angle
-        // around the pole gives the sun at any hour (the shader turns stars the same way).
+        // around the pole gives the sun at any hour (`Night::rotation` turns the stars so).
         for h in [3.0, 7.5, 12.0, 16.25, 22.0] {
             let turned = rotate(sun_dir(12.0), pole(), -hour_angle(h));
             assert!(close(turned, sun_dir(h), 1e-5), "{h}: {turned:?} vs {:?}", sun_dir(h));
@@ -692,9 +811,10 @@ mod tests {
         let sky = SkyMap::decode(SKY_PNG).unwrap();
         let glow = Glow::parse(GLOW_TXT).unwrap();
         let lum = |c: [f32; 4]| 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+        let night = Night::parse(NIGHT_TXT).unwrap();
         let at = |h: f64| {
             let p = params(h);
-            face_light(&sky_ambient(&sky, &glow, &p), &p)
+            face_light(&sky_ambient(&sky, &glow, &night, &p), &p)
         };
         let (noon, morning, night) = (at(12.0), at(8.0), at(0.5));
         // Noon: tops brightest, bottoms darkest; tops close to the old fixed lighting (~0.9-1.1).
@@ -714,15 +834,55 @@ mod tests {
     fn the_relit_sky_is_blue_brighter_near_the_sun_and_dark_at_night() {
         let sky = SkyMap::decode(SKY_PNG).unwrap();
         let glow = Glow::parse(GLOW_TXT).unwrap();
+        let night = Night::parse(NIGHT_TXT).unwrap();
         let p = params(12.0);
-        let up = radiance(&sky, &glow, &p, [0.0, 1.0, 0.0], 0);
-        let away = radiance(&sky, &glow, &p, [0.0, 0.2, -1.0], 0);
+        let up = radiance(&sky, &glow, &night, &p, [0.0, 1.0, 0.0], 0);
+        let away = radiance(&sky, &glow, &night, &p, [0.0, 0.2, -1.0], 0);
         assert!(up[2] > up[0] && away[2] > away[0], "blue sky: {up:?} {away:?}");
         let (y, z) = (p.sun[1] - 0.2, p.sun[2]);
         let n = (y * y + z * z).sqrt();
-        let toward = radiance(&sky, &glow, &p, [0.0, y / n, z / n], 0);
+        let toward = radiance(&sky, &glow, &night, &p, [0.0, y / n, z / n], 0);
         assert!(toward[0] > away[0] * 1.5, "brighter near the sun");
-        let night = radiance(&sky, &glow, &params(0.0), [0.0, 1.0, 0.0], 0);
-        assert!(night[2] < 0.02, "night sky {night:?}");
+        let dark = radiance(&sky, &glow, &night, &params(0.0), [0.0, 1.0, 0.0], 0);
+        assert!(dark[2] < 0.03 && dark[2] > dark[0], "night sky {dark:?}");
+    }
+
+    #[test]
+    fn the_night_photo_loads_and_its_moon_follows_the_games_moon() {
+        let night = Night::parse(NIGHT_TXT).expect("assets/sky/night.txt");
+        assert!(night.zenith[2] > night.zenith[0], "a blue night: {night:?}");
+        let map = SkyMap::decode(NIGHT_PNG).expect("assets/sky/night.png");
+        assert_eq!((map.levels[0].width, map.levels[0].height), (2048, 1024));
+        // The photo's brightest spot is the moon night.txt names (full-sphere mapping).
+        let top = &map.levels[0];
+        let (i, _) = top.texels.iter().enumerate().fold((0, 0.0), |b, (i, t)| if t[1] > b.1 { (i, t[1]) } else { b });
+        let (x, y) = ((i as u32 % top.width) as f32 + 0.5, (i as u32 / top.width) as f32 + 0.5);
+        let (az, el) = (x / top.width as f32 * 2.0 * PI, PI / 2.0 - y / top.height as f32 * PI);
+        let brightest = [el.cos() * az.sin(), el.sin(), el.cos() * az.cos()];
+        assert!(dot(brightest, night.moon) > 0.999, "{brightest:?} vs {:?}", night.moon);
+        // At every hour, looking at the game's moon (opposite the sun) looks at the photo's.
+        for h in [0.0, 2.5, 6.0, 12.0, 19.0, 22.75] {
+            let s = sun_dir(h);
+            let seen = mat_vec(&night.rotation(h), [-s[0], -s[1], -s[2]]);
+            assert!(dot(seen, night.moon) > 0.9999, "{h}: {seen:?}");
+        }
+        // At midnight the game's moon is 45 degrees up, as high as the photo's: little turning.
+        let m = sun_dir(0.0);
+        assert!(((-m[1]).asin().to_degrees() - 45.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn rotation_between_handles_every_pair() {
+        for (a, b) in [
+            ([1.0, 0.0, 0.0], [0.0, 1.0, 0.0]),
+            ([0.0, 0.6, 0.8], [0.0, 0.6, 0.8]),
+            ([0.0, 0.0, 1.0], [0.0, 0.0, -1.0]),
+            ([1.0, 0.0, 0.0], [-1.0, 0.0, 0.0]),
+        ] {
+            let r = rotation_between(a, b);
+            assert!(close(mat_vec(&r, a), b, 1e-5), "{a:?} -> {b:?}: {:?}", mat_vec(&r, a));
+            let n = mat_vec(&r, [0.3, -0.5, 0.81]);
+            assert!((dot(n, n) - (0.09 + 0.25 + 0.6561)).abs() < 1e-4, "a rotation keeps lengths");
+        }
     }
 }

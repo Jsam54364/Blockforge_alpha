@@ -139,8 +139,8 @@ fn tint_texture(device: &wgpu::Device) -> (wgpu::Texture, wgpu::TextureView, wgp
     (tex, view, sampler)
 }
 
-/// The photographed sky (see `sky`) as an RGB9E5 texture with all its mip levels, and its
-/// sampler: wrapping around the horizon, clamped at the zenith and the horizon. The shader
+/// A photographed sky (see `sky`) as an RGB9E5 texture with all its mip levels, and its
+/// sampler: wrapping around the horizon, clamped at the top and bottom rows. The shader
 /// always picks the mip level itself, so the seam where the angle wraps never shows.
 fn sky_texture(device: &wgpu::Device, queue: &wgpu::Queue, map: &sky::SkyMap) -> (wgpu::TextureView, wgpu::Sampler) {
     let top = &map.levels[0];
@@ -430,6 +430,16 @@ impl Gfx {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 7,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
         let (tint_tex, tint_view, tint_sampler) = tint_texture(&device);
@@ -437,6 +447,8 @@ impl Gfx {
         let mut sky = Sky::new();
         let (sky_view, sky_sampler) = sky_texture(&device, &queue, &sky.map);
         sky.map.keep_levels_up_to(64); // the GPU has the rest; the light needs only these
+        // The night photo is only needed on the GPU (its sampler is the sky's).
+        let (night_view, _) = sky_texture(&device, &queue, &sky::SkyMap::load_night());
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("pipeline layout"),
             bind_group_layouts: &[&bgl],
@@ -465,6 +477,7 @@ impl Gfx {
                     wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&tint_sampler) },
                     wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&sky_view) },
                     wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::Sampler(&sky_sampler) },
+                    wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&night_view) },
                 ],
             })
         };
@@ -1151,8 +1164,8 @@ mod tests {
     fn globals_layout_matches_the_wgsl_struct() {
         // 64 (mat4) + 4 * 16 (vec4s) + 32 * 16 (palette) + 16 (lod window) + 32 * 16 (lod mask)
         // + 16 (tint window) + 3 * 16 (sky basis) + sky: 4 * 16 + 4 * 16 (glow) + 6 * 16 (faces)
-        // + 2 * 16
-        assert_eq!(std::mem::size_of::<Globals>(), 64 + 64 + 512 + 16 + 512 + 16 + 48 + 64 + 64 + 96 + 32);
+        // + 3 * 16 (night rotation) + 3 * 16
+        assert_eq!(std::mem::size_of::<Globals>(), 64 + 64 + 512 + 16 + 512 + 16 + 48 + 64 + 64 + 96 + 48 + 48);
         assert_eq!(std::mem::size_of::<HudVertex>(), 12);
     }
 

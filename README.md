@@ -7,7 +7,7 @@ A mobile-first voxel engine in Rust, in two crates:
   architecture lives here and is tested without a GPU.
 * the **app** (`app/`): the Android front-end. winit + wgpu renderer, touch controls and HUD.
 
-> **Status:** 102 unit + 8 end-to-end tests in the core and 61 in the app (plus WGSL
+> **Status:** 102 unit + 8 end-to-end tests in the core and 63 in the app (plus WGSL
 > validation) pass. The APK builds on GitHub Actions and has been run and measured on a phone
 > (see the numbers further down).
 
@@ -317,9 +317,15 @@ Next: trees and plants per biome, rivers, rain shadows behind mountains.
 * **The day** lasts 20 real minutes (`sky::DAY_SECONDS`); a new game starts at 09:00. The sun
   follows a real path (latitude 35 degrees, spring): it rises in the east, stands 65 degrees
   high in the south at noon and sets in the west. As it gets low the glare fades and the sky
-  toward it turns gold and orange; then comes a dark blue night with a few thousand stars that
-  turn around the pole, and a moon opposite the sun. The menu's TIME row moves the clock an
-  hour; the time is saved with the camera.
+  toward it turns gold and orange; then comes the night (below). The menu's TIME row moves the
+  clock an hour; the time is saved with the camera.
+* **The night** is a second photograph, ambientCG's *Night Sky HDRI 003* (CC0): stars, the Milky
+  Way and a moon with its halo. `bake_sky.py --night` takes its smooth background out (the game
+  draws that by elevation in the world, in the photo's colours) and keeps the whole sphere,
+  because the stars turn through the night and the ones below the horizon come up. The game's
+  moon is always opposite the sun, so the shader turns the photo (`Night::rotation`, around the
+  pole with the sun's hour angle) placed so that its moon is exactly there at every hour; the
+  moonlight on the terrain comes from the same place. Fog and water reflections include it.
 * **Light**: each of the six face directions gets one light colour per frame (`sky::face_light`):
   the whole sky as seen facing that way (summed over a small copy of the sky, every 0.01 hours),
   direct sun and moon, light bounced off the ground, and a little extra at night to keep it
@@ -334,8 +340,9 @@ Next: trees and plants per biome, rivers, rain shadows behind mountains.
   keeping their hue (an orange sunset stays orange); only the very brightest, like the sun,
   wash out to white.
 * **Another sky**: download an equirectangular HDRI (2K is plenty), run
-  `python3 tools/bake_sky.py sky.hdr`, rebuild. Clear or lightly clouded skies work best: clouds
-  stay where they are, lit from where the photo's sun was.
+  `python3 tools/bake_sky.py sky.hdr` (day) or `python3 tools/bake_sky.py --night night.exr`
+  (night; it needs its moon in it), rebuild. Clear or lightly clouded day skies work best:
+  clouds stay where they are, lit from where the photo's sun was.
 
 ## Greedy meshing (`greedy.rs`)
 
