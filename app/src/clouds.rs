@@ -7,8 +7,8 @@
 //! regions clear and others overcast), fixed in "cloud space", which drifts with the wind. A
 //! window of `GRID` x `GRID` tiles around the camera is turned into one mesh on a background
 //! thread; the renderer only moves it with the wind, and a new mesh is made when the camera
-//! has moved `RECENTRE` tiles from the middle of the window. Tiles are ordered far to near
-//! from the window's middle, so blending them in that order is right, or close to it.
+//! has moved `RECENTRE` tiles from the middle of the window. Tiles of one height share faces
+//! (see `build`).
 //!
 //! Vertices use the terrain's 8-byte layout (two u32): see `pack`.
 
@@ -29,7 +29,7 @@ pub const FADE_END: f32 = ((GRID / 2 - RECENTRE - 2) * TILE) as f32;
 pub const BASE_Y: f32 = 290.0;
 /// The tallest a cloud gets, and the steps its top comes in, in blocks.
 const MAX_THICKNESS: f32 = 112.0;
-const STEP: f32 = 8.0;
+const STEP: f32 = 16.0;
 /// Wind: blocks per second along x and z.
 pub const WIND: [f64; 2] = [3.2, 1.1];
 
@@ -70,54 +70,110 @@ impl Density {
     }
 }
 
+/// Rectangles covering every cell of a `GRID` x `GRID` grid whose key is not 0, each rectangle
+/// over cells with one key (greedy: as wide as possible, then as deep): (x0, z0, x1, z1, key).
+fn rectangles(key: &[i32]) -> Vec<(i32, i32, i32, i32, i32)> {
+    let n = GRID as usize;
+    let mut used = vec![false; n * n];
+    let mut out = Vec::new();
+    for z in 0..n {
+        for x in 0..n {
+            let k = key[z * n + x];
+            if k == 0 || used[z * n + x] {
+                continue;
+            }
+            let mut x1 = x + 1;
+            while x1 < n && key[z * n + x1] == k && !used[z * n + x1] {
+                x1 += 1;
+            }
+            let mut z1 = z + 1;
+            while z1 < n && (x..x1).all(|c| key[z1 * n + c] == k && !used[z1 * n + c]) {
+                z1 += 1;
+            }
+            for r in z..z1 {
+                used[r * n + x..r * n + x1].fill(true);
+            }
+            out.push((x as i32, z as i32, x1 as i32, z1 as i32, k));
+        }
+    }
+    out
+}
+
+const BOTTOM_OPACITY: u32 = 215;
+
+fn opacity(thickness: i32) -> u32 {
+    // Thin edges of a cloud are wispier than its thick middle.
+    (150.0 + 90.0 * (thickness as f32 / MAX_THICKNESS)).min(240.0) as u32
+}
+
 /// The mesh of the window whose corner tile is (ox, oz): quads of four vertices.
+///
+/// Neighbouring tiles of one height share faces: bottoms and tops are merged into rectangles,
+/// sides into runs, which about halves the quads. Order: bottoms, tops,
+/// then sides far to near. With depth writes on, whichever of bottom and top faces the camera
+/// is drawn before anything that could be behind it, so each pixel of cloud is shaded once or
+/// twice instead of once per layer; sides blend over what is behind them.
 pub fn build(density: &Density, ox: i32, oz: i32) -> Vec<Vertex> {
     let n = GRID as usize;
-    let mut thick = vec![0.0f32; n * n];
+    let mut thick = vec![0i32; n * n];
     for z in 0..GRID {
         for x in 0..GRID {
-            thick[z as usize * n + x as usize] = density.thickness(ox + x, oz + z);
+            thick[z as usize * n + x as usize] = density.thickness(ox + x, oz + z) as i32;
         }
     }
-    let at = |x: i32, z: i32| if x < 0 || z < 0 || x >= GRID || z >= GRID { 0.0 } else { thick[z as usize * n + x as usize] };
-    // Far to near from the middle of the window.
-    let mut order: Vec<(i32, i32, i32)> = Vec::new();
-    for z in 0..GRID {
-        for x in 0..GRID {
-            if at(x, z) > 0.0 {
-                let (dx, dz) = (2 * x + 1 - GRID, 2 * z + 1 - GRID);
-                order.push((dx * dx + dz * dz, x, z));
+    let at = |x: i32, z: i32| if x < 0 || z < 0 || x >= GRID || z >= GRID { 0 } else { thick[z as usize * n + x as usize] };
+    let mut out = Vec::new();
+    let mut quad = |c: [(i32, i32, i32); 4], face: u32, opacity: u32| {
+        for (vx, vy, vz) in c {
+            out.push(pack(vx, vz, vy, face, opacity));
+        }
+    };
+    // Bottoms are all at one height and get one opacity, so they merge whatever is above them.
+    let covered: Vec<i32> = thick.iter().map(|t| (*t > 0) as i32).collect();
+    for (x, z, x1, z1, _) in rectangles(&covered) {
+        quad([(x, 0, z), (x1, 0, z), (x1, 0, z1), (x, 0, z1)], 3, BOTTOM_OPACITY);
+    }
+    for (x, z, x1, z1, t) in rectangles(&thick) {
+        quad([(x, t, z), (x, t, z1), (x1, t, z1), (x1, t, z)], 2, opacity(t));
+    }
+    // Sides: down to the top of the neighbouring tile (nothing where it is as tall), merged
+    // along the edge while both heights stay the same. (distance, face, line, from, to, low, top)
+    let mut sides: Vec<(i32, u32, i32, i32, i32, i32, i32)> = Vec::new();
+    for (face, dx, dz) in [(0u32, 1, 0), (1, -1, 0), (4, 0, 1), (5, 0, -1)] {
+        for line in 0..GRID {
+            let mut i = 0;
+            while i < GRID {
+                // `line` is the tile's x for the x faces, its z for the z faces.
+                let cell = |j: i32| if dx != 0 { (line, j) } else { (j, line) };
+                let heights = |j: i32| {
+                    let (x, z) = cell(j);
+                    (at(x + dx, z + dz), at(x, z))
+                };
+                let (low, top) = heights(i);
+                if low >= top {
+                    i += 1;
+                    continue;
+                }
+                let mut j = i + 1;
+                while j < GRID && heights(j) == (low, top) {
+                    j += 1;
+                }
+                let (cx, cz) = cell((i + j) / 2);
+                let (ddx, ddz) = (2 * cx + 1 - GRID, 2 * cz + 1 - GRID);
+                sides.push((ddx * ddx + ddz * ddz, face, line, i, j, low, top));
+                i = j;
             }
         }
     }
-    order.sort_unstable_by_key(|t| std::cmp::Reverse(t.0));
-
-    let mut out = Vec::with_capacity(order.len() * 12);
-    for (_, x, z) in order {
-        let t = at(x, z);
-        let top = t as i32;
-        // Thin edges of a cloud are wispier than its thick middle.
-        let opacity = (150.0 + 90.0 * (t / MAX_THICKNESS)).min(240.0) as u32;
-        let mut quad = |c: [(i32, i32, i32); 4], face: u32| {
-            for (vx, vy, vz) in c {
-                out.push(pack(vx, vz, vy, face, opacity));
-            }
+    sides.sort_unstable_by_key(|s| std::cmp::Reverse(s.0));
+    for (_, face, line, a, b, low, top) in sides {
+        let (p, q) = match face {
+            0 => ((line + 1, a), (line + 1, b)),
+            1 => ((line, b), (line, a)),
+            4 => ((b, line + 1), (a, line + 1)),
+            _ => ((a, line), (b, line)),
         };
-        let (x1, z1) = (x + 1, z + 1);
-        quad([(x, top, z), (x, top, z1), (x1, top, z1), (x1, top, z)], 2);
-        quad([(x, 0, z), (x1, 0, z), (x1, 0, z1), (x, 0, z1)], 3);
-        // Sides, down to the top of the neighbouring tile (nothing where it is as tall).
-        for (face, nx, nz, a, b) in [
-            (0u32, x + 1, z, (x1, z), (x1, z1)),
-            (1, x - 1, z, (x, z1), (x, z)),
-            (4, x, z + 1, (x1, z1), (x, z1)),
-            (5, x, z - 1, (x, z), (x1, z)),
-        ] {
-            let low = at(nx, nz) as i32;
-            if low < top {
-                quad([(a.0, low, a.1), (b.0, low, b.1), (b.0, top, b.1), (a.0, top, a.1)], face);
-            }
-        }
+        quad([(p.0, low, p.1), (q.0, low, q.1), (q.0, top, q.1), (p.0, top, p.1)], face, opacity(top));
     }
     out
 }
@@ -219,31 +275,51 @@ mod tests {
     }
 
     #[test]
-    fn a_window_is_whole_quads_within_the_index_budget_ordered_far_to_near() {
+    fn a_window_is_merged_quads_that_cover_every_cloud_tile_exactly_once() {
         let d = Density::new(1337);
         let v = build(&d, -64, -64);
-        assert!(v.len() % 4 == 0 && v.len() > 4000, "{} vertices", v.len());
-        assert!(v.len() / 4 <= 100_000, "fits the shared index buffer");
-        // Every vertex decodes inside the window and the height range.
-        let dist = |q: &[Vertex]| {
-            let cx = q.iter().map(|p| (p[0] & 255) as f32).sum::<f32>() / 4.0 - GRID as f32 / 2.0;
-            let cz = q.iter().map(|p| ((p[0] >> 8) & 255) as f32).sum::<f32>() / 4.0 - GRID as f32 / 2.0;
-            cx * cx + cz * cz
-        };
-        let mut last = f32::MAX;
+        assert!(v.len() % 4 == 0 && v.len() > 2000, "{} vertices", v.len());
+        let x = |p: &Vertex| (p[0] & 255) as i32;
+        let z = |p: &Vertex| ((p[0] >> 8) & 255) as i32;
+        let y = |p: &Vertex| ((p[0] >> 16) & 1023) as i32;
+        let (mut top, mut bottom) = (vec![0i32; (GRID * GRID) as usize], vec![0i32; (GRID * GRID) as usize]);
+        let (mut tiles, mut last_side) = (0, i32::MAX);
         for q in v.chunks(4) {
+            let face = q[0][0] >> 26;
             for p in q {
-                assert!((p[0] & 255) <= GRID as u32 && ((p[0] >> 8) & 255) <= GRID as u32);
-                assert!(((p[0] >> 16) & 1023) as f32 <= MAX_THICKNESS && (p[0] >> 26) < 6);
+                assert!(x(p) <= GRID && z(p) <= GRID && y(p) as f32 <= MAX_THICKNESS && (p[0] >> 26) == face);
                 assert!((100..=240).contains(&p[1]));
             }
-            // Top faces come first for each tile and are in far-to-near order.
-            if (q[0][0] >> 26) == 2 {
-                let d2 = dist(q);
-                assert!(d2 <= last + 1e-3, "tiles are ordered far to near");
-                last = d2;
+            let (x0, x1) = (q.iter().map(x).min().unwrap(), q.iter().map(x).max().unwrap());
+            let (z0, z1) = (q.iter().map(z).min().unwrap(), q.iter().map(z).max().unwrap());
+            if face == 2 || face == 3 {
+                for tz in z0..z1 {
+                    for tx in x0..x1 {
+                        let cell = &mut (if face == 2 { &mut top } else { &mut bottom })[(tz * GRID + tx) as usize];
+                        *cell += 1;
+                        // A top is at the height the density gives its tile.
+                        assert!(face == 3 || y(&q[0]) as f32 == d.thickness(tx - 64, tz - 64));
+                    }
+                }
+            } else {
+                // Sides come far to near.
+                let (cx, cz) = (x0 + x1 - GRID, z0 + z1 - GRID);
+                let d2 = cx * cx + cz * cz;
+                assert!(d2 <= last_side.saturating_add(8 * GRID), "sides are ordered far to near: {d2} after {last_side}");
+                last_side = d2;
             }
         }
+        for tz in 0..GRID {
+            for tx in 0..GRID {
+                let want = (d.thickness(tx - 64, tz - 64) > 0.0) as i32;
+                tiles += want;
+                assert_eq!((top[(tz * GRID + tx) as usize], bottom[(tz * GRID + tx) as usize]), (want, want), "tile {tx},{tz}");
+            }
+        }
+        // Merging pays: under two quads per tile (unmerged, a tile has a top, a bottom and
+        // about one and a half sides).
+        assert!(v.len() / 4 < tiles as usize * 2, "{} quads for {tiles} tiles", v.len() / 4);
+        assert!(v.len() / 4 <= 100_000, "fits the shared index buffer");
     }
 
     #[test]

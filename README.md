@@ -308,7 +308,10 @@ Next: trees and plants per biome, rivers, rain shadows behind mountains.
 * **Water** (`water_shade` in the shader), after open sea under a bright sky: a deep navy body,
   nearly opaque; eight travelling waves whose strength drifts across the sea bend the surface
   normal (ripples only up close); the reflection of the sky (the real one, see below) takes over
-  toward the horizon (Fresnel), with sun and moon glints. The surface sits 1/8 block (4 of 32 pixels) below the top of its block,
+  toward the horizon (Fresnel), with sun and moon glints. The waves are sines made irregular
+  by noise: the surface they run over is warped by slowly drifting noise, each family of waves
+  comes and goes in patches, and gusts roughen some areas. A wave fades out before it gets
+  shorter than a few pixels on screen, so far water is calm instead of drawing moire rings. The surface sits 1/8 block (4 of 32 pixels) below the top of its block,
   like Minecraft's, so shores show a small lip; LOD water matches.
 * All textures are uploaded as one mipmapped texture array (averaged in linear light) and
   sampled with world-position coordinates, so greedy quads and LOD terrain repeat them once
@@ -359,8 +362,9 @@ Next: trees and plants per biome, rivers, rain shadows behind mountains.
   holding cloud is a flat-bottomed box (base at y 290) as tall as the cloud is dense there, a
   little see-through. Density is noise fixed in "cloud space", which drifts with the wind; a
   broad second noise leaves some regions clear and others overcast. A 4 km window around the
-  camera is meshed on a background thread (about 20 000 quads, a few milliseconds) and drawn in
-  one call, tiles ordered far to near so they blend correctly; it is rebuilt only when the
+  camera is meshed on a background thread (about 10 000 quads, a few milliseconds: tiles of
+  one height share faces) and drawn in one call, bottoms and tops first and sides far to near,
+  so each pixel of cloud is shaded once or twice; it is rebuilt only when the
   camera has moved 10 tiles in cloud space. They are lit by the sky and the sun, glow toward
   the sun at sunset, and fade into the horizon haze.
 * **God rays** in screen space (the method of GPU Gems 3, chapter 13): after a frame, a

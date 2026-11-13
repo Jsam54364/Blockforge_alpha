@@ -1308,12 +1308,16 @@ fn voxel_pipeline(
             // Translucent faces (water) lose depth ties: where one lies in the plane of an
             // opaque face (water beside a slab or other partial block), the opaque face shows
             // steadily instead of the two flickering. Depth is reversed: negative is farther.
-            // LOD terrain loses ties the same way: while chunks are still arriving it can be
-            // drawn in the same place as the real terrain for a moment.
-            bias: if depth_write && vertex_entry != "vs_lod" {
-                wgpu::DepthBiasState::default()
-            } else {
+            // LOD terrain loses ties too (while chunks are still arriving it can be drawn in
+            // the same place as the real terrain for a moment), but by a constant only: a
+            // slope-scaled bias pushes flat water seen at a grazing angle back further than the
+            // upright sides under it, which then show through every seam as dark lines.
+            bias: if !depth_write {
                 wgpu::DepthBiasState { constant: -4, slope_scale: -1.5, clamp: 0.0 }
+            } else if vertex_entry == "vs_lod" {
+                wgpu::DepthBiasState { constant: -2, slope_scale: 0.0, clamp: 0.0 }
+            } else {
+                wgpu::DepthBiasState::default()
             },
         }),
         multisample: wgpu::MultisampleState::default(),
