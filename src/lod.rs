@@ -46,9 +46,10 @@ pub const CELLS: i32 = 32;
 /// Coarsest level: 512-block cells, 16 km sections.
 pub const MAX_LEVEL: u8 = 9;
 /// Sections at this level or finer can meet loaded chunks: their faces are merged only
-/// within a chunk column, and the renderer hides them per column. Coarser sections are
-/// always far away (see `LodSettings::validate`).
-pub const MASKED_MAX_LEVEL: u8 = 3;
+/// within a chunk column, the renderer hides them per column, and every chunk-column
+/// boundary through them gets side faces deep enough to meet the real terrain beside it.
+/// Sections within a chunk of the real terrain are never coarser (see `LodSettings::walk`).
+pub const MASKED_MAX_LEVEL: u8 = 2;
 /// A typical surface height, used to measure how far above the terrain the camera is.
 const REFERENCE_Y: f32 = 8.0;
 
@@ -185,11 +186,6 @@ impl LodSettings {
         self.near_edge + self.ring * (self.base.powi(k) - 1.0) / (self.base - 1.0)
     }
 
-    /// Sections coarser than `MASKED_MAX_LEVEL` must never come within `near_blocks` of the
-    /// camera: they are not cut out where real chunks are drawn.
-    pub fn validate(&self, near_blocks: f32) -> bool {
-        self.ring_start(MASKED_MAX_LEVEL + 1) > near_blocks
-    }
 
     /// The leaf sections to draw around the camera: Distant Horizons' quadtree walk from the
     /// coarsest level down, splitting while a section is coarser than its distance asks for.
@@ -254,7 +250,12 @@ impl LodSettings {
             return;
         }
         let d = (dh * dh + dy * dy).sqrt();
-        if node.level > self.level_for_distance(d) && node.level > self.min_level {
+        let mut want = self.level_for_distance(d);
+        if dh <= self.near_edge + CHUNK_SIZE as f32 {
+            // Can touch real chunks (from high up, distance alone would allow coarser).
+            want = want.min(MASKED_MAX_LEVEL.max(self.min_level));
+        }
+        if node.level > want && node.level > self.min_level {
             for c in node.children() {
                 self.walk(c, cam, dy, out);
             }
@@ -517,16 +518,53 @@ pub fn build_section(gen: &WorldGen, reg: &BlockRegistry, key: SectionKey) -> Lo
     }
 
     // Sides: where the neighbour is lower, from its height up to ours, merged along the edge.
+    // On a chunk-column boundary the neighbour may be real terrain instead (the LOD there is
+    // hidden), which can be lower than its LOD cell: the face reaches below the real ground
+    // along that edge, so no slit opens between LOD and real terrain.
+    let cell = key.cell();
+    let (ox, oz) = key.origin();
+    let masked = key.level <= MASKED_MAX_LEVEL;
+    let water = gen.water_id();
+    let real_edge_min = |face: Face, i: i32, j: i32| -> i32 {
+        // The ground just across this cell's `face` edge, at full detail. The ground, not
+        // the water surface: real water is see-through, so the face must reach the sea floor.
+        let (x0, z0) = (ox + i * cell, oz + j * cell);
+        let mut m = i32::MAX;
+        for k in 0..cell {
+            let (x, z) = match face {
+                Face::PosX => (x0 + cell, z0 + k),
+                Face::NegX => (x0 - 1, z0 + k),
+                Face::PosZ => (x0 + k, z0 + cell),
+                _ => (x0 + k, z0 - 1),
+            };
+            m = m.min(gen.ground_q(x, z));
+        }
+        m - 4 // and a block of slack
+    };
     for face in [Face::PosX, Face::NegX, Face::PosZ, Face::NegZ] {
         let (dx, _, dz) = face.normal();
         for a in 0..CELLS {
-            // `a` walks across the edges, `b` along them.
+            // `a` walks across the edges, `b` along them. Is this edge a chunk-column line?
+            let edge_cell = if dx > 0 || dz > 0 { a + 1 } else { a };
+            let edge_block = if dx != 0 { ox + edge_cell * cell } else { oz + edge_cell * cell };
+            let on_line = masked && edge_block.rem_euclid(CHUNK_SIZE) == 0;
+            let bottom_at = |i: i32, j: i32| -> i32 {
+                let nb = grid.surf(i + dx, j + dz);
+                // LOD water is level with real water, which is a full block at the same height:
+                // nothing to close there, and a face under the see-through real water would
+                // show through it as a dark curtain.
+                if on_line && grid.block(i, j) != water {
+                    nb.min(real_edge_min(face, i, j))
+                } else {
+                    nb
+                }
+            };
             let mut b = 0;
             while b < CELLS {
                 let (i, j) = if dx != 0 { (a, b) } else { (b, a) };
                 let own = grid.surf(i, j);
-                let nb = grid.surf(i + dx, j + dz);
-                if own <= nb {
+                let bottom = bottom_at(i, j);
+                if own <= bottom {
                     b += 1;
                     continue;
                 }
@@ -535,19 +573,16 @@ pub fn build_section(gen: &WorldGen, reg: &BlockRegistry, key: SectionKey) -> Lo
                 let mut len = 1;
                 while b + len < end {
                     let (i2, j2) = if dx != 0 { (a, b + len) } else { (b + len, a) };
-                    if grid.surf(i2, j2) != own
-                        || grid.surf(i2 + dx, j2 + dz) != nb
-                        || tex(reg, grid.block(i2, j2), face) != t
-                    {
+                    if grid.surf(i2, j2) != own || bottom_at(i2, j2) != bottom || tex(reg, grid.block(i2, j2), face) != t {
                         break;
                     }
                     len += 1;
                 }
                 match face {
-                    Face::PosX => e.quad(face, a + 1, a + 1, nb, own, b, b + len, t),
-                    Face::NegX => e.quad(face, a, a, nb, own, b, b + len, t),
-                    Face::PosZ => e.quad(face, b, b + len, nb, own, a + 1, a + 1, t),
-                    _ => e.quad(face, b, b + len, nb, own, a, a, t),
+                    Face::PosX => e.quad(face, a + 1, a + 1, bottom, own, b, b + len, t),
+                    Face::NegX => e.quad(face, a, a, bottom, own, b, b + len, t),
+                    Face::PosZ => e.quad(face, b, b + len, bottom, own, a + 1, a + 1, t),
+                    _ => e.quad(face, b, b + len, bottom, own, a, a, t),
                 }
                 b += len;
             }
@@ -952,11 +987,13 @@ mod tests {
         // Real chunks are only drawn (and LOD terrain only cut out) within the near edge.
         for (_, ring) in LodSettings::QUALITY {
             for edge in near_edges() {
-                let s = LodSettings::new(32768.0, ring).with_near_edge(edge);
-                assert!(s.validate(edge + CHUNK_SIZE as f32), "ring {ring}, edge {edge}");
-                for k in s.select([5.0, 20.0, -7.0]) {
-                    if k.level > MASKED_MAX_LEVEL {
-                        assert!(k.distance_to(5.0, -7.0) > edge + CHUNK_SIZE as f32, "{k:?}");
+                // Also from high up, where distance alone would pick coarse sections.
+                for cam in [[5.0, 20.0, -7.0], [5.0, 420.0, -7.0]] {
+                    let s = LodSettings::new(32768.0, ring).with_near_edge(edge);
+                    for k in s.select(cam) {
+                        if k.level > MASKED_MAX_LEVEL {
+                            assert!(k.distance_to(cam[0], cam[2]) > edge + CHUNK_SIZE as f32, "{k:?} at {cam:?}");
+                        }
                     }
                 }
             }
@@ -1057,6 +1094,49 @@ mod tests {
                     .collect();
                 assert_eq!(cols.len(), 1, "level {level}: quad spans columns {cols:?}");
             }
+        }
+    }
+
+    #[test]
+    fn faces_on_chunk_lines_reach_below_the_real_terrain_beside_them() {
+        // Where LOD meets real chunks, the real ground (or sea floor: water is see-through)
+        // may be lower than its LOD cell. The LOD side on every chunk-column line must reach
+        // below the real ground across it.
+        let (reg, gen) = world();
+        for key in [SectionKey::new(1, -2, 3), SectionKey::new(2, 1, 1)] {
+            let m = build_section(&gen, &reg, key);
+            let (ox, oz) = key.origin();
+            let cell = key.cell();
+            let mut checked = 0;
+            for a in 0..CELLS {
+                for (face, x) in [(Face::NegX, a), (Face::PosX, a + 1)] {
+                    if (ox + x * cell).rem_euclid(CHUNK_SIZE) != 0 {
+                        continue;
+                    }
+                    for j in 0..CELLS {
+                        let (own, block) = cell_surface(&gen, key, a, j);
+                        if block == gen.water_id() {
+                            continue; // level with the real water beside it
+                        }
+                        let across = if face == Face::PosX { ox + (a + 1) * cell } else { ox + a * cell - 1 };
+                        let real = (0..cell).map(|k| gen.ground_q(across, oz + j * cell + k)).min().unwrap();
+                        if own <= real {
+                            continue;
+                        }
+                        checked += 1;
+                        let ok = m.vertices.chunks(4).any(|q| {
+                            q[0].face() == face.index() as u32
+                                && q[0].x() as i32 == x
+                                && q.iter().map(|v| v.z() as i32).min().unwrap() <= j
+                                && q.iter().map(|v| v.z() as i32).max().unwrap() > j
+                                && q.iter().map(|v| v.y_q()).min().unwrap() < real
+                                && q.iter().map(|v| v.y_q()).max().unwrap() >= own
+                        });
+                        assert!(ok, "{key:?}: no face down to the real ground at line x={x}, cell {j}");
+                    }
+                }
+            }
+            assert!(checked > 0, "{key:?}: nothing to check");
         }
     }
 

@@ -115,9 +115,11 @@ fn vs_lod(v: VsIn) -> VsOut {
     }
 
     // Grow each quad by a few hundredths of a cell over its neighbours, hiding the pixel
-    // cracks merged quads leave at T-junctions (they show against the sky far away).
+    // cracks merged quads leave at T-junctions (they show against the sky far away). Side
+    // faces only grow downwards: grown upwards their top edge pokes through flat ground and
+    // water next to them as a dark line (the top face's own growth covers that edge).
     let eps = 0.03 * cell;
-    let up = (top * 2.0 - 1.0) * eps;
+    let up = (top - 1.0) * eps;
     var grow = vec3<f32>(-inx * eps, 0.0, -inz * eps);
     if (face == 0u || face == 1u) {
         grow = vec3<f32>(0.0, up, -inz * eps);

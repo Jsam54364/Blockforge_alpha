@@ -7,7 +7,7 @@ A mobile-first voxel engine in Rust, in two crates:
   architecture lives here and is tested without a GPU.
 * the **app** (`app/`): the Android front-end. winit + wgpu renderer, touch controls and HUD.
 
-> **Status:** 87 unit + 8 end-to-end tests in the core and 45 in the app (including WGSL
+> **Status:** 88 unit + 8 end-to-end tests in the core and 45 in the app (including WGSL
 > validation) pass. The APK builds on GitHub Actions and has been run and measured on a phone
 > (see the numbers further down).
 
@@ -32,7 +32,7 @@ cargo run --release --bin headless   # stream, mesh, edit; prints stats + an ASC
 |---|---|
 | `coords`, `block`, `chunk` | 32³ **cubic** chunks (`CHUNK_BITS` is one constant), `u16` state = 12-bit id + 4-bit **shape** (slabs/layers), palette-compressed storage (uniform chunks cost ~one entry) |
 | `registry` + `assets/blocks.toml` | **Data-driven blocks**; server sends the file to clients on join so ids always match |
-| `worldgen` | Deterministic terrain, pure function of (seed, chunk). Heights in **quarter-blocks**, so the surface ends in **half-slabs**. Caves, sea level, bedrock, `Column` heightmap layer |
+| `worldgen` | Deterministic terrain, pure function of (seed, chunk). Heights in **quarter-blocks**, so the surface ends in **half-slabs** (not under water: slabs aren't waterlogged yet). Caves, sea level, bedrock, `Column` heightmap layer |
 | `world`, `save` | Procedural base + **edit journal** (undo/redo, tiny saves, delta sync). Versioned + CRC32 formats, atomic write-then-rename |
 | `mesh` | Padded 34³ snapshot (no locks), **8-byte packed vertices**, shape-aware face culling, per-vertex AO, 3 render layers, index-free quads |
 | `lod` | **Level-of-detail terrain** to the horizon: quadtree of sections built from the seed, mesher, streaming (see below) |
@@ -211,8 +211,11 @@ phones; no code was copied from it or from other LOD mods.
   distance setting, so they either overlap the real terrain or leave holes while chunks stream
   in. Here the client reports, per chunk column, whether the real surface is meshed, uploaded
   and drawn (`Client::lod_coverage`); the LOD vertex shader drops quads exactly in those
-  columns. Near the real chunks faces are merged only within a chunk column so every corner of
-  a quad agrees. Sections whose columns are all covered aren't drawn at all.
+  columns. Near the real chunks (only the two finest levels can touch them) faces are merged
+  only within a chunk column so every corner of a quad agrees, and on every chunk-column line the
+  side faces reach a block below the real ground beside them (the sea floor under water), so
+  where real terrain dips below its LOD cell no slit opens at the seam. LOD water is level with
+  real water and needs none. Sections whose columns are all covered aren't drawn at all.
 * **Drawn after the real terrain**, nearest first, so LOD pixels behind real terrain are rejected
   by the depth test before shading. Reverse-Z depth with no far plane keeps precision at 30 km.
 * **Never a gap while detail changes:** a section is replaced only when everything replacing it

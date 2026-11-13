@@ -167,13 +167,19 @@ impl WorldGen {
         let hq = self.height_q_filtered(x, z, cell);
         let top = hq.div_euclid(4);
         let slab = hq.rem_euclid(4) >= 2;
-        // Water fills every block above the terrain up to SEA_LEVEL (see `block_at`).
-        let water = if slab { top < SEA_LEVEL } else { top <= SEA_LEVEL };
-        if water {
+        // Water fills every block above the terrain up to SEA_LEVEL, and there are no
+        // half-slabs under water (see `block_at`).
+        if top <= SEA_LEVEL {
             return (4 * (SEA_LEVEL + 1), self.water);
         }
         let surf = if top - 1 <= SEA_LEVEL { self.sand } else { self.grass };
         (4 * top + if slab { 2 } else { 0 }, surf)
+    }
+
+    /// The top of the highest full block of the column at `(x, z)` in quarter blocks, at
+    /// full detail: the ground under any half-slab or water.
+    pub fn ground_q(&self, x: i32, z: i32) -> i32 {
+        4 * self.height_q_filtered(x, z, 1).div_euclid(4)
     }
 
     pub fn column(&self, cx: i32, cz: i32) -> Column {
@@ -214,11 +220,16 @@ impl WorldGen {
             return if wy <= SEA_LEVEL { BlockState::full(self.water) } else { AIR };
         }
         if wy == top {
-            // The partial block: a half-slab when the fractional height is >= 0.5.
+            // The partial block: a half-slab when the fractional height is >= 0.5, but never
+            // under water: a slab there would leave a pocket of air in the sea (slabs are not
+            // waterlogged) and its sides would z-fight with the water beside it.
+            if wy <= SEA_LEVEL {
+                return BlockState::full(self.water);
+            }
             if rem >= 2 {
                 return BlockState::new(surf, Shape::SlabBottom);
             }
-            return if wy <= SEA_LEVEL { BlockState::full(self.water) } else { AIR };
+            return AIR;
         }
         if wy < top - 6 && wy > CAVE_FLOOR && self.is_cave(wx, wy, wz) {
             return AIR;
@@ -290,28 +301,34 @@ mod tests {
     #[test]
     fn surface_slab_matches_fractional_height() {
         let (_r, g) = make();
-        let col = g.column(0, 0);
-        let mut slabs = 0;
-        let mut cache: std::collections::HashMap<i32, Chunk> = std::collections::HashMap::new();
-        for lz in 0..CHUNK_SIZE as usize {
-            for lx in 0..CHUNK_SIZE as usize {
-                let hq = col.height_q_at(lx, lz);
-                let (top, rem) = (hq.div_euclid(4), hq.rem_euclid(4));
-                let cy = top.div_euclid(CHUNK_SIZE);
-                let chunk = cache
-                    .entry(cy)
-                    .or_insert_with(|| g.generate_chunk(ChunkPos::new(0, cy, 0), &col));
-                let l = LocalPos { x: lx as u8, y: top.rem_euclid(CHUNK_SIZE) as u8, z: lz as u8 };
-                let s = chunk.get(l.index());
-                if rem >= 2 {
-                    assert_eq!(s.shape(), Shape::SlabBottom, "at {lx},{lz}");
-                    slabs += 1;
-                } else {
-                    assert!(s.is_air() || s.shape() == Shape::Full);
+        let (mut slabs, mut wet) = (0, 0);
+        for (cx, cz) in [(0, 0), (6, -3), (-9, 4), (13, 11)] {
+            let col = g.column(cx, cz);
+            let mut cache: std::collections::HashMap<i32, Chunk> = std::collections::HashMap::new();
+            for lz in 0..CHUNK_SIZE as usize {
+                for lx in 0..CHUNK_SIZE as usize {
+                    let hq = col.height_q_at(lx, lz);
+                    let (top, rem) = (hq.div_euclid(4), hq.rem_euclid(4));
+                    let cy = top.div_euclid(CHUNK_SIZE);
+                    let chunk = cache
+                        .entry(cy)
+                        .or_insert_with(|| g.generate_chunk(ChunkPos::new(cx, cy, cz), &col));
+                    let l = LocalPos { x: lx as u8, y: top.rem_euclid(CHUNK_SIZE) as u8, z: lz as u8 };
+                    let s = chunk.get(l.index());
+                    if top <= SEA_LEVEL {
+                        // Under water: water, never a slab with a pocket of air above it.
+                        assert_eq!(s, BlockState::full(g.water_id()), "at {cx},{cz} {lx},{lz}");
+                        wet += 1;
+                    } else if rem >= 2 {
+                        assert_eq!(s.shape(), Shape::SlabBottom, "at {cx},{cz} {lx},{lz}");
+                        slabs += 1;
+                    } else {
+                        assert!(s.is_air(), "at {cx},{cz} {lx},{lz}");
+                    }
                 }
             }
         }
-        assert!(slabs > 0, "expected some half-slab surface cells");
+        assert!(slabs > 200 && wet > 200, "slabs {slabs}, under water {wet}");
     }
 
     #[test]

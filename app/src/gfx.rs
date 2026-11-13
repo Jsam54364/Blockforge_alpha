@@ -769,7 +769,14 @@ fn voxel_pipeline(
             // Reverse-Z: nearer is larger.
             depth_compare: wgpu::CompareFunction::Greater,
             stencil: wgpu::StencilState::default(),
-            bias: wgpu::DepthBiasState::default(),
+            // Translucent faces (water) lose depth ties: where one lies in the plane of an
+            // opaque face (water beside a slab or other partial block), the opaque face shows
+            // steadily instead of the two flickering. Depth is reversed: negative is farther.
+            bias: if depth_write {
+                wgpu::DepthBiasState::default()
+            } else {
+                wgpu::DepthBiasState { constant: -4, slope_scale: -1.5, clamp: 0.0 }
+            },
         }),
         multisample: wgpu::MultisampleState::default(),
         multiview: None,
