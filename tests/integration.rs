@@ -243,16 +243,19 @@ fn save_now_writes_edits_that_a_new_server_loads() {
 fn lod_terrain_streams_in_and_stops_exactly_where_real_chunks_are_drawn() {
     use blockforge::lod::LodSettings;
     let (_h, mut c, _reg) = start(7);
-    c.lod.set_settings(LodSettings::new(4096.0, 64.0));
+    c.lod.set_settings(LodSettings::new(4096.0, 64.0).with_near_edge(3.5 * 32.0));
     settle(&mut c);
     let start_t = Instant::now();
     while !c.lod.is_idle() {
         c.update();
+        let _ = c.lod.take_built(usize::MAX); // what the renderer does each frame
         assert!(start_t.elapsed() < Duration::from_secs(60), "LODs never finished");
         std::thread::sleep(Duration::from_millis(2));
     }
+    let _ = c.lod.take_built(usize::MAX);
     c.update();
     assert!(c.lod.render_set().len() > 50, "{:?}", c.lod.stats);
+    assert!(c.lod.render_set().iter().all(|k| k.level >= 1), "first ring and stand-ins are 2-block cells");
     assert!(c.lod.stats.drawn_quads > 10_000);
 
     // The renderer uploads everything first; then coverage is asked for.

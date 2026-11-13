@@ -171,8 +171,9 @@ impl Game {
     pub fn lod_settings(&self) -> LodSettings {
         let s = self.ui.settings;
         let radius = LOD_DISTANCES[(s.lod_level as usize).min(LOD_DISTANCES.len() - 1)] as f32;
-        let unit = LOD_QUALITY[(s.lod_quality as usize).min(LOD_QUALITY.len() - 1)].1;
-        LodSettings::new(radius, unit)
+        let ring = LOD_QUALITY[(s.lod_quality as usize).min(LOD_QUALITY.len() - 1)].1;
+        // The rings start where the real chunks stop being drawn.
+        LodSettings::new(radius, ring).with_near_edge(self.view_blocks())
     }
 
     /// Where fog starts and ends: over the far part of the LOD terrain when it is on (the

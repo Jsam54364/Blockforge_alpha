@@ -5,9 +5,10 @@
 //! * **Sections in a quadtree.** A section is 32 x 32 cells; a cell at level `L` is a
 //!   column `2^L` blocks wide, so a level-`L` section covers `32 * 2^L` blocks. Level 0
 //!   cells are single blocks; level 10 sections are 32 km wide.
-//! * **Detail drops with distance** by Distant Horizons' rule:
-//!   `level = floor(log(distance / unit) / log(base))`. Each doubling of distance adds one
-//!   ring of sections with about the same cell count, so the cost of the view grows with
+//! * **Detail drops with distance in rings that widen exponentially**, as in Distant
+//!   Horizons, but counted from where the real chunks end: the first ring past them has
+//!   2-block cells, the next is twice as wide with 4-block cells, then 8, 16 ... 512. Far
+//!   out each ring holds about the same number of cells, so the cost of the view grows with
 //!   the *logarithm* of the distance. That is what makes a very long view affordable.
 //! * **Built straight from the world seed.** The generator is a pure function of
 //!   `(seed, x, z)`, so a far cell is one height sample, filtered for the cell size
@@ -139,43 +140,55 @@ impl SectionKey {
 pub struct LodSettings {
     /// LOD view distance in blocks; 0 turns LODs off.
     pub radius: f32,
-    /// Distant Horizons' "distance unit": the finest level reaches out to `unit * base`.
-    pub unit: f32,
-    /// How fast detail drops: each level reaches `base` times further than the last.
+    /// Width in blocks of the first ring past the real chunks. Each further ring is `base`
+    /// times wider than the one before and its cells twice as coarse.
+    pub ring: f32,
     pub base: f32,
-    /// The finest level drawn (cells of `2^min_level` blocks). Near the camera the real
-    /// chunks are drawn instead, so this only shows briefly while they stream in.
+    /// Level of the first ring (and of the stand-in terrain under real chunks that haven't
+    /// loaded yet): cells of `2^min_level` blocks.
     pub min_level: u8,
+    /// Where the real chunks end (their draw distance from the camera), in blocks. The first
+    /// ring starts here; nearer than this LOD terrain only stands in for chunks still loading.
+    pub near_edge: f32,
 }
 
 impl LodSettings {
-    pub const OFF: LodSettings = LodSettings { radius: 0.0, unit: 64.0, base: 2.0, min_level: 2 };
+    pub const OFF: LodSettings = LodSettings { radius: 0.0, ring: 64.0, base: 2.0, min_level: 1, near_edge: 0.0 };
 
-    /// Presets for the menu: (name, unit). Distant Horizons uses units of 64 to 320 blocks
-    /// on PCs; phones get a coarser plan. Cells per detail ring grow with `unit^2`.
-    pub const QUALITY: [(&'static str, f32); 3] = [("LOW", 48.0), ("MED", 64.0), ("HIGH", 96.0)];
+    /// Presets for the menu: (name, first ring width). Cells per ring grow with its square.
+    pub const QUALITY: [(&'static str, f32); 3] = [("LOW", 32.0), ("MED", 64.0), ("HIGH", 128.0)];
 
-    pub fn new(radius: f32, unit: f32) -> LodSettings {
-        LodSettings { radius, unit, base: 2.0, min_level: 2 }
+    pub fn new(radius: f32, ring: f32) -> LodSettings {
+        LodSettings { radius, ring, ..LodSettings::OFF }
+    }
+
+    /// The same settings with the rings starting `edge` blocks from the camera.
+    pub fn with_near_edge(self, edge: f32) -> LodSettings {
+        LodSettings { near_edge: edge.max(0.0), ..self }
     }
 
     pub fn enabled(&self) -> bool {
         self.radius > 0.0
     }
 
-    /// `calcDetailLevelFromDistance`: the level a section this far away should be drawn at.
+    /// The level a section this far away should be drawn at: the ring it falls in. Ring `k`
+    /// (from 0) starts `ring * (base^k - 1) / (base - 1)` blocks past the near edge.
     pub fn level_for_distance(&self, d: f32) -> u8 {
-        let l = if d <= self.unit { 0.0 } else { ((d / self.unit).ln() / self.base.ln()).floor() };
-        (l.max(0.0) as u8).clamp(self.min_level, MAX_LEVEL)
+        let x = (d - self.near_edge).max(0.0) / self.ring;
+        let k = ((1.0 + x * (self.base - 1.0)).ln() / self.base.ln()).floor();
+        (self.min_level as f32 + k.max(0.0)).min(MAX_LEVEL as f32) as u8
+    }
+
+    /// Distance from the camera at which `level` starts.
+    pub fn ring_start(&self, level: u8) -> f32 {
+        let k = level.saturating_sub(self.min_level) as i32;
+        self.near_edge + self.ring * (self.base.powi(k) - 1.0) / (self.base - 1.0)
     }
 
     /// Sections coarser than `MASKED_MAX_LEVEL` must never come within `near_blocks` of the
     /// camera: they are not cut out where real chunks are drawn.
     pub fn validate(&self, near_blocks: f32) -> bool {
-        // A section at level M+1 is a leaf only when its nearest point is at least the
-        // distance where that level starts.
-        let start = self.unit * self.base.powi(MASKED_MAX_LEVEL as i32 + 1);
-        start > near_blocks
+        self.ring_start(MASKED_MAX_LEVEL + 1) > near_blocks
     }
 
     /// The leaf sections to draw around the camera: Distant Horizons' quadtree walk from the
@@ -195,6 +208,43 @@ impl LodSettings {
                 self.walk(SectionKey::new(MAX_LEVEL, x, z), cam, dy, &mut out);
             }
         }
+        self.balance(out, cam)
+    }
+
+    /// Splits sections until no two neighbours are more than one level apart (a "restricted"
+    /// quadtree). Narrow rings would otherwise put, say, 64-block cells next to 16-block
+    /// cells, which the crack-proof borders (`border_min`) don't cover.
+    fn balance(&self, leaves: Vec<SectionKey>, cam: [f32; 3]) -> Vec<SectionKey> {
+        let mut set: HashSet<SectionKey> = leaves.into_iter().collect();
+        loop {
+            let mut split: HashSet<SectionKey> = HashSet::new();
+            for &b in &set {
+                // Same-size neighbours of `b`; whatever leaf covers each must be at most one
+                // level coarser than `b`.
+                for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                    let mut n = SectionKey::new(b.level, b.x + dx, b.z + dz);
+                    while n.level < MAX_LEVEL && !set.contains(&n) {
+                        n = n.parent();
+                    }
+                    if set.contains(&n) && n.level >= b.level + 2 {
+                        split.insert(n);
+                    }
+                }
+            }
+            if split.is_empty() {
+                break;
+            }
+            for n in split {
+                set.remove(&n);
+                for c in n.children() {
+                    if c.distance_to(cam[0], cam[2]) <= self.radius {
+                        set.insert(c);
+                    }
+                }
+            }
+        }
+        let mut out: Vec<SectionKey> = set.into_iter().collect();
+        out.sort_unstable();
         out
     }
 
@@ -518,6 +568,9 @@ pub struct SectionInfo {
     pub quads: u32,
     pub min_y: f32,
     pub max_y: f32,
+    /// Taken by the renderer (`take_built`). Only uploaded sections are drawn, and a section
+    /// is only retired once its replacement is uploaded: no hole while the GPU catches up.
+    pub uploaded: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -579,9 +632,10 @@ impl LodManager {
         if s == self.settings {
             return;
         }
-        let rebuild = s.unit != self.settings.unit || s.base != self.settings.base || s.min_level != self.settings.min_level;
+        // A section's mesh depends only on its key, so built sections stay valid whatever
+        // the settings; only which ones are wanted changes.
         self.settings = s;
-        if !s.enabled() || rebuild {
+        if !s.enabled() {
             self.clear();
         }
         self.planned_at = None;
@@ -607,7 +661,7 @@ impl LodManager {
             None => true,
             Some(p) => {
                 let (dx, dy, dz) = (camera[0] - p[0], camera[1] - p[1], camera[2] - p[2]);
-                dx * dx + dy * dy + dz * dz > (self.settings.unit * 0.25).powi(2)
+                dx * dx + dy * dy + dz * dz > (self.settings.ring * 0.25).powi(2)
             }
         };
         if replan {
@@ -622,7 +676,7 @@ impl LodManager {
             if !self.settings.enabled() {
                 continue;
             }
-            self.built.insert(key, SectionInfo { quads: mesh.quads() as u32, min_y: mesh.min_y, max_y: mesh.max_y });
+            self.built.insert(key, SectionInfo { quads: mesh.quads() as u32, min_y: mesh.min_y, max_y: mesh.max_y, uploaded: false });
             self.outbox.retain(|m| m.key != key);
             self.outbox.push(mesh);
             self.stats.built += 1;
@@ -661,18 +715,19 @@ impl LodManager {
     /// nothing is drawn twice) or by built descendants that cover it completely. So detail
     /// switches only once the new sections are ready, and nothing that was visible vanishes.
     fn choose_render_set(&mut self) {
-        let built = &self.built;
+        let ready: HashSet<SectionKey> = self.built.iter().filter(|(_, i)| i.uploaded).map(|(k, _)| *k).collect();
+        let built = &ready;
         let mut ancestors: HashSet<SectionKey> = HashSet::new();
         let mut from_children: Vec<SectionKey> = Vec::new();
         for &w in &self.wanted {
-            if built.contains_key(&w) {
+            if built.contains(&w) {
                 continue;
             }
             let mut p = w;
             let mut found = false;
             while p.level < MAX_LEVEL {
                 p = p.parent();
-                if built.contains_key(&p) {
+                if built.contains(&p) {
                     ancestors.insert(p);
                     found = true;
                     break;
@@ -686,7 +741,7 @@ impl LodManager {
         let ancestor_list: Vec<SectionKey> = ancestors.iter().copied().collect();
         ancestors.retain(|a| !ancestor_list.iter().any(|b| b.is_ancestor_of(*a)));
         let covered = |k: &SectionKey| ancestors.iter().any(|a| a.is_ancestor_of(*k));
-        let mut render: Vec<SectionKey> = self.wanted.iter().copied().filter(|k| built.contains_key(k) && !covered(k)).collect();
+        let mut render: Vec<SectionKey> = self.wanted.iter().copied().filter(|k| built.contains(k) && !covered(k)).collect();
         render.extend(from_children.into_iter().filter(|k| !covered(k)));
         render.extend(ancestors);
         render.sort_unstable();
@@ -723,7 +778,16 @@ impl LodManager {
             db.partial_cmp(&da).unwrap_or(std::cmp::Ordering::Equal)
         });
         let n = self.outbox.len().saturating_sub(max);
-        self.outbox.split_off(n)
+        let taken = self.outbox.split_off(n);
+        for m in &taken {
+            if let Some(i) = self.built.get_mut(&m.key) {
+                i.uploaded = true;
+            }
+        }
+        if !taken.is_empty() {
+            self.dirty = true;
+        }
+        taken
     }
 
     /// Sections whose GPU buffers the renderer should free.
@@ -747,8 +811,8 @@ impl LodManager {
     }
 }
 
-fn cover_with_children(built: &HashMap<SectionKey, SectionInfo>, k: SectionKey, out: &mut Vec<SectionKey>) -> bool {
-    if built.contains_key(&k) {
+fn cover_with_children(built: &HashSet<SectionKey>, k: SectionKey, out: &mut Vec<SectionKey>) -> bool {
+    if built.contains(&k) {
         out.push(k);
         return true;
     }
@@ -797,14 +861,23 @@ mod tests {
     }
 
     #[test]
-    fn detail_drops_with_distance_by_the_log_rule() {
-        let s = medium(16384.0);
-        assert_eq!(s.level_for_distance(0.0), 2);
-        assert_eq!(s.level_for_distance(300.0), 2);
-        assert_eq!(s.level_for_distance(600.0), 3);
-        assert_eq!(s.level_for_distance(1100.0), 4);
-        assert_eq!(s.level_for_distance(5000.0), 6);
+    fn rings_start_at_the_real_chunks_and_double_in_width() {
+        let s = medium(16384.0).with_near_edge(200.0);
+        assert_eq!(s.level_for_distance(0.0), 1, "stand-in terrain under loading chunks: 2-block cells");
+        assert_eq!(s.level_for_distance(199.0), 1);
+        assert_eq!(s.level_for_distance(263.0), 1, "first ring: 64 blocks of 2-block cells");
+        assert_eq!(s.level_for_distance(265.0), 2);
+        assert_eq!(s.level_for_distance(391.0), 2, "second ring: 128 blocks of 4-block cells");
+        assert_eq!(s.level_for_distance(393.0), 3);
+        assert_eq!(s.level_for_distance(647.0), 3, "third ring: 256 blocks of 8-block cells");
+        assert_eq!(s.level_for_distance(649.0), 4);
         assert_eq!(s.level_for_distance(1.0e9), MAX_LEVEL);
+        for level in 1..MAX_LEVEL {
+            let d = s.ring_start(level);
+            assert_eq!(s.level_for_distance(d + 0.01), level);
+            let width = s.ring_start(level + 1) - d;
+            assert!((width - 64.0 * 2f32.powi(level as i32 - 1)).abs() < 1e-2, "ring {level} is {width} wide");
+        }
     }
 
     #[test]
@@ -834,32 +907,39 @@ mod tests {
         }
     }
 
+    /// Every render distance the menu offers, as the game passes it (`Game::view_blocks`).
+    fn near_edges() -> impl Iterator<Item = f32> {
+        (2..=12).map(|r| (r as f32 + 0.5) * CHUNK_SIZE as f32).chain([0.0])
+    }
+
     #[test]
     fn neighbouring_sections_differ_by_at_most_one_level() {
         // The border skirts assume it (see `border_min`).
-        for (_, unit) in LodSettings::QUALITY {
-            let s = LodSettings::new(16384.0, unit);
-            for cam in [[0.0, 70.0, 0.0], [12345.6, 300.0, -999.0], [-31.0, -40.0, 4000.0]] {
-                let keys = s.select(cam);
-                let mut level_at: HashMap<(i32, i32), u8> = HashMap::new();
-                // Paint each section's footprint on a grid of the finest cells' sections.
-                let fine = CELLS << s.min_level;
-                for k in &keys {
-                    let (ox, oz) = k.origin();
-                    let n = k.width() / fine;
-                    if n > 64 {
-                        continue; // far coarse sections: checked through their finer neighbours
-                    }
-                    for a in 0..n {
-                        for b in 0..n {
-                            level_at.insert((ox.div_euclid(fine) + a, oz.div_euclid(fine) + b), k.level);
+        for (_, ring) in LodSettings::QUALITY {
+            for edge in near_edges() {
+                let s = LodSettings::new(16384.0, ring).with_near_edge(edge);
+                for cam in [[0.0, 70.0, 0.0], [12345.6, 300.0, -999.0], [-31.0, -40.0, 4000.0]] {
+                    let keys = s.select(cam);
+                    let mut level_at: HashMap<(i32, i32), u8> = HashMap::new();
+                    // Paint each section's footprint on a grid of the finest sections.
+                    let fine = CELLS << s.min_level;
+                    for k in &keys {
+                        let (ox, oz) = k.origin();
+                        let n = k.width() / fine;
+                        if n > 64 {
+                            continue; // far coarse sections: checked through their finer neighbours
+                        }
+                        for a in 0..n {
+                            for b in 0..n {
+                                level_at.insert((ox.div_euclid(fine) + a, oz.div_euclid(fine) + b), k.level);
+                            }
                         }
                     }
-                }
-                for (&(x, z), &l) in &level_at {
-                    for (dx, dz) in [(1, 0), (0, 1)] {
-                        if let Some(&m) = level_at.get(&(x + dx, z + dz)) {
-                            assert!((l as i32 - m as i32).abs() <= 1, "levels {l} and {m} touch (unit {unit})");
+                    for (&(x, z), &l) in &level_at {
+                        for (dx, dz) in [(1, 0), (0, 1)] {
+                            if let Some(&m) = level_at.get(&(x + dx, z + dz)) {
+                                assert!((l as i32 - m as i32).abs() <= 1, "levels {l} and {m} touch (ring {ring}, edge {edge})");
+                            }
                         }
                     }
                 }
@@ -869,14 +949,15 @@ mod tests {
 
     #[test]
     fn coarse_sections_never_reach_the_loaded_chunks() {
-        // The largest render distance is 12 chunks; leave a chunk of margin.
-        let near = (12 + 1) as f32 * CHUNK_SIZE as f32 * 1.42;
-        for (_, unit) in LodSettings::QUALITY {
-            let s = LodSettings::new(32768.0, unit);
-            assert!(s.validate(near), "unit {unit}");
-            for k in s.select([5.0, 20.0, -7.0]) {
-                if k.level > MASKED_MAX_LEVEL {
-                    assert!(k.distance_to(5.0, -7.0) > near, "{k:?}");
+        // Real chunks are only drawn (and LOD terrain only cut out) within the near edge.
+        for (_, ring) in LodSettings::QUALITY {
+            for edge in near_edges() {
+                let s = LodSettings::new(32768.0, ring).with_near_edge(edge);
+                assert!(s.validate(edge + CHUNK_SIZE as f32), "ring {ring}, edge {edge}");
+                for k in s.select([5.0, 20.0, -7.0]) {
+                    if k.level > MASKED_MAX_LEVEL {
+                        assert!(k.distance_to(5.0, -7.0) > edge + CHUNK_SIZE as f32, "{k:?}");
+                    }
                 }
             }
         }
@@ -988,52 +1069,68 @@ mod tests {
     }
 
     #[test]
-    fn manager_builds_the_view_and_never_drops_coverage_while_switching() {
+    fn manager_never_shows_a_hole_even_when_uploads_lag_behind() {
         let reg = Arc::new(BlockRegistry::builtin());
         let gen = Arc::new(WorldGen::new(7, &reg));
         let mut m = LodManager::new(2);
         m.start(gen, reg);
-        m.set_settings(medium(4096.0));
-        let settle = |m: &mut LodManager, cam: [f32; 3]| {
-            let start = Instant::now();
-            loop {
-                m.update(cam);
-                if m.is_idle() {
-                    m.update(cam);
-                    break;
-                }
-                assert!(start.elapsed() < Duration::from_secs(60), "never settled");
-                std::thread::sleep(Duration::from_millis(2));
+        m.set_settings(medium(4096.0).with_near_edge(208.0));
+        // What a renderer would have on the GPU.
+        let mut gpu: HashSet<SectionKey> = HashSet::new();
+        let frame = |m: &mut LodManager, cam: [f32; 3], uploads: usize, gpu: &mut HashSet<SectionKey>| {
+            m.update(cam);
+            for k in m.take_evicted() {
+                gpu.remove(&k);
+            }
+            for mesh in m.take_built(uploads) {
+                gpu.insert(mesh.key);
             }
         };
         let cam = [0.0, 30.0, 0.0];
-        settle(&mut m, cam);
-        let first: Vec<SectionKey> = m.render_set().to_vec();
-        assert_eq!(first.len(), m.stats.wanted);
-        let uploaded = m.take_built(usize::MAX);
-        assert_eq!(uploaded.len(), first.len());
+        let start = Instant::now();
+        loop {
+            frame(&mut m, cam, usize::MAX, &mut gpu);
+            if m.stats.wanted > 0 && m.is_idle() && m.render_set().len() == m.stats.wanted {
+                break;
+            }
+            assert!(start.elapsed() < Duration::from_secs(60), "never settled");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(m.render_set().iter().all(|k| k.level >= 1));
 
-        // Move far enough to change detail everywhere nearby; at every step the drawn set
-        // must still cover the ground under the old view without overlaps.
+        // Fly fast with a renderer that uploads only two sections a frame. Every frame, what
+        // is drawn must be on the GPU and must cover the ground once: no holes, no doubles.
         let probe: Vec<(f32, f32)> = (0..400).map(|i| ((i % 20) as f32 * 97.0 - 950.0, (i / 20) as f32 * 97.0 - 950.0)).collect();
-        let mut cam2 = cam;
-        for step in 0..30 {
-            cam2[0] += 40.0;
-            m.update(cam2);
+        let mut c = cam;
+        for step in 0..150 {
+            c[0] += 12.0;
+            c[2] -= 5.0;
+            frame(&mut m, c, 2, &mut gpu);
             let set = m.render_set();
+            for k in set {
+                assert!(gpu.contains(k), "step {step}: {k:?} drawn but not uploaded");
+            }
             for &(x, z) in &probe {
+                let (x, z) = (x + c[0], z + c[2]);
                 let n = set.iter().filter(|k| {
                     let (ox, oz) = k.origin();
                     x >= ox as f32 && x < (ox + k.width()) as f32 && z >= oz as f32 && z < (oz + k.width()) as f32
                 }).count();
-                assert_eq!(n, 1, "step {step}: point {x},{z} drawn {n} times");
+                if n != 1 {
+                    let has = |k: &SectionKey| {
+                        let (ox, oz) = k.origin();
+                        x >= ox as f32 && x < (ox + k.width()) as f32 && z >= oz as f32 && z < (oz + k.width()) as f32
+                    };
+                    let w: Vec<_> = m.wanted.iter().filter(|k| has(k)).map(|k| (*k, m.built.get(k).copied())).collect();
+                    let r: Vec<_> = set.iter().filter(|k| has(k)).collect();
+                    panic!("step {step}: point {x},{z} drawn {n} times; wanted {w:?}; drawn {r:?}; cam {c:?}");
+                }
             }
             std::thread::sleep(Duration::from_millis(1));
         }
-        settle(&mut m, cam2);
-        assert!(m.take_evicted().len() > 0, "sections the camera left should be freed");
         m.set_settings(LodSettings::OFF);
-        m.update(cam2);
+        m.update(c);
         assert!(m.render_set().is_empty());
+        assert!(!m.take_evicted().is_empty());
     }
 }

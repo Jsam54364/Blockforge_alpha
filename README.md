@@ -101,7 +101,8 @@ without them) with a derived busy%, memory (VmRSS) and chunk/mesh counts. Androi
 public GPU-usage percentage, hence the derived figure.
 
 Top-right menu button: render distance (2-12 chunks, applied to the server stream too),
-LOD distance (OFF, 1K ... 32K blocks) and LOD quality (LODQ: LOW/MED/HIGH), fog on/off,
+LOD distance (OFF, 1K ... 32K blocks) and LOD quality (LODQ: LOW/MED/HIGH, the width of the
+first LOD ring), fog on/off,
 stats on/off. The overlay's LOD line shows the sections and quads drawn. The HUD is drawn by a tiny immediate-mode layer (`ui.rs`) with its own 5x7 bitmap
 font (`font.rs`, `glyphs.rs`), so there are no UI dependencies.
 
@@ -187,10 +188,16 @@ Terrain past the real chunks, out to 32 km, for the look of an endless view. The
 Distant Horizons' (the Minecraft LOD mod, LGPL), rewritten from scratch for this engine and for
 phones; no code was copied from it or from other LOD mods.
 
-* **Quadtree of sections.** A section is 32 x 32 cells; a level-L cell is a column 2^L blocks
-  wide. Detail follows Distant Horizons' rule, `level = floor(log(distance / unit) / log(base))`,
-  so each doubling of distance adds one ring of sections with about the same number of cells:
-  the cost grows with the logarithm of the distance (4 km to 16 km costs about +25%).
+* **Quadtree of sections in widening rings.** A section is 32 x 32 cells; a level-L cell is a
+  column 2^L blocks wide. The rings start where the real chunks end: the first has 2-block
+  cells, and each further ring is twice as wide with cells twice as coarse (4, 8, 16 ... 512
+  blocks). LODQ sets the first ring's width (LOW 32, MED 64, HIGH 128 blocks). Far out every
+  ring holds about the same number of cells, so the cost grows with the logarithm of the
+  distance (4 km to 16 km costs about +12%). A balancing pass keeps neighbouring sections
+  within one level of each other.
+* **Stand-in terrain while chunks load.** Under the real chunks LOD terrain is kept at 2-block
+  cells and shows wherever a chunk isn't drawn yet, so flying faster than chunks stream in
+  shows rough terrain instead of holes.
 * **Built from the seed, not from chunks.** The generator is a pure function of the seed, so a
   cell is one height sample (`WorldGen::lod_surface`, exactly the generated surface at full
   detail). Octaves of the height noise finer than a cell are faded to their average instead of
@@ -209,12 +216,15 @@ phones; no code was copied from it or from other LOD mods.
 * **Drawn after the real terrain**, nearest first, so LOD pixels behind real terrain are rejected
   by the depth test before shading. Reverse-Z depth with no far plane keeps precision at 30 km.
 * **Never a gap while detail changes:** a section is replaced only when everything replacing it
-  is built (a coarser parent stands in for unbuilt children, or finer children for a parent).
+  is built *and uploaded to the GPU* (a coarser parent stands in for unready children, or finer
+  children for a parent). A test flies the camera with uploads throttled to two sections a
+  frame and checks every frame for holes and doubles.
 * Fog spans the far part of the LOD view, so the horizon fades into the sky.
 
-Measured on the build machine (headless demo; whole view, before culling): medium quality at
-16 km is 340 sections, about 330k quads (10.5 MB), built in ~60 ms on one thread; per frame the
-CPU spends ~30 us on it (coverage + planning). Only the sections in view are drawn.
+Measured on the build machine (headless demo; render distance 6, whole view before culling):
+medium quality at 16 km is 320 sections, about 280k quads (8.9 MB), built in ~80 ms on one
+thread; per frame the CPU spends ~30 us on it (coverage + planning). Only the sections in view
+are drawn.
 
 Limits and next steps:
 

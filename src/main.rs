@@ -113,10 +113,12 @@ fn print_map(c: &Client, reg: &BlockRegistry) {
 /// distance, and how long it takes to build on one thread.
 fn lod_figures(reg: &BlockRegistry, seed: u64) {
     let gen = blockforge::worldgen::WorldGen::new(seed, reg);
-    println!("\nLOD terrain from the seed (whole view around the spawn, before culling):");
-    for (name, unit) in LodSettings::QUALITY {
+    // Rings start at the edge of the real chunks: render distance 6 by default.
+    let edge = 6.5 * 32.0;
+    println!("\nLOD terrain from the seed (whole view around the spawn, real chunks to {edge} blocks, before culling):");
+    for (name, ring) in LodSettings::QUALITY {
         for radius in [4096.0f32, 16384.0] {
-            let keys = LodSettings::new(radius, unit).select([0.5, 40.0, 0.5]);
+            let keys = LodSettings::new(radius, ring).with_near_edge(edge).select([0.5, 40.0, 0.5]);
             let t = Instant::now();
             let quads: usize = keys.iter().map(|k| build_section(&gen, reg, *k).quads()).sum();
             println!(

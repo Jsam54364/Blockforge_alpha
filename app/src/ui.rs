@@ -22,7 +22,7 @@ pub const RENDER_MIN: u8 = 2;
 pub const RENDER_MAX: u8 = 12;
 /// LOD view distances in blocks, as menu steps; 0 = LODs off.
 pub const LOD_DISTANCES: [u32; 7] = [0, 1024, 2048, 4096, 8192, 16384, 32768];
-/// LOD quality steps: names and Distant Horizons-style distance units (see blockforge::lod).
+/// LOD quality steps: names and first-ring widths in blocks (see blockforge::lod).
 pub const LOD_QUALITY: [(&str, f32); 3] = blockforge::lod::LodSettings::QUALITY;
 
 /// Android draws the status bar over the top edge and the navigation bar over the right
