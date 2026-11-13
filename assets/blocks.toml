@@ -94,3 +94,20 @@ hardness = 0.6
 top = "cold_grass_top"
 side = "cold_grass_side"
 bottom = "dirt"
+
+# Rock types (the world's bedrock varies by region, see WorldGen::rock_at). "stone" is andesite.
+[[block]]
+name = "granite"
+hardness = 1.8
+
+[[block]]
+name = "basalt"
+hardness = 1.8
+
+[[block]]
+name = "limestone"
+hardness = 1.2
+
+[[block]]
+name = "sandstone"
+hardness = 1.0

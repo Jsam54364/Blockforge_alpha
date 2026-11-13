@@ -15,7 +15,7 @@ macro_rules! files {
 }
 
 const FILES: &[(&str, &[u8])] = files!(
-    "stone", "dirt", "sand", "gravel", "snow", "log_side", "log_top", "bedrock", "glowstone", "leaves",
+    "stone", "granite", "basalt", "limestone", "sandstone", "dirt", "sand", "gravel", "snow", "log_side", "log_top", "bedrock", "glowstone", "leaves",
     "grass_top", "grass_side", "grass_side_overlay",
     "dry_grass_top", "dry_grass_side", "dry_grass_side_overlay",
     "lush_grass_top", "lush_grass_side", "lush_grass_side_overlay",

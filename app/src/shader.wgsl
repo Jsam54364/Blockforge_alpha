@@ -27,6 +27,8 @@ struct Globals {
     night_zenith: vec4<f32>, // night background straight up (rgb)
     night_horizon: vec4<f32>, // ... and at the horizon
     night: vec4<f32>,        // x: how much of the night photo (stars, moon) shows
+    cloud: vec4<f32>,        // clouds: x, z of the window's corner in the world, base height, fade distance
+    rays: vec4<f32>,         // god rays: xy = the sun on screen (uv), z = strength
 };
 
 @group(0) @binding(0) var<uniform> g: Globals;
@@ -414,6 +416,94 @@ fn sun_disc(d: vec3<f32>) -> vec3<f32> {
 fn fs_sky(f: SkyOut) -> @location(0) vec4<f32> {
     let d = normalize(g.sky_basis[2].xyz + f.ndc.x * g.sky_basis[0].xyz + f.ndc.y * g.sky_basis[1].xyz);
     return vec4<f32>(display(sky_radiance(d, 0.0) + sun_disc(d)), 1.0);
+}
+
+// ---- Clouds (see app/src/clouds.rs): boxes on a grid of 32-block tiles ----
+// Vertex: a = x(8) | z(8)<<8 | y(10)<<16 | face(3)<<26 (x, z in tiles, y in blocks above the
+//         cloud base), b = opacity(8)
+struct CloudOut {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) world: vec3<f32>,
+    @location(1) light: vec3<f32>,
+    @location(2) alpha: f32,
+};
+
+@vertex
+fn vs_cloud(@location(0) packed: vec2<u32>) -> CloudOut {
+    let a = packed.x;
+    let face = min((a >> 26u) & 7u, 5u);
+    let world = vec3<f32>(
+        g.cloud.x + f32(a & 255u) * 32.0,
+        g.cloud.z + f32((a >> 16u) & 1023u),
+        g.cloud.y + f32((a >> 8u) & 255u) * 32.0
+    );
+    // Clouds scatter light inside themselves: every side gets half of what the top gets, plus
+    // its own share of sky and sun. Dimmer at night than the moonlit ground.
+    let n = face_normal(face);
+    let soft = mix(g.face_light[2].rgb, g.face_light[face].rgb, 0.5);
+    let sun = g.sun_color.rgb * (0.25 + 0.35 * max(dot(n, g.sun.xyz), 0.0));
+    var o: CloudOut;
+    o.clip = g.view_proj * vec4<f32>(world, 1.0);
+    o.world = world;
+    o.light = (soft + sun) * (0.4 + 0.6 * g.sun_color.w);
+    o.alpha = f32(packed.y & 255u) / 255.0;
+    return o;
+}
+
+@fragment
+fn fs_cloud(f: CloudOut) -> @location(0) vec4<f32> {
+    let to = f.world - g.cam_pos.xyz;
+    let d = max(length(to), 1e-3);
+    let dir = to / d;
+    // Looking toward the sun, clouds light up (silver linings by day, fire at sunset).
+    let through = pow(max(dot(dir, g.sun.xyz), 0.0), 6.0) * g.sun.w;
+    var col = f.light * 0.95 + g.sun_color.rgb * (through * 0.9);
+    // Far clouds sink into the haze of the sky behind them and thin out to nothing.
+    let fade = smoothstep(g.cloud.w * 0.3, g.cloud.w, length(to.xz));
+    col = mix(col, sky_radiance(dir, 2.0), fade * 0.8);
+    return vec4<f32>(display(col), f.alpha * (1.0 - fade));
+}
+
+// ---- God rays: light shafts from the sun, in screen space ----
+// After each frame, `fs_mask` writes a small picture of where open sky near the sun is (from
+// the depth buffer: terrain and clouds block it). In the next frame `fs_rays` smears that
+// picture away from the sun's place on screen and adds it on top, which looks like shafts of
+// light coming past whatever hides the sun. (The technique of GPU Gems 3, chapter 13.)
+// The depth buffer, read as plain numbers (texel fetches from a depth-typed texture are not
+// available on OpenGL ES).
+@group(1) @binding(0) var depth_tex: texture_2d<f32>;
+@group(1) @binding(1) var mask_tex: texture_2d<f32>;
+@group(1) @binding(2) var mask_sampler: sampler;
+
+@fragment
+fn fs_mask(f: SkyOut) -> @location(0) vec4<f32> {
+    let size = vec2<f32>(textureDimensions(depth_tex));
+    let uv = vec2<f32>(f.ndc.x * 0.5 + 0.5, 0.5 - f.ndc.y * 0.5);
+    let depth = textureLoad(depth_tex, vec2<i32>(min(uv * size, size - vec2<f32>(1.0))), 0).r;
+    let d = normalize(g.sky_basis[2].xyz + f.ndc.x * g.sky_basis[0].xyz + f.ndc.y * g.sky_basis[1].xyz);
+    let near_sun = pow(max(dot(d, g.sun.xyz), 0.0), 10.0);
+    let open = select(0.0, 1.0, depth == 0.0); // nothing drawn there: sky
+    return vec4<f32>(vec3<f32>(open * near_sun), 1.0);
+}
+
+const RAY_STEPS: i32 = 12;
+
+@fragment
+fn fs_rays(f: SkyOut) -> @location(0) vec4<f32> {
+    let uv = vec2<f32>(f.ndc.x * 0.5 + 0.5, 0.5 - f.ndc.y * 0.5);
+    let step = (g.rays.xy - uv) * (0.9 / f32(RAY_STEPS));
+    // Start each pixel's walk at a different point along its first step: noise instead of bands.
+    let jitter = fract(52.9829189 * fract(dot(f.clip.xy, vec2<f32>(0.06711056, 0.00583715))));
+    var p = uv + step * jitter;
+    var sum = 0.0;
+    var weight = 1.0;
+    for (var i = 0; i < RAY_STEPS; i++) {
+        sum += textureSampleLevel(mask_tex, mask_sampler, p, 0.0).r * weight;
+        weight *= 0.93;
+        p += step;
+    }
+    let tint = g.sun_color.rgb / max(max(g.sun_color.r, max(g.sun_color.g, g.sun_color.b)), 1e-3);
+    return vec4<f32>(tint * (sum * g.rays.z / f32(RAY_STEPS)), 1.0);
 }
 
 // ---- HUD: coloured triangles in pixel coordinates (origin top-left) ----

@@ -15,7 +15,7 @@ fn shader_parses_and_validates() {
 fn shader_has_all_entry_points() {
     let module = naga::front::wgsl::parse_str(SRC).expect("parse");
     let names: Vec<String> = module.entry_points.iter().map(|e| e.name.clone()).collect();
-    for want in ["vs_main", "fs_main", "vs_hud", "fs_hud", "vs_lod", "vs_sky", "fs_sky"] {
+    for want in ["vs_main", "fs_main", "vs_hud", "fs_hud", "vs_lod", "vs_sky", "fs_sky", "vs_cloud", "fs_cloud", "fs_mask", "fs_rays"] {
         assert!(names.iter().any(|n| n == want), "missing entry point {want}");
     }
 }

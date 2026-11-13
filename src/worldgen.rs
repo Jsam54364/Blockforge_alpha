@@ -22,7 +22,7 @@ use crate::terrain::{Terrain, TerrainSample};
 pub const SEA_LEVEL: i32 = 0;
 /// Bumped whenever the same seed would generate different terrain: worlds saved by an
 /// older generator are kept apart (their edits would land on different ground).
-pub const WORLDGEN_VERSION: u32 = 3;
+pub const WORLDGEN_VERSION: u32 = 4;
 pub const BEDROCK_Y: i32 = -128;
 /// No caves below this; deep chunks collapse to a single uniform entry.
 const CAVE_FLOOR: i32 = -48;
@@ -37,6 +37,8 @@ pub struct Column {
     /// Top block and the blocks under it, from the column's biome, same indexing.
     pub surface: Vec<u16>,
     pub subsurface: Vec<u16>,
+    /// The rock under the ground (see `WorldGen::rock_at`), same indexing.
+    pub rock: Vec<u16>,
     /// Lowest / highest `top` block y (see `generate_chunk`) in this column.
     pub min_top: i32,
     pub max_top: i32,
@@ -53,6 +55,9 @@ pub struct WorldGen {
     terrain: Terrain,
     climate: Climate,
     stone: u16,
+    /// The rock types, in the order regions wind around each other (see `rock_at`).
+    rocks: [u16; 5],
+    rock_regions: Fbm,
     sand: u16,
     gravel: u16,
     water: u16,
@@ -119,6 +124,8 @@ impl WorldGen {
             terrain: Terrain::new(seed),
             climate: Climate::new(seed),
             stone: id("stone"),
+            rocks: [id("basalt"), id("granite"), id("stone"), id("limestone"), id("sandstone")],
+            rock_regions: Fbm::new(seed ^ 0x0C0F_FEE5, 2600.0, 2, 0.4),
             sand: id("sand"),
             gravel: id("gravel"),
             water: id("water"),
@@ -160,6 +167,15 @@ impl WorldGen {
         surface_from(h(x, z), [h(x + 1, z), h(x - 1, z), h(x, z + 1), h(x, z - 1)])
     }
 
+    /// The rock of the region around `(x, z)`: the world's bedrock changes every kilometre or
+    /// so (basalt, granite, andesite, limestone, sandstone), and shows wherever a biome's
+    /// ground is bare stone. Regions wind around each other in that order.
+    pub fn rock_at(&self, x: i32, z: i32, cell: f32) -> u16 {
+        let v = self.rock_regions.at(x as f32, z as f32, cell);
+        let i = ((v * 9.5 + 2.5).floor() as i32).clamp(0, 4);
+        self.rocks[i as usize]
+    }
+
     /// The (surface, subsurface) blocks of a column whose partial (top) block is at `top`.
     fn ground_blocks(&self, x: i32, z: i32, top: i32, t: &TerrainSample, cell: f32) -> (u16, u16) {
         // Under water (top <= sea level), and beaches: dry ground at sea level near the coast.
@@ -171,7 +187,14 @@ impl WorldGen {
             return (b, b);
         }
         let c = self.climate.at(x as f32, z as f32, t.smooth, t.inland, cell);
-        self.biome_blocks[biome::choose(c.temperature, c.rainfall, t.smooth)]
+        let (surf, sub) = self.biome_blocks[biome::choose(c.temperature, c.rainfall, t.smooth)];
+        if surf == self.stone || sub == self.stone {
+            // "stone" in a biome means the local rock.
+            let rock = self.rock_at(x, z, cell);
+            let local = |b: u16| if b == self.stone { rock } else { b };
+            return (local(surf), local(sub));
+        }
+        (surf, sub)
     }
 
     /// How the ground at `(x, z)` is coloured, for terrain drawn in cells `cell` blocks wide:
@@ -263,6 +286,7 @@ impl WorldGen {
     pub fn column(&self, cx: i32, cz: i32) -> Column {
         let n = (CHUNK_SIZE * CHUNK_SIZE) as usize;
         let (mut heights, mut surface, mut subsurface) = (Vec::with_capacity(n), Vec::with_capacity(n), Vec::with_capacity(n));
+        let mut rock = Vec::with_capacity(n);
         let (mut min_top, mut max_top) = (i32::MAX, i32::MIN);
         // The terrain with a one-block border: slabs depend on the neighbouring heights.
         const W: i32 = CHUNK_SIZE + 2;
@@ -285,9 +309,10 @@ impl WorldGen {
                 heights.push(hq);
                 surface.push(surf);
                 subsurface.push(sub);
+                rock.push(self.rock_at(x, z, 1.0));
             }
         }
-        Column { cx, cz, height_q: heights, surface, subsurface, min_top, max_top }
+        Column { cx, cz, height_q: heights, surface, subsurface, rock, min_top, max_top }
     }
 
     /// Two thin noise "sheets" intersecting give tunnel-like caves. Constants need tuning.
@@ -302,7 +327,8 @@ impl WorldGen {
         (b - 0.5).abs() < 0.055
     }
 
-    fn block_at(&self, wx: i32, wy: i32, wz: i32, top: i32, rem: i32, surf: u16, sub: u16) -> BlockState {
+    #[allow(clippy::too_many_arguments)]
+    fn block_at(&self, wx: i32, wy: i32, wz: i32, top: i32, rem: i32, surf: u16, sub: u16, rock: u16) -> BlockState {
         if wy <= BEDROCK_Y {
             return BlockState::full(self.bedrock);
         }
@@ -331,7 +357,7 @@ impl WorldGen {
         if wy >= top - 4 {
             return BlockState::full(sub);
         }
-        BlockState::full(self.stone)
+        BlockState::full(rock)
     }
 
     pub fn generate_chunk(&self, pos: ChunkPos, col: &Column) -> Chunk {
@@ -345,8 +371,8 @@ impl WorldGen {
         if y0 > col.max_top && y0 > SEA_LEVEL {
             return Chunk::uniform(AIR);
         }
-        if y0 > BEDROCK_Y && y1 < col.min_top - 4 && y1 < CAVE_FLOOR {
-            return Chunk::uniform(BlockState::full(self.stone));
+        if y0 > BEDROCK_Y && y1 < col.min_top - 4 && y1 < CAVE_FLOOR && col.rock.iter().all(|r| *r == col.rock[0]) {
+            return Chunk::uniform(BlockState::full(col.rock[0]));
         }
 
         let mut chunk = Chunk::uniform(AIR);
@@ -358,9 +384,9 @@ impl WorldGen {
                 let wx = col.cx * CHUNK_SIZE + lx;
                 let wz = col.cz * CHUNK_SIZE + lz;
                 let i = lz as usize * CHUNK_SIZE as usize + lx as usize;
-                let (surf, sub) = (col.surface[i], col.subsurface[i]);
+                let (surf, sub, rock) = (col.surface[i], col.subsurface[i], col.rock[i]);
                 for ly in 0..CHUNK_SIZE {
-                    let state = self.block_at(wx, y0 + ly, wz, top, rem, surf, sub);
+                    let state = self.block_at(wx, y0 + ly, wz, top, rem, surf, sub, rock);
                     if !state.is_air() {
                         let l = LocalPos { x: lx as u8, y: ly as u8, z: lz as u8 };
                         chunk.set(l.index(), state);
@@ -501,6 +527,30 @@ mod tests {
         let info = g.describe(x.floor() as i32, z.floor() as i32);
         assert!(matches!(info.biome, "grassland" | "temperate forest"), "{info:?}");
         assert!((3.0..40.0).contains(&y) && x.abs() < 6000.0 && z.abs() < 6000.0, "{x},{y},{z}");
+    }
+
+    #[test]
+    fn every_rock_appears_in_large_regions_and_bare_mountains_show_it() {
+        let (reg, g) = make();
+        let mut count = std::collections::HashMap::new();
+        let (mut changes, mut last) = (0, 0u16);
+        for i in 0..4000 {
+            let r = g.rock_at(i * 16 - 32_000, 500, 1.0);
+            *count.entry(r).or_insert(0) += 1;
+            if i > 0 && r != last {
+                changes += 1;
+            }
+            last = r;
+        }
+        assert_eq!(count.len(), 5, "{count:?}");
+        assert!(count.values().all(|n| *n > 120), "no rock is rare: {count:?}");
+        assert!(changes < 200, "regions are hundreds of blocks wide: {changes} changes in 64 km");
+        // Deep underground is the region's rock, in real chunks.
+        let col = g.column(3, -2);
+        let chunk = g.generate_chunk(ChunkPos::new(3, -1, -2), &col);
+        let deep = chunk.get(LocalPos { x: 4, y: 0, z: 9 }.index());
+        assert_eq!(deep.id(), col.rock[9 * CHUNK_SIZE as usize + 4]);
+        assert!(["stone", "granite", "basalt", "limestone", "sandstone"].contains(&reg.get(deep).name.as_str()));
     }
 
     #[test]

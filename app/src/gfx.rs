@@ -12,6 +12,10 @@
 //!   * reverse-Z depth with no far plane (math::perspective_reverse_z), for 30 km views
 //!   * the sky (see `sky`) is one full-screen triangle drawn after the terrain at the far
 //!     depth, so it only shades the pixels the terrain left empty
+//!   * clouds (see `clouds`) are one mesh, one draw call, blended far to near
+//!   * god rays cost a quarter-resolution pass after the frame (a mask of open sky near the
+//!     sun, from the depth buffer) and one full-screen blend with 12 samples of it in the
+//!     next frame; both are skipped while the sun is down or behind the camera
 //!
 //! TODO (see README): pooled vertex buffers, occlusion culling, ASTC texture array, render scale.
 
@@ -25,6 +29,7 @@ use blockforge::lod::{SectionKey, MASKED_MAX_LEVEL};
 use blockforge::mesh::quad_indices;
 use blockforge::registry::BlockRegistry;
 
+use crate::clouds::{self, Clouds};
 use crate::sky::{self, Sky};
 use crate::texgen;
 use crate::textures;
@@ -72,6 +77,10 @@ struct Globals {
     sky_basis: [[f32; 4]; 3],
     /// Sun, moon, sky colouring and the light on each face direction (`sky::uniforms`).
     sky: sky::SkyUniforms,
+    /// Clouds: x, z of the window's corner in the world, base height, fade distance.
+    cloud: [f32; 4],
+    /// God rays: the sun on screen (uv), strength.
+    rays: [f32; 4],
 }
 
 /// Per-frame toggles chosen in the settings menu.
@@ -89,6 +98,8 @@ pub struct RenderOptions {
     pub fog_end: f32,
     /// Hours, 0..24: where the sun is.
     pub time_of_day: f64,
+    pub clouds: bool,
+    pub god_rays: bool,
 }
 
 fn as_bytes<T>(s: &[T]) -> &[u8] {
@@ -181,6 +192,19 @@ fn sky_texture(device: &wgpu::Device, queue: &wgpu::Queue, map: &sky::SkyMap) ->
     (view, sampler)
 }
 
+/// How many layers the block texture array gets for `n` textures. At least two: some GL
+/// drivers mistake a one-layer array for a plain 2D texture. Never a multiple of six: on
+/// OpenGL ES, wgpu makes a square texture with 6, 12, 18, 24... layers a cube map, and every
+/// block then shows the wrong texture (this happened at 24 textures).
+pub fn array_layers(n: usize) -> u32 {
+    let n = n.max(2) as u32;
+    if n % 6 == 0 {
+        n + 1
+    } else {
+        n
+    }
+}
+
 /// Mip levels of the block textures: 32, 16, 8, 4, 2, 1 texels.
 const TEXTURE_MIPS: u32 = 6;
 
@@ -188,8 +212,7 @@ const TEXTURE_MIPS: u32 = 6;
 /// sampler for it: crisp texels up close, smoothly averaged further away.
 fn block_textures(device: &wgpu::Device, queue: &wgpu::Queue, reg: &BlockRegistry) -> (wgpu::TextureView, wgpu::Sampler) {
     let names = reg.texture_names();
-    // At least two layers: some GL drivers mistake a one-layer array for a plain 2D texture.
-    let layers = names.len().max(2) as u32;
+    let layers = array_layers(names.len());
     let size = texgen::SIZE as u32;
     let tex = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("block textures"),
@@ -241,6 +264,173 @@ fn block_textures(device: &wgpu::Device, queue: &wgpu::Queue, reg: &BlockRegistr
     (view, sampler)
 }
 
+/// What god rays need besides the frame itself, remade when the surface changes size: the
+/// depth buffer (also sampled, to find open sky), the quarter-resolution mask, and the bind
+/// groups that hand the depth buffer to the mask pass and the mask to the rays pass.
+struct PostTargets {
+    depth_view: wgpu::TextureView,
+    mask_view: wgpu::TextureView,
+    bind_mask: wgpu::BindGroup,
+    bind_rays: wgpu::BindGroup,
+}
+
+const MASK_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+
+fn post_layouts(device: &wgpu::Device) -> (wgpu::BindGroupLayout, wgpu::BindGroupLayout) {
+    let depth = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("depth for the ray mask"),
+        entries: &[wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        }],
+    });
+    let mask = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("ray mask"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+        ],
+    });
+    (depth, mask)
+}
+
+fn post_targets(device: &wgpu::Device, layouts: &(wgpu::BindGroupLayout, wgpu::BindGroupLayout), w: u32, h: u32) -> PostTargets {
+    let depth_view = make_depth(device, w, h);
+    let mask = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("ray mask"),
+        size: wgpu::Extent3d { width: (w / 4).max(1), height: (h / 4).max(1), depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: MASK_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let mask_view = mask.create_view(&wgpu::TextureViewDescriptor::default());
+    let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("ray mask sampler"),
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        ..Default::default()
+    });
+    let bind_mask = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("depth for the ray mask"),
+        layout: &layouts.0,
+        entries: &[wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&depth_view) }],
+    });
+    let bind_rays = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("ray mask"),
+        layout: &layouts.1,
+        entries: &[
+            wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&mask_view) },
+            wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&sampler) },
+        ],
+    });
+    PostTargets { depth_view, mask_view, bind_mask, bind_rays }
+}
+
+/// A full-screen triangle (`vs_sky`) with the given fragment shader, for the god-ray passes.
+fn screen_pipeline(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    shader: &wgpu::ShaderModule,
+    fragment: &str,
+    target: wgpu::ColorTargetState,
+    with_depth: bool,
+) -> wgpu::RenderPipeline {
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some(fragment),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: "vs_sky",
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            buffers: &[],
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: shader,
+            entry_point: fragment,
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            targets: &[Some(target)],
+        }),
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: with_depth.then(|| wgpu::DepthStencilState {
+            format: DEPTH_FORMAT,
+            depth_write_enabled: false,
+            depth_compare: wgpu::CompareFunction::Always,
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+        multisample: wgpu::MultisampleState::default(),
+        multiview: None,
+        cache: None,
+    })
+}
+
+/// Clouds: the terrain's vertex layout without instances, blended, both sides drawn.
+fn cloud_pipeline(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    shader: &wgpu::ShaderModule,
+    format: wgpu::TextureFormat,
+) -> wgpu::RenderPipeline {
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("clouds"),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: "vs_cloud",
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            buffers: &[wgpu::VertexBufferLayout {
+                array_stride: 8,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &VERTEX_ATTRS,
+            }],
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: shader,
+            entry_point: "fs_cloud",
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: DEPTH_FORMAT,
+            depth_write_enabled: true,
+            depth_compare: wgpu::CompareFunction::Greater,
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+        multisample: wgpu::MultisampleState::default(),
+        multiview: None,
+        cache: None,
+    })
+}
+
 fn make_depth(device: &wgpu::Device, w: u32, h: u32) -> wgpu::TextureView {
     let tex = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("depth"),
@@ -249,7 +439,7 @@ fn make_depth(device: &wgpu::Device, w: u32, h: u32) -> wgpu::TextureView {
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: DEPTH_FORMAT,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
         view_formats: &[],
     });
     tex.create_view(&wgpu::TextureViewDescriptor::default())
@@ -278,7 +468,14 @@ pub struct Gfx {
     config: wgpu::SurfaceConfiguration,
     /// Immediate or Mailbox if the surface offers one: used when VSYNC is turned off.
     uncapped_mode: Option<wgpu::PresentMode>,
-    depth_view: wgpu::TextureView,
+    post: PostTargets,
+    post_layouts: (wgpu::BindGroupLayout, wgpu::BindGroupLayout),
+    pipe_cloud: wgpu::RenderPipeline,
+    pipe_mask: wgpu::RenderPipeline,
+    pipe_rays: wgpu::RenderPipeline,
+    /// Clouds around the camera, and the mesh on the GPU (buffer, quads).
+    clouds: Clouds,
+    cloud_mesh: Option<(wgpu::Buffer, u32)>,
     pipe_solid: wgpu::RenderPipeline,
     pipe_solid_nocull: wgpu::RenderPipeline,
     pipe_water: wgpu::RenderPipeline,
@@ -362,7 +559,8 @@ impl Gfx {
             view_formats: vec![],
         };
         surface.configure(&device, &config);
-        let depth_view = make_depth(&device, config.width, config.height);
+        let post_layouts = post_layouts(&device);
+        let post = post_targets(&device, &post_layouts, config.width, config.height);
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("blockforge shader"),
@@ -504,6 +702,40 @@ impl Gfx {
         let pipe_lod =
             voxel_pipeline(&device, &layout, &shader, "vs_lod", format, None, true, Some(wgpu::Face::Back), "lod");
         let pipe_sky = sky_pipeline(&device, &layout, &shader, format);
+        let pipe_cloud = cloud_pipeline(&device, &layout, &shader, format);
+        let with_group1 = |group1: &wgpu::BindGroupLayout| {
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("god rays"),
+                bind_group_layouts: &[&bgl, group1],
+                push_constant_ranges: &[],
+            })
+        };
+        let pipe_mask = screen_pipeline(
+            &device,
+            &with_group1(&post_layouts.0),
+            &shader,
+            "fs_mask",
+            wgpu::ColorTargetState { format: MASK_FORMAT, blend: None, write_mask: wgpu::ColorWrites::ALL },
+            false,
+        );
+        // Added on top of the frame.
+        let add = wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::One,
+            dst_factor: wgpu::BlendFactor::One,
+            operation: wgpu::BlendOperation::Add,
+        };
+        let pipe_rays = screen_pipeline(
+            &device,
+            &with_group1(&post_layouts.1),
+            &shader,
+            "fs_rays",
+            wgpu::ColorTargetState {
+                format,
+                blend: Some(wgpu::BlendState { color: add, alpha: add }),
+                write_mask: wgpu::ColorWrites::COLOR,
+            },
+            true,
+        );
         let pipe_hud = hud_pipeline(&device, &layout, &shader, format);
 
         let index_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -539,7 +771,13 @@ impl Gfx {
             queue,
             config,
             uncapped_mode,
-            depth_view,
+            post,
+            post_layouts,
+            pipe_cloud,
+            pipe_mask,
+            pipe_rays,
+            clouds: Clouds::new(0xC10D),
+            cloud_mesh: None,
             pipe_solid,
             pipe_solid_nocull,
             pipe_water,
@@ -634,7 +872,7 @@ impl Gfx {
         self.config.width = w;
         self.config.height = h;
         self.surface.configure(&self.device, &self.config);
-        self.depth_view = make_depth(&self.device, w, h);
+        self.post = post_targets(&self.device, &self.post_layouts, w, h);
     }
 
     /// One vertex buffer holding `parts` back to back, written straight into GPU memory
@@ -826,7 +1064,29 @@ impl Gfx {
             }
             None => ([0.0; 4], 0),
         };
-        let time = self.start.elapsed().as_secs_f32() % 3600.0;
+        let seconds = self.start.elapsed().as_secs_f64();
+        let time = (seconds % 3600.0) as f32;
+
+        // Clouds: take a finished window from the worker; the wind moves the one we have.
+        if opts.clouds {
+            if let Some(w) = self.clouds.update(cam.pos, seconds) {
+                let quads = (w.vertices.len() / 4).min(MAX_QUADS as usize);
+                self.cloud_mesh = (quads > 0).then(|| {
+                    let buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("clouds"),
+                        contents: as_bytes(&w.vertices[..quads * 4]),
+                        usage: wgpu::BufferUsages::VERTEX,
+                    });
+                    (buf, quads as u32)
+                });
+            }
+        }
+        let cloud_origin = self.clouds.world_origin(seconds).filter(|_| opts.clouds && self.cloud_mesh.is_some());
+
+        // God rays: only with the sun up and in front of the camera.
+        let sky_uniforms = self.sky.uniforms(opts.time_of_day);
+        let sun = [sky_uniforms.sun[0], sky_uniforms.sun[1], sky_uniforms.sun[2]];
+        let rays = ray_params(&vp, cam.pos, fwd, sun, sky_uniforms.sun[3]).filter(|_| opts.god_rays);
 
         let mut globals = Globals {
             view_proj: vp,
@@ -841,7 +1101,9 @@ impl Gfx {
             lod_mask,
             tint_window,
             sky_basis: math::sky_basis(fwd, aspect),
-            sky: self.sky.uniforms(opts.time_of_day),
+            sky: sky_uniforms,
+            cloud: cloud_origin.map_or([0.0; 4], |o| [o[0], o[1], clouds::BASE_Y, clouds::FADE_END]),
+            rays: rays.unwrap_or([0.0; 4]),
         };
         self.queue.write_buffer(&self.globals_solid, 0, as_bytes(std::slice::from_ref(&globals)));
         globals.fog_params[2] = 0.65;
@@ -873,10 +1135,11 @@ impl Gfx {
                     },
                 })],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.depth_view,
+                    view: &self.post.depth_view,
                     depth_ops: Some(wgpu::Operations {
                         load: wgpu::LoadOp::Clear(math::DEPTH_CLEAR),
-                        store: wgpu::StoreOp::Discard,
+                        // Kept only when the ray mask is made from it after this pass.
+                        store: if rays.is_some() { wgpu::StoreOp::Store } else { wgpu::StoreOp::Discard },
                     }),
                     stencil_ops: None,
                 }),
@@ -920,6 +1183,13 @@ impl Gfx {
             pass.set_pipeline(&self.pipe_sky);
             pass.draw(0..3, 0..1);
 
+            // Clouds, over the sky and behind or in front of the terrain as the depth says.
+            if let (Some(_), Some((buf, n))) = (cloud_origin, self.cloud_mesh.as_ref()) {
+                pass.set_pipeline(&self.pipe_cloud);
+                pass.set_vertex_buffer(0, buf.slice(..));
+                pass.draw_indexed(0..n * 6, 0, 0..1);
+            }
+
             pass.set_pipeline(&self.pipe_water);
             pass.set_bind_group(0, &self.bind_water, &[]);
             for (i, (_, pos)) in vis.iter().enumerate() {
@@ -928,6 +1198,14 @@ impl Gfx {
                     pass.draw_indexed(0..layer.quads.min(MAX_QUADS) * 6, 0, i as u32..i as u32 + 1);
                     quads += layer.quads as u64;
                 }
+            }
+
+            // God rays, from the mask made after the previous frame.
+            if rays.is_some() {
+                pass.set_pipeline(&self.pipe_rays);
+                pass.set_bind_group(0, &self.bind_solid, &[]);
+                pass.set_bind_group(1, &self.post.bind_rays, &[]);
+                pass.draw(0..3, 0..1);
             }
 
             // HUD (crosshair, stats, menu)
@@ -939,6 +1217,24 @@ impl Gfx {
             }
         }
         self.last_quads = quads;
+        // The ray mask for the next frame: where this frame's depth buffer shows open sky.
+        if rays.is_some() {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("ray mask"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.post.mask_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&self.pipe_mask);
+            pass.set_bind_group(0, &self.bind_solid, &[]);
+            pass.set_bind_group(1, &self.post.bind_mask, &[]);
+            pass.draw(0..3, 0..1);
+        }
         if let Some(t) = self.timer.as_mut() {
             t.encode(&mut encoder);
         }
@@ -1024,6 +1320,22 @@ fn voxel_pipeline(
         multiview: None,
         cache: None,
     })
+}
+
+/// God-ray settings for a frame: the sun's place on screen (uv, may be off screen) and the
+/// rays' strength, or None when there is nothing to draw (sun down, or behind the camera).
+pub fn ray_params(vp: &math::Mat4, eye: [f32; 3], forward: [f32; 3], sun: [f32; 3], sun_disc: f32) -> Option<[f32; 4]> {
+    let facing = math::dot(math::normalize(forward), sun);
+    // Fades out as the sun leaves the view to the side, and as it sets.
+    let strength = 0.42 * sun_disc * ((facing - 0.25) / 0.45).clamp(0.0, 1.0);
+    if strength < 0.01 {
+        return None;
+    }
+    let c = math::transform(vp, [eye[0] + sun[0] * 1000.0, eye[1] + sun[1] * 1000.0, eye[2] + sun[2] * 1000.0, 1.0]);
+    if c[3] <= 0.0 {
+        return None;
+    }
+    Some([c[0] / c[3] * 0.5 + 0.5, 0.5 - c[1] / c[3] * 0.5, strength, 0.0])
 }
 
 /// The sky: one triangle covering the screen at the far depth (0 with reverse-Z), passing
@@ -1166,8 +1478,34 @@ mod tests {
     fn globals_layout_matches_the_wgsl_struct() {
         // 64 (mat4) + 4 * 16 (vec4s) + 32 * 16 (palette) + 16 (lod window) + 32 * 16 (lod mask)
         // + 16 (tint window) + 3 * 16 (sky basis) + sky: 4 * 16 + 4 * 16 (glow) + 6 * 16 (faces)
-        // + 3 * 16 (night rotation) + 3 * 16
-        assert_eq!(std::mem::size_of::<Globals>(), 64 + 64 + 512 + 16 + 512 + 16 + 48 + 64 + 64 + 96 + 48 + 48);
+        // + 3 * 16 (night rotation) + 3 * 16 + 16 (clouds) + 16 (rays)
+        assert_eq!(std::mem::size_of::<Globals>(), 64 + 64 + 512 + 16 + 512 + 16 + 48 + 64 + 64 + 96 + 48 + 48 + 32);
+    }
+
+    #[test]
+    fn the_block_texture_array_is_never_taken_for_a_cube_map() {
+        assert_eq!(array_layers(1), 2);
+        assert_eq!(array_layers(20), 20);
+        assert_eq!(array_layers(24), 25);
+        assert!((1..200).all(|n| array_layers(n) % 6 != 0 && array_layers(n) as usize >= n));
+        // The tint map's two layers are safe too.
+        assert_ne!(2 % 6, 0);
+    }
+
+    #[test]
+    fn god_rays_aim_at_the_sun_and_switch_off_when_it_is_out_of_view() {
+        let eye = [0.0, 50.0, 0.0];
+        let sun = math::normalize([0.3, 0.5, -0.8]);
+        let vp = math::view_proj(eye, sun, 2.0);
+        let r = ray_params(&vp, eye, sun, sun, 1.0).expect("looking at the sun");
+        assert!((r[0] - 0.5).abs() < 1e-3 && (r[1] - 0.5).abs() < 1e-3 && r[2] > 0.3, "{r:?}");
+        // The sun up and to the right of the view centre lands up and to the right on screen.
+        let fwd = math::normalize([0.1, 0.3, -0.9]);
+        let r = ray_params(&math::view_proj(eye, fwd, 2.0), eye, fwd, sun, 1.0).unwrap();
+        assert!(r[0] > 0.5 && r[1] < 0.5, "{r:?}");
+        assert!(ray_params(&vp, eye, sun, sun, 0.0).is_none(), "sun below the horizon");
+        let away = [-sun[0], -sun[1], -sun[2]];
+        assert!(ray_params(&math::view_proj(eye, away, 2.0), eye, away, sun, 1.0).is_none(), "sun behind");
         assert_eq!(std::mem::size_of::<HudVertex>(), 12);
     }
 

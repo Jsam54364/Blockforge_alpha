@@ -5,6 +5,7 @@
 //! before it spends time building the APK.
 #![allow(dead_code)]
 
+mod clouds;
 mod font;
 mod game;
 mod gfx;
@@ -133,6 +134,8 @@ impl ApplicationHandler for App {
                         fog_start,
                         fog_end,
                         time_of_day: self.game.clock.hours(),
+                        clouds: settings.clouds,
+                        god_rays: settings.god_rays,
                     };
                     match g.render(&mut self.game.client, &self.game.cam, view_blocks, &opts, &self.hud) {
                         Ok(display_wait) => {

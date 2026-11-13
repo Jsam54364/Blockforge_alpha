@@ -7,7 +7,7 @@ A mobile-first voxel engine in Rust, in two crates:
   architecture lives here and is tested without a GPU.
 * the **app** (`app/`): the Android front-end. winit + wgpu renderer, touch controls and HUD.
 
-> **Status:** 102 unit + 9 end-to-end tests in the core and 63 in the app (plus WGSL
+> **Status:** 103 unit + 9 end-to-end tests in the core and 68 in the app (plus WGSL
 > validation) pass. The APK builds on GitHub Actions and has been run and measured on a phone
 > (see the numbers further down).
 
@@ -105,7 +105,7 @@ public GPU-usage percentage, hence the derived figure.
 
 Top-right menu button: render distance (2-12 chunks, applied to the server stream too),
 LOD distance (OFF, 1K ... 32K blocks) and LOD quality (LODQ: LOW/MED/HIGH, the width of the
-first LOD ring), time of day (TIME: an hour back or forward), fog on/off,
+first LOD ring), time of day (TIME: an hour back or forward), fog, clouds and god rays on/off,
 stats on/off. The overlay's LOD line shows the sections and quads drawn. The HUD is drawn by a tiny immediate-mode layer (`ui.rs`) with its own 5x7 bitmap
 font (`font.rs`, `glyphs.rs`), so there are no UI dependencies.
 
@@ -284,15 +284,20 @@ Next: trees and plants per biome, rivers, rain shadows behind mountains.
 
 ## Block textures (`assets/textures`, `tools/paint_textures.py`)
 
-* **Original pixel art, 32 x 32**, between Vintage Story and Minecraft: slightly realistic,
-  clearly stylised. `tools/paint_textures.py` paints them all (run it again after changing
-  it; or edit the PNGs directly). The rules it follows: a short colour ramp per material,
-  hue-shifted (shadows cooler, highlights warmer); shapes rather than noise (rock plates,
-  clods and pebbles, grains and ripples, blade tufts, bark plates, rings, leaves), each lit from
-  the top left with no pillow shading; lone pixels merged into clusters; the darkest and
-  lightest colours never touching; dithering only on rough materials (stone, sand, gravel).
+* **Original 32 x 32 textures in the manner of Vintage Story's**: fine-grained and low in
+  contrast, so ground reads as a material from a distance rather than as a pattern.
+  `tools/paint_textures.py` paints them all (run it again after changing it, or edit the PNGs):
+  a smooth colour ramp per material with soft mottling, grain at the scale of single pixels,
+  and each material's own detail (blades for grass, crumbs and grit for soil, pebbles for
+  gravel, crystals for granite, strata for limestone and sandstone, pits and joints for basalt).
+* **Rock types**: the world's bedrock changes by region (`WorldGen::rock_at`): basalt, granite,
+  andesite (the `stone` block), limestone, sandstone, in regions a kilometre or so wide. It is
+  what is underground, and what shows where a biome's ground is bare rock. Adding one is a
+  painter function, a block in `assets/blocks.toml`, a name in `app/src/textures.rs` and a
+  place in `rock_at`.
 * **Greyscale grass, coloured by biome** (Minecraft's way): grass tops and leaves are
-  greyscale; a grass side is dirt plus `<name>_overlay.png`, the fringe. Each biome has a
+  greyscale; a grass side is soil plus `<name>_overlay.png`, grass hanging most of the way down
+  (so grassy slopes are green, with soil only at the foot of each step). Each biome has a
   grass colour (`biome::BIOMES`). A **tint map** around the camera (`app/src/tint.rs`), one
   texel per 16 blocks out to ~2 km and one per 128 blocks out to 16 km, is built on a
   background thread from the world generator and sampled with bilinear filtering, so colours
@@ -347,6 +352,25 @@ Next: trees and plants per biome, rivers, rain shadows behind mountains.
   `python3 tools/bake_sky.py sky.hdr` (day) or `python3 tools/bake_sky.py --night night.exr`
   (night; it needs its moon in it), rebuild. Clear or lightly clouded day skies work best:
   clouds stay where they are, lit from where the photo's sun was.
+
+## Clouds and god rays (`app/src/clouds.rs`, the shader)
+
+* **Clouds** as Vintage Story draws them: the sky is divided into 32-block tiles, and each tile
+  holding cloud is a flat-bottomed box (base at y 290) as tall as the cloud is dense there, a
+  little see-through. Density is noise fixed in "cloud space", which drifts with the wind; a
+  broad second noise leaves some regions clear and others overcast. A 4 km window around the
+  camera is meshed on a background thread (about 20 000 quads, a few milliseconds) and drawn in
+  one call, tiles ordered far to near so they blend correctly; it is rebuilt only when the
+  camera has moved 10 tiles in cloud space. They are lit by the sky and the sun, glow toward
+  the sun at sunset, and fade into the horizon haze.
+* **God rays** in screen space (the method of GPU Gems 3, chapter 13): after a frame, a
+  quarter-resolution pass writes a mask of open sky near the sun, read from the depth buffer
+  (terrain and clouds block it); the next frame smears that mask away from the sun's place on
+  screen with 12 samples per pixel and adds it on top. Both passes are skipped while the sun is
+  down or out of view, and the depth buffer is only kept when they run.
+* The menu's CLOUDS and RAYS buttons turn each off.
+* The block texture array never has a multiple of six layers (`gfx::array_layers`): on OpenGL
+  ES, wgpu would make it a cube map and every block would show the wrong texture.
 
 ## Greedy meshing (`greedy.rs`)
 

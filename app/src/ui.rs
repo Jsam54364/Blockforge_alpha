@@ -87,6 +87,8 @@ pub struct Settings {
     /// true = bit-mask greedy mesher for full opaque cubes; false = one quad per face.
     pub greedy: bool,
     pub show_stats: bool,
+    pub clouds: bool,
+    pub god_rays: bool,
 }
 
 impl Default for Settings {
@@ -100,6 +102,8 @@ impl Default for Settings {
             vsync: true,
             greedy: false,
             show_stats: true,
+            clouds: true,
+            god_rays: true,
         }
     }
 }
@@ -108,7 +112,7 @@ impl Settings {
     /// `key=value` lines, one per setting, for the settings file kept between launches.
     pub fn to_text(&self) -> String {
         format!(
-            "render_chunks={}\nlod_level={}\nlod_quality={}\nfog={}\ncull={}\nvsync={}\ngreedy={}\nshow_stats={}\n",
+            "render_chunks={}\nlod_level={}\nlod_quality={}\nfog={}\ncull={}\nvsync={}\ngreedy={}\nshow_stats={}\nclouds={}\ngod_rays={}\n",
             self.render_chunks,
             self.lod_level,
             self.lod_quality,
@@ -116,7 +120,9 @@ impl Settings {
             self.cull.label(),
             self.vsync,
             self.greedy,
-            self.show_stats
+            self.show_stats,
+            self.clouds,
+            self.god_rays
         )
     }
 
@@ -147,10 +153,12 @@ impl Settings {
                         self.cull = m;
                     }
                 }
-                "fog" | "vsync" | "greedy" | "show_stats" => {
+                "fog" | "vsync" | "greedy" | "show_stats" | "clouds" | "god_rays" => {
                     let Ok(v) = value.parse::<bool>() else { continue };
                     match key {
                         "fog" => self.fog = v,
+                        "clouds" => self.clouds = v,
+                        "god_rays" => self.god_rays = v,
                         "vsync" => self.vsync = v,
                         "greedy" => self.greedy = v,
                         _ => self.show_stats = v,
@@ -175,6 +183,8 @@ pub enum Action {
     ToggleVsync,
     ToggleMesher,
     ToggleStats,
+    ToggleClouds,
+    ToggleRays,
     /// Moves the time of day by this many hours (the game owns the clock and does it).
     Time(i8),
 }
@@ -371,6 +381,14 @@ impl Ui {
                 self.settings.show_stats = !self.settings.show_stats;
                 false
             }
+            Action::ToggleClouds => {
+                self.settings.clouds = !self.settings.clouds;
+                false
+            }
+            Action::ToggleRays => {
+                self.settings.god_rays = !self.settings.god_rays;
+                false
+            }
             Action::Time(_) => false,
         }
     }
@@ -443,10 +461,12 @@ impl Ui {
         let pad = 8.0 * dp;
         let bw = 48.0 * dp;
         let gap = 6.0 * dp;
-        let rows = 6usize; // three stepper rows + three rows of two toggle buttons
-        // Rows shrink (down to button height) on short screens so the panel stays visible.
+        let rows = 7usize; // three stepper rows + four rows of two toggle buttons
+        // Rows shrink on short screens so the panel stays visible (buttons with them, a little
+        // below finger size on the very shortest).
         let avail = self.size.1 - top - 8.0 * dp;
-        let row_h = (56.0 * dp).min((avail - pad * 2.0) / rows as f32).max(bw);
+        let row_h = (56.0 * dp).min((avail - pad * 2.0) / rows as f32).max(40.0 * dp);
+        let bh = bw.min(row_h);
         let panel_h = pad * 2.0 + row_h * rows as f32;
         let x0 = right - panel_w;
 
@@ -463,36 +483,38 @@ impl Ui {
         // Rows 0-2: label, value and -/+ buttons.
         for i in 0..3usize {
             let ry = top + pad + row_h * i as f32;
-            let by = ry + (row_h - bw) * 0.5;
+            let by = ry + (row_h - bh) * 0.5;
             let ty = ry + (row_h - 7.0 * px) * 0.5;
             if i == 0 {
                 text(out, label_x, ty, px, "REND", WHITE);
                 text(out, value_x, ty, px, &s.render_chunks.to_string(), WHITE);
-                self.button(out, minus_x, by, bw, bw, "-", px, Action::RenderDist(-1));
-                self.button(out, plus_x, by, bw, bw, "+", px, Action::RenderDist(1));
+                self.button(out, minus_x, by, bw, bh, "-", px, Action::RenderDist(-1));
+                self.button(out, plus_x, by, bw, bh, "+", px, Action::RenderDist(1));
             } else if i == 1 {
                 text(out, label_x, ty, px, "LOD", WHITE);
                 text(out, value_x, ty, px, &lod_label(s.lod_level), WHITE);
-                self.button(out, minus_x, by, bw, bw, "-", px, Action::LodDist(-1));
-                self.button(out, plus_x, by, bw, bw, "+", px, Action::LodDist(1));
+                self.button(out, minus_x, by, bw, bh, "-", px, Action::LodDist(-1));
+                self.button(out, plus_x, by, bw, bh, "+", px, Action::LodDist(1));
             } else {
                 text(out, label_x, ty, px, "TIME", WHITE);
                 text(out, value_x, ty, px, &crate::sky::time_label(self.hours), WHITE);
-                self.button(out, minus_x, by, bw, bw, "-", px, Action::Time(-1));
-                self.button(out, plus_x, by, bw, bw, "+", px, Action::Time(1));
+                self.button(out, minus_x, by, bw, bh, "-", px, Action::Time(-1));
+                self.button(out, plus_x, by, bw, bh, "+", px, Action::Time(1));
             }
         }
 
         // Rows 3-5: toggles in two columns; each button carries its own label.
         let on_off = |b: bool| if b { "ON" } else { "OFF" };
         let vsync_label = if !self.vsync_supported { "N/A" } else { on_off(s.vsync) };
-        let toggles: [(Action, String); 6] = [
+        let toggles: [(Action, String); 8] = [
             (Action::ToggleFog, format!("FOG {}", on_off(s.fog))),
             (Action::CycleCull, format!("CULL {}", s.cull.label())),
             (Action::ToggleVsync, format!("VSYNC {}", vsync_label)),
             (Action::ToggleMesher, format!("MESH {}", if s.greedy { "GREEDY" } else { "SIMPLE" })),
             (Action::ToggleStats, format!("STATS {}", on_off(s.show_stats))),
             (Action::CycleLodQuality, format!("LODQ {}", LOD_QUALITY[s.lod_quality as usize % LOD_QUALITY.len()].0)),
+            (Action::ToggleClouds, format!("CLOUDS {}", on_off(s.clouds))),
+            (Action::ToggleRays, format!("RAYS {}", on_off(s.god_rays))),
         ];
         let cell_w = (panel_w - pad * 3.0) / 2.0;
         for (i, (action, label)) in toggles.iter().enumerate() {
@@ -500,13 +522,13 @@ impl Ui {
             let col = i % 2;
             let x = x0 + pad + col as f32 * (cell_w + pad);
             let ry = top + pad + row_h * row as f32;
-            let by = ry + (row_h - bw) * 0.5;
+            let by = ry + (row_h - bh) * 0.5;
             // Shrink the text (in whole font pixels) if the label wouldn't fit its button.
             let mut tpx = px;
             while tpx > 2.0 && text_width(tpx, label) > cell_w * 0.94 {
                 tpx -= 1.0;
             }
-            self.button(out, x, by, cell_w, bw, label, tpx, *action);
+            self.button(out, x, by, cell_w, bh, label, tpx, *action);
         }
     }
 }
@@ -543,6 +565,8 @@ mod tests {
             vsync: false,
             greedy: true,
             show_stats: false,
+            clouds: false,
+            god_rays: false,
         };
         let mut back = Settings::default();
         back.apply_text(&s.to_text());
@@ -591,6 +615,8 @@ mod tests {
             Action::ToggleMesher,
             Action::ToggleStats,
             Action::CycleLodQuality,
+            Action::ToggleClouds,
+            Action::ToggleRays,
         ] {
             let (x, y) = center_of(&u, a);
             assert_eq!(u.hit(x, y), Some(a), "{a:?}");
