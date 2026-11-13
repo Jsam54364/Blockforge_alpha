@@ -39,6 +39,14 @@ package = "com.blockforge.alpha"
 apk_name = "blockforge"
 build_targets = ["aarch64-linux-android"]
 
+# Sign every debug APK with the same key (app/debug.keystore) so a new build installs over
+# the previous one and keeps the saved world and settings. Without this, each CI runner made
+# its own random key and Android refused the update. This is a debug key with the standard
+# "android" password: it is not a secret, and must never sign a Play Store release.
+[package.metadata.android.signing.dev]
+path = "debug.keystore"
+keystore_password = "android"
+
 [package.metadata.android.sdk]
 min_sdk_version = 26
 target_sdk_version = 34

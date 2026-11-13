@@ -150,6 +150,16 @@ can kill it there without warning; settings are also written when the menu is cl
 world file is only rewritten when a block actually changed. When the app comes back, every
 chunk mesh is handed to the new GPU surface again (`Client::requeue_all_meshes`).
 
+### Installing updates
+
+Every APK is signed with the same debug key, `app/debug.keystore` (see the `signing.dev`
+section in `app/Cargo.toml`), so a new build installs over the old one and keeps the world and
+settings. Each build's summary on GitHub Actions prints the signing certificate's SHA-256; it
+should never change. Builds made before this key existed were signed with a random key, so
+the first update onto a fixed-key build still needs one uninstall. The key is a debug key with
+the standard `android` password and is not a secret; a Play Store release would need its own
+private key kept in a repository secret.
+
 Renderer gaps: pooled vertex buffers, occlusion culling, texture array
 (colours come from a palette keyed by texture name), render-scale governor hookup, LOD meshing.
 
@@ -186,4 +196,3 @@ draw one instance per quad (8 bytes instead of 32), texture repeat across merged
 3. LOD meshes behind the (currently inert) LOD distance setting.
 4. Pooled vertex buffers instead of one buffer per chunk.
 5. Immersive mode / real window insets instead of the fixed HUD insets.
-6. A fixed signing key in CI so new APKs install over old ones without uninstalling.

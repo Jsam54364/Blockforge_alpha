@@ -86,9 +86,13 @@ jobs:
           apk=$(find app/target -name '*.apk' | head -n 1)
           if [ -z "$apk" ]; then echo "No APK produced" >> "$GITHUB_STEP_SUMMARY"; exit 1; fi
           cp "$apk" blockforge-debug.apk
+          # Every build should show the same fingerprint (the key in app/debug.keystore).
+          # If it changes, phones will refuse to update over the installed app.
+          cert=$("$ANDROID_HOME/build-tools/34.0.0/apksigner" verify --print-certs blockforge-debug.apk | grep -m1 'SHA-256' || echo "could not read")
+          echo "Signing certificate: $cert" >> "$GITHUB_STEP_SUMMARY"
           gh release delete latest-apk --yes --cleanup-tag || true
           gh release create latest-apk blockforge-debug.apk \
             --prerelease --target "$BRANCH" \
             --title "Latest debug APK" \
-            --notes "Built from commit ${GITHUB_SHA::7}. Download blockforge-debug.apk and install it."
+            --notes "Built from commit ${GITHUB_SHA::7}. Download blockforge-debug.apk and install it over the previous version (no uninstall needed; saved world and settings are kept)."
           echo "APK published: see the Releases page" >> "$GITHUB_STEP_SUMMARY"
