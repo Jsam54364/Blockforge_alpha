@@ -143,7 +143,7 @@ fn axis_span(d: i32) -> (i32, i32, i32) {
 }
 
 /// 8 bytes:
-///   a: x(8) | y(8)<<8 | z(8)<<16 | face(3)<<24 | ao(2)<<27
+///   a: x(8) | y(8)<<8 | z(8)<<16 | face(3)<<24 | ao(2)<<27 | liquid_top(1)<<29
 ///   b: texture(16) | sky(4)<<16 | block(4)<<20 | grow_u(1)<<24 | grow_v(1)<<25 | merged(1)<<26
 ///      | tex_top(2)<<27
 /// grow_u/grow_v/merged are set on greedy-merged quads: which side of the quad this corner is
@@ -173,6 +173,17 @@ impl PackedVertex {
     pub fn with_grow(mut self, u_max: bool, v_max: bool) -> PackedVertex {
         self.b |= ((u_max as u32) << 24) | ((v_max as u32) << 25) | (1 << 26);
         self
+    }
+
+    /// Marks a corner at the top of a liquid's surface block: the shader lowers it by an
+    /// eighth of a block, so water sits a little below the ground around it.
+    pub fn with_liquid_top(mut self) -> PackedVertex {
+        self.a |= 1 << 29;
+        self
+    }
+
+    pub fn liquid_top(self) -> bool {
+        (self.a >> 29) & 1 == 1
     }
 
     pub fn tex_top(self) -> u32 {
@@ -438,6 +449,8 @@ fn mesh_chunk_impl(reg: &BlockRegistry, pc: &PaddedChunk, skip_greedy: bool) -> 
                 }
                 let def = reg.get(state);
                 let (ymin, ymax) = state.shape().y_range_q();
+                // A liquid's surface: the top of its block is lowered a little (see shader).
+                let surface = def.render == RenderLayer::Translucent && !def.solid && pc.at(x, y + 1, z) != state;
                 for face in Face::ALL {
                     let (nx, ny, nz) = face.normal();
                     let nb = pc.at(x + nx, y + ny, z + nz);
@@ -463,6 +476,15 @@ fn mesh_chunk_impl(reg: &BlockRegistry, pc: &PaddedChunk, skip_greedy: bool) -> 
                         15,
                         def.light_emission,
                     );
+                    if surface {
+                        let verts = &mut mesh.layer_mut(def.render).vertices;
+                        let n = verts.len();
+                        for v in &mut verts[n - 4..] {
+                            if v.y() as i32 == y * 4 + ymax {
+                                *v = v.with_liquid_top();
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -727,6 +749,23 @@ mod tests {
         let mut top = [PackedVertex::pack(0, 10, 0, Face::PosY, 3, 1, 15, 0); 4];
         anchor_texture_top(Face::PosY, &mut top);
         assert!(top.iter().all(|v| v.tex_top() == 0));
+    }
+
+    #[test]
+    fn only_the_top_of_a_water_surface_is_lowered() {
+        let reg = BlockRegistry::builtin();
+        let water = reg.state("water").unwrap();
+        let mut pc = PaddedChunk::filled(AIR);
+        for y in 0..3 {
+            pc.set(5, y, 5, water);
+        }
+        let m = mesh_chunk(&reg, &pc);
+        let v = &m.translucent.vertices;
+        assert!(!v.is_empty());
+        for q in v {
+            assert_eq!(q.liquid_top(), q.y() == 12, "only corners at the top of the column (y 3): {q:?}");
+        }
+        assert!(v.iter().any(|q| q.liquid_top()));
     }
 
     #[test]

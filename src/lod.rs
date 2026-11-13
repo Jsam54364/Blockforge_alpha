@@ -551,7 +551,10 @@ pub fn build_section(gen: &WorldGen, reg: &BlockRegistry, key: SectionKey) -> Lo
             let edge_block = if dx != 0 { ox + edge_cell * cell } else { oz + edge_cell * cell };
             let on_line = masked && edge_block.rem_euclid(CHUNK_SIZE) == 0;
             let bottom_at = |i: i32, j: i32| -> i32 {
-                let nb = grid.surf(i + dx, j + dz);
+                let mut nb = grid.surf(i + dx, j + dz);
+                if grid.block(i + dx, j + dz) == water && grid.block(i, j) != water {
+                    nb -= 4; // land beside water: the water surface is drawn a little lower (shader)
+                }
                 // LOD water is level with real water, which is a full block at the same height:
                 // nothing to close there, and a face under the see-through real water would
                 // show through it as a dark curtain.

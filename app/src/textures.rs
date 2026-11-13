@@ -1,5 +1,5 @@
-//! Block textures for the renderer: the 32 x 32 PNGs in `assets/textures` (made from CC0
-//! photos by `tools/make_textures.py`), and textures painted in code (`texgen`) for the rest.
+//! Block textures for the renderer: the 32 x 32 PNGs in `assets/textures` (original pixel
+//! art, painted by `tools/paint_textures.py`), and `texgen`'s for any name without a file.
 //!
 //! The result is RGBA8 sRGB, but alpha is not transparency: it says how much of the biome's
 //! grass colour to apply (255 = none, 0 = all). Grass tops and leaves are greyscale and fully
@@ -15,7 +15,7 @@ macro_rules! files {
 }
 
 const FILES: &[(&str, &[u8])] = files!(
-    "stone", "dirt", "sand", "gravel", "snow", "log_side", "bedrock",
+    "stone", "dirt", "sand", "gravel", "snow", "log_side", "log_top", "bedrock", "glowstone", "leaves",
     "grass_top", "grass_side", "grass_side_overlay",
     "dry_grass_top", "dry_grass_side", "dry_grass_side_overlay",
     "lush_grass_top", "lush_grass_side", "lush_grass_side_overlay",

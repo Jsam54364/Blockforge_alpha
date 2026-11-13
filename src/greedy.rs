@@ -466,7 +466,11 @@ mod tests {
     fn greedy_matches_simple_on_real_terrain_and_uses_fewer_quads() {
         let r = reg();
         let g = WorldGen::new(1337, &r);
-        for &(cx, cz) in &[(0, 0), (5, 3), (-4, 2)] {
+        // Around the spawn (lowland) and two other places; a steep peak, all slab steps, could
+        // have nothing to merge.
+        let [sx, _, sz] = g.find_spawn();
+        let spawn = ((sx / CHUNK_SIZE as f32).floor() as i32, (sz / CHUNK_SIZE as f32).floor() as i32);
+        for &(cx, cz) in &[spawn, (5, 3), (-4, 2)] {
             // A chunk around the middle of the column's surface heights, so it holds terrain.
             let col = g.column(cx, cz);
             let mid = (col.min_top + col.max_top).div_euclid(2);

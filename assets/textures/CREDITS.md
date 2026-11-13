@@ -1,23 +1,7 @@
-# Texture credits
+# Textures
 
-The photo-based textures here are made by `tools/make_textures.py` from **ambientCG**
-materials (https://ambientcg.com, by Lennart Demes), licensed **CC0 1.0 (public domain)**,
-via the preview sheets of https://github.com/fabien-michel/sweethome3d-textures-ambientcg
-(also CC0). Attribution is not required; it is given gladly.
-
-| Texture | ambientCG material |
-|---|---|
-| stone | Rock044 |
-| dirt (and the dirt of grass sides) | Ground067 |
-| sand | Ground079S |
-| gravel | Gravel022 |
-| snow | Snow008B |
-| log_side | Bark014 |
-| bedrock | Rock031 |
-| grass_top (greyscale) | Grass004 |
-| dry_grass_top (greyscale) | Ground073 |
-| lush_grass_top (greyscale) | Moss003 |
-| cold_grass_top (greyscale) | Moss001 |
-
-The other textures (log tops, leaves, glowstone, water) are painted in code by
-`app/src/texgen.rs`.
+All block textures here are original pixel art, painted by `tools/paint_textures.py`
+(32 x 32, seamless; short hue-shifted colour ramps, shapes lit from the top left, no lone
+pixels). Grass tops and leaves are greyscale and tinted by biome in the game; a grass side is
+dirt plus `<name>_overlay.png`, the greyscale fringe. Edit the PNGs directly, or change the
+painter and run it again: `python3 tools/paint_textures.py` (needs numpy and Pillow).

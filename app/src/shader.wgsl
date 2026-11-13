@@ -1,5 +1,6 @@
 // Voxel shader. Vertices are the engine's 8-byte packed format (see blockforge::mesh):
-//   x: pos_x(8) | pos_y(8)<<8 | pos_z(8)<<16 | face(3)<<24 | ao(2)<<27   (pos in quarter blocks)
+//   x: pos_x(8) | pos_y(8)<<8 | pos_z(8)<<16 | face(3)<<24 | ao(2)<<27 | liquid_top(1)<<29
+//      (pos in quarter blocks; liquid_top: lower this corner by 1/8 block, a water surface)
 //   y: texture(16) | sky(4)<<16 | block_light(4)<<20 | grow(3)<<24 | tex_top(2)<<27
 // The chunk origin comes from a per-instance attribute, so one static index buffer and
 // one draw call per chunk is all the CPU has to do.
@@ -54,6 +55,9 @@ fn face_uv(face: u32, p: vec3<f32>) -> vec2<f32> {
     }
 }
 
+// How far a water surface sits below the top of its block (like Minecraft's): 4 of 32 pixels.
+const WATER_SINK: f32 = 0.125;
+
 fn face_normal(f: u32) -> vec3<f32> {
     var n = array<vec3<f32>, 6>(
         vec3<f32>(1.0, 0.0, 0.0),
@@ -81,7 +85,9 @@ fn vs_main(v: VsIn) -> VsOut {
     let e1 = vec3<f32>(f32(axis == 2u), f32(axis == 0u), f32(axis == 1u));
     let e2 = vec3<f32>(f32(axis == 1u), f32(axis == 2u), f32(axis == 0u));
     let grow = (e1 * su + e2 * sv) * (0.002 * merged);
-    let local = vec3<f32>(f32(a & 255u), f32((a >> 8u) & 255u), f32((a >> 16u) & 255u)) * 0.25 + grow;
+    let sink = f32((a >> 29u) & 1u) * WATER_SINK;
+    let local = vec3<f32>(f32(a & 255u), f32((a >> 8u) & 255u), f32((a >> 16u) & 255u)) * 0.25 + grow
+        - vec3<f32>(0.0, sink, 0.0);
     let ao = (a >> 27u) & 3u;
     let tex = b & 65535u;
     let sky = f32((b >> 16u) & 15u) / 15.0;
@@ -155,7 +161,10 @@ fn vs_lod(v: VsIn) -> VsOut {
     } else if (face == 4u || face == 5u) {
         grow = vec3<f32>(-inx * eps, up, 0.0);
     }
-    let world = base + grow;
+    var world = base + grow;
+    if (tex == u32(g.flags.z + 0.5) && (face == 2u || top > 0.5)) {
+        world.y -= WATER_SINK; // LOD water (its surface and the tops of its sides) sits as low as real water
+    }
 
     let n = face_normal(face);
     let sun = normalize(vec3<f32>(0.4, 0.9, 0.3));
@@ -228,35 +237,50 @@ fn wave(s: ptr<function, vec2<f32>>, p: vec2<f32>, dir: vec2<f32>, wavelength: f
     *s += dir * (amp * k * c);
 }
 
-// Water: waves bend the surface normal; the surface shows the deep water colour looking down
-// and the sky's reflection at grazing angles (Fresnel), plus the sun's glint. Returns the
-// colour and how opaque it is (the translucent pass blends with it; LOD water is opaque).
+// Water, after open sea under a bright sky: a deep navy body, mostly opaque; irregular waves
+// (several travelling waves in different directions) bend the surface normal, so facets
+// alternate between the dark body and reflected sky; reflections take over toward the horizon
+// (Fresnel), with a soft sun glint. Returns the colour and how opaque it is (the translucent
+// pass blends with it; LOD water is drawn opaque).
 fn water_shade(world: vec3<f32>, face: u32, light: vec3<f32>) -> vec4<f32> {
     let to_cam = g.cam_pos.xyz - world;
-    let v = normalize(to_cam);
+    let dist = length(to_cam);
+    let v = to_cam / max(dist, 1e-4);
     var n = face_normal(face);
     if (face == 2u) {
         var s = vec2<f32>(0.0);
         let p = world.xz;
-        wave(&s, p, vec2<f32>(0.8, 0.6), 7.0, 0.09, 1.4);
-        wave(&s, p, vec2<f32>(-0.42, 0.91), 4.3, 0.05, 1.1);
-        // Small ripples only up close: further out they would only shimmer.
-        let near = 1.0 / (1.0 + length(to_cam) / 25.0);
-        wave(&s, p, vec2<f32>(0.96, -0.28), 2.1, 0.022 * near, 0.8);
-        wave(&s, p, vec2<f32>(-0.71, -0.71), 1.3, 0.011 * near, 0.6);
-        // Far away the waves average out: calmer, more mirror-like.
-        s *= 1.0 / (1.0 + length(to_cam) / 60.0);
+        // Swell, then chop, then ripples; finer waves fade out with distance (they would only
+        // shimmer there), so far water looks calmer and more mirror-like.
+        let near = 1.0 / (1.0 + dist / 30.0);
+        // Each wave's height varies across the sea (slowly drifting patches), so the pattern
+        // never settles into regular bands.
+        let t = g.flags.y;
+        let a1 = 0.55 + 0.45 * sin(p.x * 0.031 + p.y * 0.017 + t * 0.05);
+        let a2 = 0.55 + 0.45 * sin(p.x * -0.023 + p.y * 0.029 + 1.7);
+        let a3 = 0.55 + 0.45 * sin(p.x * 0.041 - p.y * 0.013 + 3.1 - t * 0.04);
+        wave(&s, p, vec2<f32>(0.8, 0.6), 12.3, 0.13 * a1, 1.7);
+        wave(&s, p, vec2<f32>(-0.45, 0.89), 7.1, 0.10 * a2, 1.3);
+        wave(&s, p, vec2<f32>(0.97, -0.24), 4.3, 0.07 * a3, 1.05);
+        wave(&s, p, vec2<f32>(0.31, 0.95), 5.6, 0.06 * a1 * a3, 1.2);
+        wave(&s, p, vec2<f32>(-0.83, -0.56), 2.7, 0.05 * near * a2, 0.85);
+        wave(&s, p, vec2<f32>(0.2, -0.98), 1.9, 0.035 * near, 0.7);
+        wave(&s, p, vec2<f32>(-0.96, 0.27), 1.4, 0.022 * near * a1, 0.6);
+        wave(&s, p, vec2<f32>(0.66, 0.75), 1.05, 0.015 * near, 0.5);
+        s *= 1.0 / (1.0 + dist / 120.0);
         n = normalize(vec3<f32>(-s.x, 1.0, -s.y));
     }
-    let fres = 0.02 + 0.98 * pow(1.0 - clamp(dot(n, v), 0.0, 1.0), 5.0);
+    let cos_v = clamp(dot(n, v), 0.0, 1.0);
+    let fres = 0.03 + 0.97 * pow(1.0 - cos_v, 5.0);
     let r = reflect(-v, n);
-    let sky = mix(g.fog_color.rgb, vec3<f32>(0.12, 0.28, 0.72), clamp(r.y * 1.4, 0.0, 1.0));
-    // The water body's own colour, which also tints whatever is seen through it.
-    let deep = vec3<f32>(0.018, 0.11, 0.16) * light;
+    // The sky in the reflection: hazy and pale at the horizon, deeper blue higher up.
+    let sky = mix(g.fog_color.rgb * 1.05, vec3<f32>(0.16, 0.32, 0.70), clamp(r.y * 1.6, 0.0, 1.0));
+    // Deep navy, a touch greener where the surface faces the viewer (light from inside).
+    let body = mix(vec3<f32>(0.004, 0.016, 0.040), vec3<f32>(0.010, 0.040, 0.070), cos_v * 0.6) * light;
     let sun = normalize(vec3<f32>(0.4, 0.9, 0.3));
-    let glint = pow(max(dot(n, normalize(sun + v)), 0.0), 220.0) * 2.5;
-    let col = mix(deep, sky, fres) + vec3<f32>(glint);
-    return vec4<f32>(col, mix(0.8, 0.97, fres));
+    let glint = pow(max(dot(n, normalize(sun + v)), 0.0), 300.0) * 1.6;
+    let col = mix(body, sky, fres) + vec3<f32>(glint);
+    return vec4<f32>(col, mix(0.95, 0.99, fres));
 }
 
 @fragment

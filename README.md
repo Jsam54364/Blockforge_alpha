@@ -7,7 +7,7 @@ A mobile-first voxel engine in Rust, in two crates:
   architecture lives here and is tested without a GPU.
 * the **app** (`app/`): the Android front-end. winit + wgpu renderer, touch controls and HUD.
 
-> **Status:** 100 unit + 8 end-to-end tests in the core and 52 in the app (including WGSL
+> **Status:** 102 unit + 8 end-to-end tests in the core and 52 in the app (including WGSL
 > validation) pass. The APK builds on GitHub Actions and has been run and measured on a phone
 > (see the numbers further down).
 
@@ -247,6 +247,9 @@ Limits and next steps:
 Modelled on Vintage Story's: about one block per metre, the shape of the land and its ground
 cover decided separately.
 
+* **Whole-block terrain, smoothed with half slabs**: heights are rounded to whole blocks, and a
+  half slab is added only at the foot of a step, where the ground rises toward a higher
+  neighbour. Slopes get smoothed; flat ground stays flat.
 * **Continents**: a large, domain-warped noise decides land and sea (about 60% land; the
   spawn area is always land). Coasts are low, the land rises inland, the sea floor shelves
   down to about -50.
@@ -273,13 +276,15 @@ cover decided separately.
 
 Next: trees and plants per biome, rivers, rain shadows behind mountains.
 
-## Block textures (`assets/textures`, `app/src/textures.rs`)
+## Block textures (`assets/textures`, `tools/paint_textures.py`)
 
-* **Photo-based, 32 x 32**: stone, dirt, sand, gravel, snow, bark, bedrock and the four grasses
-  are made from public-domain (CC0) ambientCG photo textures by `tools/make_textures.py`:
-  averaged 4 x 4 per texel in linear light, sharpened a little (the crisp, pixelated look),
-  made seamless, and pulled toward a target colour and contrast. Sources are listed in
-  `assets/textures/CREDITS.md`; the PNGs can be edited or replaced directly.
+* **Original pixel art, 32 x 32**, between Vintage Story and Minecraft: slightly realistic,
+  clearly stylised. `tools/paint_textures.py` paints them all (run it again after changing
+  it; or edit the PNGs directly). The rules it follows: a short colour ramp per material,
+  hue-shifted (shadows cooler, highlights warmer); shapes rather than noise (rock plates,
+  clods and pebbles, grains and ripples, blade tufts, bark plates, rings, leaves), each lit from
+  the top left with no pillow shading; lone pixels merged into clusters; the darkest and
+  lightest colours never touching; dithering only on rough materials (stone, sand, gravel).
 * **Greyscale grass, coloured by biome** (Minecraft's way): grass tops and leaves are
   greyscale; a grass side is dirt plus `<name>_overlay.png`, the fringe. Each biome has a
   grass colour (`biome::BIOMES`). A **tint map** around the camera (`app/src/tint.rs`), one
@@ -289,14 +294,14 @@ Next: trees and plants per biome, rivers, rain shadows behind mountains.
 * **Hiding the tiling**: every block turns and mirrors its texture its own way (tops 8 ways,
   sides mirrored only, so fringes stay on top), and the tint map carries a gentle brightness
   variation over tens of blocks.
-* **Water** (`water_shade` in the shader): travelling waves bend the surface normal (small
-  ripples only up close); the surface shows the water's blue-green body when looking down and
-  the sky's reflection at grazing angles (Fresnel), plus the sun's glint, and is more opaque at
-  grazing angles. LOD water uses the same shading, opaque.
-* Textures without a file (log tops, leaves, glowstone, water) are painted in code
-  (`app/src/texgen.rs`). All are uploaded as one mipmapped texture array (averaged in linear
-  light) and sampled with world-position coordinates, so greedy quads and LOD terrain repeat
-  them once per block. Half-slab sides start the texture at their own top.
+* **Water** (`water_shade` in the shader), after open sea under a bright sky: a deep navy body,
+  nearly opaque; eight travelling waves whose strength drifts across the sea bend the surface
+  normal (ripples only up close); the sky's reflection takes over toward the horizon (Fresnel)
+  with a soft sun glint. The surface sits 1/8 block (4 of 32 pixels) below the top of its block,
+  like Minecraft's, so shores show a small lip; LOD water matches.
+* All textures are uploaded as one mipmapped texture array (averaged in linear light) and
+  sampled with world-position coordinates, so greedy quads and LOD terrain repeat them once
+  per block. Half-slab sides start the texture at their own top.
 
 ## Greedy meshing (`greedy.rs`)
 

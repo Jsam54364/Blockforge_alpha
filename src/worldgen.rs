@@ -22,7 +22,7 @@ use crate::terrain::{Terrain, TerrainSample};
 pub const SEA_LEVEL: i32 = 0;
 /// Bumped whenever the same seed would generate different terrain: worlds saved by an
 /// older generator are kept apart (their edits would land on different ground).
-pub const WORLDGEN_VERSION: u32 = 2;
+pub const WORLDGEN_VERSION: u32 = 3;
 pub const BEDROCK_Y: i32 = -128;
 /// No caves below this; deep chunks collapse to a single uniform entry.
 const CAVE_FLOOR: i32 = -48;
@@ -103,6 +103,14 @@ fn value_noise_3d(seed: u64, x: f32, y: f32, z: f32) -> f32 {
     lerp(lerp(x00, x10, ty), lerp(x01, x11, ty), tz)
 }
 
+/// The surface in quarter blocks for ground at height `h` with the given neighbouring
+/// heights (see `WorldGen::surface_q`).
+fn surface_from(h: f32, neighbours: [f32; 4]) -> i32 {
+    let t = h.round() as i32;
+    let rising = h >= t as f32 && neighbours.iter().any(|n| n.round() as i32 > t);
+    4 * t + if rising { 2 } else { 0 }
+}
+
 impl WorldGen {
     pub fn new(seed: u64, reg: &BlockRegistry) -> Self {
         let id = |n: &str| reg.id(n).unwrap_or_else(|| panic!("worldgen needs block '{n}'"));
@@ -138,7 +146,18 @@ impl WorldGen {
     /// bump per cell that changes when the cell size changes), so neighbouring detail levels
     /// agree closely. `cell <= 1` is exactly `height_q`.
     pub fn height_q_filtered(&self, x: i32, z: i32, cell: i32) -> i32 {
-        (self.terrain.sample(x as f32, z as f32, cell as f32).height * 4.0).floor() as i32
+        if cell <= 1 {
+            return self.surface_q(x, z);
+        }
+        4 * self.terrain.sample(x as f32, z as f32, cell as f32).height.round() as i32
+    }
+
+    /// The surface at full detail, in quarter blocks: whole blocks (the height rounded), plus
+    /// a half slab only at the foot of a step, where the ground rises toward a higher
+    /// neighbour. Slopes get smoothed; flat ground stays flat.
+    fn surface_q(&self, x: i32, z: i32) -> i32 {
+        let h = |x: i32, z: i32| self.terrain.sample(x as f32, z as f32, 1.0).height;
+        surface_from(h(x, z), [h(x + 1, z), h(x - 1, z), h(x, z + 1), h(x, z - 1)])
     }
 
     /// The (surface, subsurface) blocks of a column whose partial (top) block is at `top`.
@@ -213,7 +232,7 @@ impl WorldGen {
     /// from above) for `cell == 1`, and is band-limited for coarser cells.
     pub fn lod_surface(&self, x: i32, z: i32, cell: i32) -> (i32, u16) {
         let t = self.terrain.sample(x as f32, z as f32, cell as f32);
-        let hq = (t.height * 4.0).floor() as i32;
+        let hq = if cell <= 1 { self.surface_q(x, z) } else { 4 * t.height.round() as i32 };
         let top = hq.div_euclid(4);
         let slab = hq.rem_euclid(4) >= 2;
         // Water fills every block above the terrain up to SEA_LEVEL, and there are no
@@ -238,18 +257,27 @@ impl WorldGen {
     /// The top of the highest full block of the column at `(x, z)` in quarter blocks, at
     /// full detail: the ground under any half-slab or water.
     pub fn ground_q(&self, x: i32, z: i32) -> i32 {
-        4 * self.height_q_filtered(x, z, 1).div_euclid(4)
+        4 * self.terrain.sample(x as f32, z as f32, 1.0).height.round() as i32
     }
 
     pub fn column(&self, cx: i32, cz: i32) -> Column {
         let n = (CHUNK_SIZE * CHUNK_SIZE) as usize;
         let (mut heights, mut surface, mut subsurface) = (Vec::with_capacity(n), Vec::with_capacity(n), Vec::with_capacity(n));
         let (mut min_top, mut max_top) = (i32::MAX, i32::MIN);
+        // The terrain with a one-block border: slabs depend on the neighbouring heights.
+        const W: i32 = CHUNK_SIZE + 2;
+        let samples: Vec<TerrainSample> = (0..W * W)
+            .map(|i| {
+                let (x, z) = (cx * CHUNK_SIZE + i % W - 1, cz * CHUNK_SIZE + i / W - 1);
+                self.terrain.sample(x as f32, z as f32, 1.0)
+            })
+            .collect();
+        let h = |lx: i32, lz: i32| samples[((lz + 1) * W + lx + 1) as usize].height;
         for lz in 0..CHUNK_SIZE {
             for lx in 0..CHUNK_SIZE {
                 let (x, z) = (cx * CHUNK_SIZE + lx, cz * CHUNK_SIZE + lz);
-                let t = self.terrain.sample(x as f32, z as f32, 1.0);
-                let hq = (t.height * 4.0).floor() as i32;
+                let t = samples[((lz + 1) * W + lx + 1) as usize];
+                let hq = surface_from(t.height, [h(lx + 1, lz), h(lx - 1, lz), h(lx, lz + 1), h(lx, lz - 1)]);
                 let top = hq.div_euclid(4);
                 let (surf, sub) = self.ground_blocks(x, z, top, &t, 1.0);
                 min_top = min_top.min(top);
@@ -473,6 +501,29 @@ mod tests {
         let info = g.describe(x.floor() as i32, z.floor() as i32);
         assert!(matches!(info.biome, "grassland" | "temperate forest"), "{info:?}");
         assert!((3.0..40.0).contains(&y) && x.abs() < 6000.0 && z.abs() < 6000.0, "{x},{y},{z}");
+    }
+
+    #[test]
+    fn half_slabs_only_smooth_steps_and_flat_ground_stays_flat() {
+        let (_r, g) = make();
+        let (mut slabs, mut checked) = (0, 0);
+        for (cx, cz) in [(0, 0), (6, -3), (-9, 4), (20, 2)] {
+            let col = g.column(cx, cz);
+            for lz in 1..CHUNK_SIZE as usize - 1 {
+                for lx in 1..CHUNK_SIZE as usize - 1 {
+                    let q = col.height_q_at(lx, lz);
+                    let top = |a: usize, b: usize| col.height_q_at(a, b).div_euclid(4);
+                    let higher = [top(lx + 1, lz), top(lx - 1, lz), top(lx, lz + 1), top(lx, lz - 1)].iter().any(|&t| t > q.div_euclid(4));
+                    checked += 1;
+                    if q.rem_euclid(4) != 0 {
+                        assert_eq!(q.rem_euclid(4), 2);
+                        assert!(higher, "a slab with no higher neighbour at {cx},{cz} {lx},{lz}");
+                        slabs += 1;
+                    }
+                }
+            }
+        }
+        assert!(slabs > 50 && slabs < checked / 3, "{slabs} slabs in {checked} columns");
     }
 
     #[test]
