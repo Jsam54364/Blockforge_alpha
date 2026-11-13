@@ -23,7 +23,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::block::{BlockState, AIR};
-use crate::coords::{BlockPos, ChunkPos, Face, CHUNK_SIZE};
+use crate::chunk::Chunk;
+use crate::coords::{BlockPos, ChunkPos, Face, LocalPos, CHUNK_SIZE};
 use crate::jobs::JobPool;
 use crate::lod::LodManager;
 use crate::mesh::{has_no_faces, mesh_chunk_with, ChunkMesh, Mesher, PaddedChunk};
@@ -86,8 +87,21 @@ pub struct Client {
     /// Chunks whose current geometry is known: meshed (empty or not) at least once since they
     /// arrived. Their mesh may be an older version while an edit is re-meshed.
     resolved: HashSet<ChunkPos>,
+    /// Resolved chunks whose bottom layer is solid all over: nothing below them shows from
+    /// above (see `lod_coverage`).
+    closed_bottom: HashSet<ChunkPos>,
     /// Level-of-detail terrain past the loaded chunks.
     pub lod: LodManager,
+}
+
+/// Whether nothing below `chunk` can be seen from above through it: every cell of its bottom
+/// layer holds an opaque block that fills the bottom of the cell.
+fn bottom_is_closed(reg: &BlockRegistry, chunk: &Chunk) -> bool {
+    let closes = |s: BlockState| reg.get(s).opaque && s.shape().y_range_q().0 == 0;
+    if let Some(s) = chunk.uniform_state() {
+        return closes(s);
+    }
+    (0..CHUNK_SIZE as u8).all(|z| (0..CHUNK_SIZE as u8).all(|x| closes(chunk.get(LocalPos { x, y: 0, z }.index()))))
 }
 
 /// Which chunk columns around the camera show their real surface (meshed and within the
@@ -155,6 +169,7 @@ impl Client {
             mesh_budget: 8,
             mesher: Mesher::Simple,
             resolved: HashSet::new(),
+            closed_bottom: HashSet::new(),
             // One worker: a section is a few hundred microseconds of noise sampling, and
             // chunk meshing near the player matters more.
             lod: LodManager::new(1),
@@ -256,21 +271,29 @@ impl Client {
         for dz in -r..=r {
             for dx in -r..=r {
                 let (cx, cz) = (cam.x + dx, cam.z + dz);
-                // From the top of the streamed window down to the first chunk with blocks:
-                // that one draws the surface, provided everything above it is known too.
+                // From the top of the streamed window down: skip the sky, then every chunk the
+                // ground passes through must be drawn (known, uploaded, within the draw
+                // distance), down to one whose bottom is solid all over. Hilly ground often
+                // dips into the chunk below, which is further away when seen from above.
+                let mut ground = false;
                 for cy in (cam.y - vv..=cam.y + vv).rev() {
                     let p = ChunkPos::new(cx, cy, cz);
                     let Some(chunk) = self.store.get(p) else { break };
                     if !self.resolved.contains(&p) || not_uploaded.contains(&p) {
                         break;
                     }
-                    if chunk.uniform_state() != Some(AIR) {
-                        let o = p.origin();
-                        let h = CHUNK_SIZE as f32 * 0.5;
-                        let c = [o.x as f32 + h - self.camera[0], o.y as f32 + h - self.camera[1], o.z as f32 + h - self.camera[2]];
-                        if c[0] * c[0] + c[1] * c[1] + c[2] * c[2] <= d2_max {
-                            cov.set(cx, cz);
-                        }
+                    if !ground && chunk.uniform_state() == Some(AIR) {
+                        continue;
+                    }
+                    ground = true;
+                    let o = p.origin();
+                    let h = CHUNK_SIZE as f32 * 0.5;
+                    let c = [o.x as f32 + h - self.camera[0], o.y as f32 + h - self.camera[1], o.z as f32 + h - self.camera[2]];
+                    if c[0] * c[0] + c[1] * c[1] + c[2] * c[2] > d2_max {
+                        break;
+                    }
+                    if self.closed_bottom.contains(&p) {
+                        cov.set(cx, cz);
                         break;
                     }
                 }
@@ -336,6 +359,7 @@ impl Client {
                 self.awaiting_neighbors.remove(&pos);
                 self.versions.remove(&pos);
                 self.resolved.remove(&pos);
+                self.closed_bottom.remove(&pos);
             }
             ServerMsg::BlockUpdate { pos, state } => {
                 if self.store.set_block(pos, state).is_some() {
@@ -442,7 +466,13 @@ impl Client {
                 if self.meshes.remove(&p).is_some() {
                     self.mesh_changes.push(p);
                 }
+                // (inline `mark_resolved`: `pool` and `reg` borrow other fields of self)
                 self.resolved.insert(p);
+                if self.store.get(p).map_or(false, |c| bottom_is_closed(reg, c)) {
+                    self.closed_bottom.insert(p);
+                } else {
+                    self.closed_bottom.remove(&p);
+                }
                 self.stats.meshes_skipped += 1;
                 continue;
             }
@@ -455,6 +485,20 @@ impl Client {
             let version = self.versions.get(&p).copied().unwrap_or(0);
             let snapshot = PaddedChunk::capture(&self.store, p);
             pool.submit(MeshJob { pos: p, version, snapshot, mesher: self.mesher }, d.min(u32::MAX as i64) as u32);
+        }
+    }
+
+    /// `pos` now has its current geometry; note whether its bottom is closed.
+    fn mark_resolved(&mut self, pos: ChunkPos) {
+        self.resolved.insert(pos);
+        let closed = match (self.store.get(pos), self.registry.as_ref()) {
+            (Some(chunk), Some(reg)) => bottom_is_closed(reg, chunk),
+            _ => false,
+        };
+        if closed {
+            self.closed_bottom.insert(pos);
+        } else {
+            self.closed_bottom.remove(&pos);
         }
     }
 
@@ -472,7 +516,7 @@ impl Client {
                     self.meshes.insert(r.pos, r.mesh);
                     self.mesh_changes.push(r.pos);
                 }
-                self.resolved.insert(r.pos);
+                self.mark_resolved(r.pos);
                 self.stats.meshes_built += 1;
             } else {
                 // A newer edit superseded this snapshot; its replacement is queued.

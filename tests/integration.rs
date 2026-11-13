@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use blockforge::client::Client;
-use blockforge::coords::{BlockPos, ChunkPos};
+use blockforge::coords::{BlockPos, ChunkPos, CHUNK_SIZE};
 use blockforge::mesh::{mesh_chunk_with, Mesher, PaddedChunk};
 use blockforge::registry::BlockRegistry;
 use blockforge::server::{self, ServerConfig};
@@ -252,6 +252,10 @@ fn save_now_writes_edits_that_a_new_server_loads() {
 fn lod_terrain_streams_in_and_stops_exactly_where_real_chunks_are_drawn() {
     use blockforge::lod::LodSettings;
     let (_h, mut c, _reg) = start(7);
+    // High over hilly ground, looking at it from above: where the ground dips into the chunk
+    // below, that chunk is further away than the one above it.
+    let (_, _, cam) = spawn(7, &_reg);
+    c.set_position([cam[0], cam[1] + 40.0, cam[2]]);
     c.lod.set_settings(LodSettings::new(4096.0, 64.0).with_near_edge(3.5 * 32.0));
     settle(&mut c);
     let start_t = Instant::now();
@@ -290,6 +294,24 @@ fn lod_terrain_streams_in_and_stops_exactly_where_real_chunks_are_drawn() {
             let has_mesh = c.meshes.contains_key(&surface);
             let fresh = mesh_chunk_with(Mesher::Simple, &_reg, &PaddedChunk::capture(&c.store, surface));
             assert_eq!(has_mesh, !fresh.is_empty(), "column {cx},{cz}: surface chunk not drawn");
+            // ...and so is the ground everywhere in it, wherever it dips into lower chunks:
+            // the chunk holding each block column's top block is meshed and within the draw
+            // distance (the renderer leaves out chunks further than that).
+            let top = (cam.y + 4) * CHUNK_SIZE;
+            for lz in (0..CHUNK_SIZE).step_by(3) {
+                for lx in (0..CHUNK_SIZE).step_by(3) {
+                    let (x, z) = (cx * CHUNK_SIZE + lx, cz * CHUNK_SIZE + lz);
+                    let y = (top - 260..top)
+                        .rev()
+                        .find(|&y| c.store.block(BlockPos::new(x, y, z)).map_or(false, |s| !s.is_air()))
+                        .expect("ground in a covered column");
+                    let p = BlockPos::new(x, y, z).chunk();
+                    let o = p.origin();
+                    let d = [o.x as f32 + 16.0 - c.camera[0], o.y as f32 + 16.0 - c.camera[1], o.z as f32 + 16.0 - c.camera[2]];
+                    let near = d[0] * d[0] + d[1] * d[1] + d[2] * d[2] <= draw * draw;
+                    assert!(near && c.meshes.contains_key(&p), "column {cx},{cz}: ground at {x},{y},{z} is not drawn (hole)");
+                }
+            }
         }
     }
     // Not uploaded yet means not covered: the hole would show for a frame otherwise.
