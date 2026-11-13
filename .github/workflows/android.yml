@@ -88,7 +88,8 @@ jobs:
           apk=$(find app/target -name '*.apk' | head -n 1)
           if [ -z "$apk" ]; then echo "No APK produced" >> "$GITHUB_STEP_SUMMARY"; exit 1; fi
           "$bt/zipalign" -f -p 4 "$apk" aligned.apk
-          "$bt/apksigner" sign --alignment-preserved --ks app/debug.keystore --ks-pass pass:android \
+          # Documented order: zipalign first, then apksigner (build-tools 34 keeps the alignment).
+          "$bt/apksigner" sign --ks app/debug.keystore --ks-pass pass:android \
             --out blockforge-debug.apk aligned.apk
           # Fail the build rather than publish an APK the phone will reject.
           if ! "$bt/zipalign" -c -p 4 blockforge-debug.apk; then
