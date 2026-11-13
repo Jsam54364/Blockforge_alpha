@@ -1,6 +1,6 @@
 // Voxel shader. Vertices are the engine's 8-byte packed format (see blockforge::mesh):
 //   x: pos_x(8) | pos_y(8)<<8 | pos_z(8)<<16 | face(3)<<24 | ao(2)<<27   (pos in quarter blocks)
-//   y: texture(16) | sky(4)<<16 | block_light(4)<<20
+//   y: texture(16) | sky(4)<<16 | block_light(4)<<20 | grow(3)<<24 | tex_top(2)<<27
 // The chunk origin comes from a per-instance attribute, so one static index buffer and
 // one draw call per chunk is all the CPU has to do.
 
@@ -17,6 +17,9 @@ struct Globals {
 };
 
 @group(0) @binding(0) var<uniform> g: Globals;
+// Block textures: one layer per texture id, mipmapped, repeating (see gfx::block_textures).
+@group(0) @binding(1) var blocks: texture_2d_array<f32>;
+@group(0) @binding(2) var blocks_sampler: sampler;
 
 struct VsIn {
     @location(0) packed: vec2<u32>,
@@ -25,9 +28,26 @@ struct VsIn {
 
 struct VsOut {
     @builtin(position) clip: vec4<f32>,
+    // Light reaching the surface (multiplies the texture).
     @location(0) color: vec3<f32>,
     @location(1) world: vec3<f32>,
+    @location(2) uv: vec2<f32>,
+    @location(3) @interpolate(flat) layer: u32,
 };
+
+// Texture coordinates for a face, from a position in blocks: one texture per block, upright
+// on the sides (v grows downwards from the top of each block). Positions are relative to a
+// whole-block origin (the chunk or LOD section), so they stay exact far from the world origin.
+fn face_uv(face: u32, p: vec3<f32>) -> vec2<f32> {
+    switch face {
+        case 0u: { return vec2<f32>(-p.z, -p.y); }
+        case 1u: { return vec2<f32>(p.z, -p.y); }
+        case 2u: { return vec2<f32>(p.x, p.z); }
+        case 3u: { return vec2<f32>(p.x, -p.z); }
+        case 4u: { return vec2<f32>(p.x, -p.y); }
+        default: { return vec2<f32>(-p.x, -p.y); }
+    }
+}
 
 fn face_normal(f: u32) -> vec3<f32> {
     var n = array<vec3<f32>, 6>(
@@ -68,12 +88,15 @@ fn vs_main(v: VsIn) -> VsOut {
     let diffuse = max(dot(n, sun), 0.0);
     let light = 0.45 + 0.55 * diffuse;
     let ao_f = 0.55 + 0.15 * f32(ao);
-    let base = g.palette[min(tex, 31u)].rgb;
 
     var o: VsOut;
     o.clip = g.view_proj * vec4<f32>(world, 1.0);
-    o.color = base * light * ao_f * max(sky, 0.25) + base * blk;
+    o.color = vec3<f32>(light * ao_f * max(sky, 0.25) + blk);
     o.world = world;
+    // Side faces: lift the texture so its top row starts at the quad's top (half-slabs).
+    let lift = f32((b >> 27u) & 3u) * 0.25;
+    o.uv = face_uv(face, local + vec3<f32>(0.0, lift, 0.0));
+    o.layer = tex;
     return o;
 }
 
@@ -132,8 +155,10 @@ fn vs_lod(v: VsIn) -> VsOut {
     let sun = normalize(vec3<f32>(0.4, 0.9, 0.3));
     let light = 0.45 + 0.55 * max(dot(n, sun), 0.0);
     o.clip = g.view_proj * vec4<f32>(world, 1.0);
-    o.color = g.palette[min(tex, 31u)].rgb * light;
+    o.color = vec3<f32>(light);
     o.world = world;
+    o.uv = face_uv(face, world - vec3<f32>(v.origin.x, 0.0, v.origin.y));
+    o.layer = tex;
     return o;
 }
 
@@ -141,7 +166,8 @@ fn vs_lod(v: VsIn) -> VsOut {
 fn fs_main(f: VsOut) -> @location(0) vec4<f32> {
     let d = distance(f.world, g.cam_pos.xyz);
     let t = clamp((d - g.fog_params.x) / (g.fog_params.y - g.fog_params.x), 0.0, 1.0) * g.flags.x;
-    let col = mix(f.color, g.fog_color.rgb, t);
+    let albedo = textureSample(blocks, blocks_sampler, f.uv, f.layer).rgb;
+    let col = mix(albedo * f.color, g.fog_color.rgb, t);
     return vec4<f32>(col, g.fog_params.z);
 }
 

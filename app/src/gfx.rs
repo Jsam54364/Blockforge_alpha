@@ -22,6 +22,8 @@ use blockforge::coords::{ChunkPos, CHUNK_SIZE};
 use blockforge::lod::{SectionKey, MASKED_MAX_LEVEL};
 use blockforge::mesh::quad_indices;
 use blockforge::registry::BlockRegistry;
+
+use crate::texgen;
 use wgpu::util::DeviceExt;
 use winit::window::Window;
 
@@ -86,41 +88,76 @@ fn srgb_to_linear(c: f32) -> f32 {
     c.powf(2.2)
 }
 
-fn color_for(name: &str) -> [f32; 3] {
-    match name {
-        "stone" => [0.50, 0.50, 0.52],
-        "dirt" => [0.45, 0.32, 0.20],
-        "grass_top" => [0.35, 0.62, 0.25],
-        "grass_side" => [0.40, 0.50, 0.24],
-        "sand" => [0.85, 0.80, 0.55],
-        "water" => [0.20, 0.38, 0.75],
-        "log_top" => [0.60, 0.48, 0.30],
-        "log_side" => [0.40, 0.30, 0.18],
-        "leaves" => [0.20, 0.45, 0.18],
-        "glowstone" => [1.00, 0.85, 0.45],
-        "bedrock" => [0.18, 0.18, 0.20],
-        _ => {
-            // Unknown texture names still get a stable, distinct colour.
-            let mut h: u32 = 2_166_136_261;
-            for b in name.bytes() {
-                h = (h ^ b as u32).wrapping_mul(16_777_619);
-            }
-            [
-                (h & 255) as f32 / 255.0 * 0.6 + 0.2,
-                ((h >> 8) & 255) as f32 / 255.0 * 0.6 + 0.2,
-                ((h >> 16) & 255) as f32 / 255.0 * 0.6 + 0.2,
-            ]
-        }
-    }
-}
-
+/// Each texture's average colour (linear), indexed by texture id.
 fn build_palette(reg: &BlockRegistry) -> [[f32; 4]; 32] {
     let mut p = [[1.0f32, 0.0, 1.0, 1.0]; 32]; // magenta = missing texture
     for (i, name) in reg.texture_names().iter().enumerate().take(32) {
-        let c = color_for(name);
-        p[i] = [srgb_to_linear(c[0]), srgb_to_linear(c[1]), srgb_to_linear(c[2]), 1.0];
+        if texgen::known(name) {
+            let c = texgen::average_linear(&texgen::generate(name));
+            p[i] = [c[0], c[1], c[2], 1.0];
+        }
     }
     p
+}
+
+/// Mip levels of the block textures: 32, 16, 8, 4, 2, 1 texels.
+const TEXTURE_MIPS: u32 = 6;
+
+/// All block textures as one array texture (layer = texture id), with mipmaps, and the
+/// sampler for it: crisp texels up close, smoothly averaged further away.
+fn block_textures(device: &wgpu::Device, queue: &wgpu::Queue, reg: &BlockRegistry) -> (wgpu::TextureView, wgpu::Sampler) {
+    let names = reg.texture_names();
+    // At least two layers: some GL drivers mistake a one-layer array for a plain 2D texture.
+    let layers = names.len().max(2) as u32;
+    let size = texgen::SIZE as u32;
+    let tex = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("block textures"),
+        size: wgpu::Extent3d { width: size, height: size, depth_or_array_layers: layers },
+        mip_level_count: TEXTURE_MIPS,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    for layer in 0..layers {
+        let name = names.get(layer as usize).map(String::as_str).unwrap_or("");
+        let mut px = texgen::generate(name);
+        let mut s = texgen::SIZE;
+        for mip in 0..TEXTURE_MIPS {
+            queue.write_texture(
+                wgpu::ImageCopyTexture {
+                    texture: &tex,
+                    mip_level: mip,
+                    origin: wgpu::Origin3d { x: 0, y: 0, z: layer },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &px,
+                wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(4 * s as u32), rows_per_image: Some(s as u32) },
+                wgpu::Extent3d { width: s as u32, height: s as u32, depth_or_array_layers: 1 },
+            );
+            if s > 1 {
+                px = texgen::downsample(&px, s);
+                s /= 2;
+            }
+        }
+    }
+    let view = tex.create_view(&wgpu::TextureViewDescriptor {
+        label: Some("block textures"),
+        dimension: Some(wgpu::TextureViewDimension::D2Array),
+        ..Default::default()
+    });
+    let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("block sampler"),
+        address_mode_u: wgpu::AddressMode::Repeat,
+        address_mode_v: wgpu::AddressMode::Repeat,
+        address_mode_w: wgpu::AddressMode::ClampToEdge,
+        mag_filter: wgpu::FilterMode::Nearest,
+        min_filter: wgpu::FilterMode::Linear,
+        mipmap_filter: wgpu::FilterMode::Linear,
+        ..Default::default()
+    });
+    (view, sampler)
 }
 
 fn make_depth(device: &wgpu::Device, w: u32, h: u32) -> wgpu::TextureView {
@@ -243,17 +280,36 @@ impl Gfx {
 
         let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("globals layout"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
                 },
-                count: None,
-            }],
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
         });
+        let (block_view, block_sampler) = block_textures(&device, &queue, reg);
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("pipeline layout"),
             bind_group_layouts: &[&bgl],
@@ -274,7 +330,11 @@ impl Gfx {
             device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some(label),
                 layout: &bgl,
-                entries: &[wgpu::BindGroupEntry { binding: 0, resource: buf.as_entire_binding() }],
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: buf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&block_view) },
+                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&block_sampler) },
+                ],
             })
         };
         let bind_solid = make_bind("bind solid", &globals_solid);
@@ -895,8 +955,11 @@ mod tests {
         let reg = BlockRegistry::builtin();
         assert!(reg.texture_names().len() <= 32);
         let p = build_palette(&reg);
-        for i in 0..reg.texture_names().len() {
-            assert_ne!(p[i], [1.0, 0.0, 1.0, 1.0], "texture {} fell through", reg.texture_names()[i]);
+        for (i, name) in reg.texture_names().iter().enumerate() {
+            if name == "air" {
+                continue; // never drawn
+            }
+            assert_ne!(p[i], [1.0, 0.0, 1.0, 1.0], "texture {name} fell through");
         }
     }
 }

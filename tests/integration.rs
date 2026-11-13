@@ -21,13 +21,28 @@ fn pump_until<F: FnMut(&mut Client) -> bool>(c: &mut Client, timeout: Duration, 
     false
 }
 
+/// Where a player of this seed starts: the ground column (x, z), and a camera 10 blocks above it.
+fn spawn(seed: u64, reg: &BlockRegistry) -> (i32, i32, [f32; 3]) {
+    let [x, y, z] = blockforge::worldgen::WorldGen::new(seed, reg).find_spawn();
+    (x.floor() as i32, z.floor() as i32, [x, y + 10.0, z])
+}
+
+/// The highest solid block of a column, searching the loaded chunks from well above `near_y`.
+fn ground_at(c: &Client, reg: &BlockRegistry, x: i32, z: i32, near_y: f32) -> i32 {
+    let top = near_y as i32 + 40;
+    (top - 120..=top)
+        .rev()
+        .find(|&y| c.store.block(BlockPos::new(x, y, z)).map_or(false, |s| reg.get(s).solid))
+        .expect("ground at the spawn")
+}
+
 fn start(seed: u64) -> (server::ServerHandle, Client, Arc<BlockRegistry>) {
     let reg = Arc::new(BlockRegistry::builtin());
     let cfg = ServerConfig { seed, tick_hz: 50, worker_threads: 2, ..ServerConfig::default() };
     let handle = server::spawn(cfg, reg.clone());
     let mut client = Client::connect(handle.connect(), 2);
     client.set_view_distance(3);
-    client.set_position([0.0, 10.0, 0.0]);
+    client.set_position(spawn(seed, &reg).2);
     (handle, client, reg)
 }
 
@@ -55,11 +70,9 @@ fn streams_generates_and_meshes() {
 fn break_and_place_roundtrip_through_server() {
     let (_h, mut c, reg) = start(7);
     assert!(pump_until(&mut c, Duration::from_secs(60), loaded));
-    let ground = (-64..=95)
-        .rev()
-        .find(|&y| c.store.block(BlockPos::new(0, y, 0)).map_or(false, |s| reg.get(s).solid))
-        .expect("ground at origin");
-    let pos = BlockPos::new(0, ground, 0);
+    let (sx, sz, cam) = spawn(7, &reg);
+    let ground = ground_at(&c, &reg, sx, sz, cam[1]);
+    let pos = BlockPos::new(sx, ground, sz);
     c.break_block(pos);
     assert!(pump_until(&mut c, Duration::from_secs(10), |c| c
         .store
@@ -78,13 +91,11 @@ fn sand_falls_and_lands_on_ground() {
     let (_h, mut c, reg) = start(7);
     assert!(pump_until(&mut c, Duration::from_secs(60), loaded));
     let sand = reg.state("sand").unwrap();
-    let ground = (-64..=95)
-        .rev()
-        .find(|&y| c.store.block(BlockPos::new(0, y, 0)).map_or(false, |s| reg.get(s).solid))
-        .expect("ground at origin");
-    let start_pos = BlockPos::new(0, ground + 8, 0);
+    let (sx, sz, cam) = spawn(7, &reg);
+    let ground = ground_at(&c, &reg, sx, sz, cam[1]);
+    let start_pos = BlockPos::new(sx, ground + 8, sz);
     c.place_block(start_pos, sand);
-    let landed_at = BlockPos::new(0, ground + 1, 0);
+    let landed_at = BlockPos::new(sx, ground + 1, sz);
     assert!(
         pump_until(&mut c, Duration::from_secs(15), |c| c.store.block(landed_at) == Some(sand)),
         "sand never landed"
@@ -208,7 +219,7 @@ fn save_now_writes_edits_that_a_new_server_loads() {
         let handle = server::spawn(cfg.clone(), reg.clone());
         let mut client = Client::connect(handle.connect(), 2);
         client.set_view_distance(3);
-        client.set_position([0.0, 10.0, 0.0]);
+        client.set_position(spawn(7, &reg).2);
         (handle, client)
     };
 
@@ -218,11 +229,9 @@ fn save_now_writes_edits_that_a_new_server_loads() {
     assert!(h.save_now(Duration::from_secs(5)));
     assert!(!path.exists());
 
-    let ground = (-64..=95)
-        .rev()
-        .find(|&y| c.store.block(BlockPos::new(0, y, 0)).map_or(false, |s| reg.get(s).solid))
-        .expect("ground at origin");
-    let pos = BlockPos::new(0, ground, 0);
+    let (sx, sz, cam) = spawn(7, &reg);
+    let ground = ground_at(&c, &reg, sx, sz, cam[1]);
+    let pos = BlockPos::new(sx, ground, sz);
     c.break_block(pos);
     assert!(pump_until(&mut c, Duration::from_secs(10), |c| c.store.block(pos).map_or(false, |s| s.is_air())));
     assert!(h.save_now(Duration::from_secs(5)));

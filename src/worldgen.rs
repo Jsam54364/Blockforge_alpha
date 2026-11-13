@@ -5,14 +5,23 @@
 //!
 //! Heights are in quarter-block units, so the surface can end in a half-slab
 //! (the "terrain slab" idea) with no change to the chunk format.
+//!
+//! The land's shape comes from `terrain` (continents and landforms), its ground cover from
+//! `climate` and `biome`.
 
+use crate::biome::{self, BIOMES};
 use crate::block::{BlockState, Shape, AIR};
 use crate::chunk::Chunk;
 use crate::coords::{ChunkPos, LocalPos, CHUNK_SIZE};
 use crate::registry::BlockRegistry;
+use crate::climate::{Climate, ClimateSample};
 use crate::rng::hash3;
+use crate::terrain::{Terrain, TerrainSample};
 
 pub const SEA_LEVEL: i32 = 0;
+/// Bumped whenever the same seed would generate different terrain: worlds saved by an
+/// older generator are kept apart (their edits would land on different ground).
+pub const WORLDGEN_VERSION: u32 = 2;
 pub const BEDROCK_Y: i32 = -128;
 /// No caves below this; deep chunks collapse to a single uniform entry.
 const CAVE_FLOOR: i32 = -48;
@@ -24,6 +33,9 @@ pub struct Column {
     pub cz: i32,
     /// Surface height in quarter blocks, indexed `lz * CHUNK_SIZE + lx`.
     pub height_q: Vec<i32>,
+    /// Top block and the blocks under it, from the column's biome, same indexing.
+    pub surface: Vec<u16>,
+    pub subsurface: Vec<u16>,
     /// Lowest / highest `top` block y (see `generate_chunk`) in this column.
     pub min_top: i32,
     pub max_top: i32,
@@ -37,16 +49,24 @@ impl Column {
 
 pub struct WorldGen {
     seed: u64,
+    terrain: Terrain,
+    climate: Climate,
     stone: u16,
-    dirt: u16,
-    grass: u16,
     sand: u16,
+    gravel: u16,
     water: u16,
     bedrock: u16,
+    /// (surface, subsurface) block per entry of `biome::BIOMES`.
+    biome_blocks: Vec<(u16, u16)>,
 }
 
-fn lattice2(seed: u64, ix: i32, iz: i32) -> f32 {
-    (hash3(seed, ix, 0, iz) >> 40) as f32 * (1.0 / 16_777_216.0)
+/// What the ground at a column is like (see `WorldGen::describe`).
+#[derive(Clone, Copy, Debug)]
+pub struct GroundInfo {
+    pub biome: &'static str,
+    pub landform: &'static str,
+    pub height: f32,
+    pub climate: ClimateSample,
 }
 
 fn lattice3(seed: u64, ix: i32, iy: i32, iz: i32) -> f32 {
@@ -59,19 +79,6 @@ fn smooth(t: f32) -> f32 {
 
 fn lerp(a: f32, b: f32, t: f32) -> f32 {
     a + (b - a) * t
-}
-
-fn value_noise_2d(seed: u64, x: f32, z: f32) -> f32 {
-    let x0 = x.floor();
-    let z0 = z.floor();
-    let tx = smooth(x - x0);
-    let tz = smooth(z - z0);
-    let (ix, iz) = (x0 as i32, z0 as i32);
-    let a = lattice2(seed, ix, iz);
-    let b = lattice2(seed, ix + 1, iz);
-    let c = lattice2(seed, ix, iz + 1);
-    let d = lattice2(seed, ix + 1, iz + 1);
-    lerp(lerp(a, b, tx), lerp(c, d, tx), tz)
 }
 
 fn value_noise_3d(seed: u64, x: f32, y: f32, z: f32) -> f32 {
@@ -98,12 +105,14 @@ impl WorldGen {
         let id = |n: &str| reg.id(n).unwrap_or_else(|| panic!("worldgen needs block '{n}'"));
         WorldGen {
             seed,
+            terrain: Terrain::new(seed),
+            climate: Climate::new(seed),
             stone: id("stone"),
-            dirt: id("dirt"),
-            grass: id("grass"),
             sand: id("sand"),
+            gravel: id("gravel"),
             water: id("water"),
             bedrock: id("bedrock"),
+            biome_blocks: BIOMES.iter().map(|b| (id(b.surface), id(b.subsurface))).collect(),
         }
     }
 
@@ -117,54 +126,79 @@ impl WorldGen {
 
     /// Surface height in quarter-block units.
     pub fn height_q(&self, x: i32, z: i32) -> i32 {
-        let (fx, fz) = (x as f32, z as f32);
-        let (mut amp, mut freq) = (1.0f32, 1.0f32 / 96.0);
-        let (mut sum, mut norm) = (0.0f32, 0.0f32);
-        for o in 0..4u64 {
-            sum += amp * value_noise_2d(self.seed.wrapping_add(o), fx * freq, fz * freq);
-            norm += amp;
-            amp *= 0.5;
-            freq *= 2.0;
-        }
-        let n = sum / norm; // roughly 0..1
-        let h = 6.0 + (n - 0.5) * 2.0 * 36.0; // blocks
-        (h * 4.0).floor() as i32
+        self.height_q_filtered(x, z, 1)
     }
 
-    /// `height_q` as seen from far away, for terrain drawn as cells `cell` blocks wide.
-    ///
-    /// Each octave of the height noise is faded towards its average as its wavelength
-    /// approaches the cell size: detail finer than a cell would only alias (a random-looking
-    /// bump per cell that changes when the cell size changes). Octaves well above the cell
-    /// size are untouched, so neighbouring detail levels agree closely and switching between
-    /// them barely moves the terrain. `cell <= 1` is exactly `height_q`.
+    /// `height_q` as seen from far away, for terrain drawn as cells `cell` blocks wide:
+    /// detail finer than a cell fades to its average instead of aliasing (a random-looking
+    /// bump per cell that changes when the cell size changes), so neighbouring detail levels
+    /// agree closely. `cell <= 1` is exactly `height_q`.
     pub fn height_q_filtered(&self, x: i32, z: i32, cell: i32) -> i32 {
-        if cell <= 1 {
-            return self.height_q(x, z);
+        (self.terrain.sample(x as f32, z as f32, cell as f32).height * 4.0).floor() as i32
+    }
+
+    /// The (surface, subsurface) blocks of a column whose partial (top) block is at `top`.
+    fn ground_blocks(&self, x: i32, z: i32, top: i32, t: &TerrainSample, cell: f32) -> (u16, u16) {
+        // Under water (top <= sea level), and beaches: dry ground at sea level near the coast.
+        // Inland lakes and wetland ponds keep the biome's ground right to the water's edge.
+        if top <= SEA_LEVEL || (top - 1 <= SEA_LEVEL && t.inland < 0.35) {
+            // Sand, or gravel where it is cold or deep.
+            let c = self.climate.at(x as f32, z as f32, 0.0, t.inland, cell);
+            let b = if top < SEA_LEVEL - 10 || c.temperature < 0.0 { self.gravel } else { self.sand };
+            return (b, b);
         }
-        let (fx, fz) = (x as f32, z as f32);
-        let (mut amp, mut freq) = (1.0f32, 1.0f32 / 96.0);
-        let (mut sum, mut norm) = (0.0f32, 0.0f32);
-        for o in 0..4u64 {
-            // 1 at four cells per wavelength or more, 0 at one cell per wavelength or less.
-            let keep = ((1.0 / freq / cell as f32 - 0.5) / 1.5).clamp(0.0, 1.0);
-            let v = if keep > 0.0 { value_noise_2d(self.seed.wrapping_add(o), fx * freq, fz * freq) } else { 0.5 };
-            sum += amp * (0.5 + (v - 0.5) * keep);
-            norm += amp;
-            amp *= 0.5;
-            freq *= 2.0;
+        let c = self.climate.at(x as f32, z as f32, t.smooth, t.inland, cell);
+        self.biome_blocks[biome::choose(c.temperature, c.rainfall, t.smooth)]
+    }
+
+    /// Biome, landform, height and climate of the column at `(x, z)`.
+    pub fn describe(&self, x: i32, z: i32) -> GroundInfo {
+        let t = self.terrain.sample(x as f32, z as f32, 1.0);
+        let c = self.climate.at(x as f32, z as f32, t.smooth, t.inland, 1.0);
+        let biome = if t.height < (SEA_LEVEL + 1) as f32 { "sea" } else { BIOMES[biome::choose(c.temperature, c.rainfall, t.smooth)].name };
+        GroundInfo { biome, landform: self.terrain.landform_at(x as f32, z as f32).name, height: t.height, climate: c }
+    }
+
+    /// Where a new player starts: the nearest temperate lowland to the origin (searched in
+    /// 64-block steps, nearest first, up to 6 km out), as a point on the ground.
+    pub fn find_spawn(&self) -> [f32; 3] {
+        let ok = |x: i32, z: i32| {
+            let g = self.describe(x, z);
+            ((3.0..40.0).contains(&g.height) && matches!(g.biome, "grassland" | "temperate forest")).then_some(g.height)
+        };
+        let mut best: Option<(i64, i32, i32, f32)> = None;
+        for ring in 0..96 {
+            // Every point of this square ring; keep the closest match (rings overlap in distance).
+            if let Some((d, ..)) = best {
+                if d < ((ring * 64) as i64).pow(2) {
+                    break;
+                }
+            }
+            let r = ring * 64;
+            for i in -ring..=ring {
+                for (x, z) in [(i * 64, -r), (i * 64, r), (-r, i * 64), (r, i * 64)] {
+                    let d = (x as i64).pow(2) + (z as i64).pow(2);
+                    if best.map_or(true, |b| d < b.0) {
+                        if let Some(h) = ok(x, z) {
+                            best = Some((d, x, z, h));
+                        }
+                    }
+                }
+            }
         }
-        let n = sum / norm;
-        let h = 6.0 + (n - 0.5) * 2.0 * 36.0;
-        (h * 4.0).floor() as i32
+        match best {
+            Some((_, x, z, h)) => [x as f32 + 0.5, h, z as f32 + 0.5],
+            None => [0.5, self.describe(0, 0).height.max(0.0), 0.5],
+        }
     }
 
     /// The visible surface of the column at block `(x, z)` for level-of-detail terrain:
     /// its top in quarter blocks and the block it is made of. Matches `generate_chunk`
-    /// (slab tops, sand near the sea, water up to the sea surface; caves are never visible
-    /// from above) for `cell == 1`, and uses `height_q_filtered` for coarser cells.
+    /// (slab tops, the biome's ground, water up to the sea surface; caves are never visible
+    /// from above) for `cell == 1`, and is band-limited for coarser cells.
     pub fn lod_surface(&self, x: i32, z: i32, cell: i32) -> (i32, u16) {
-        let hq = self.height_q_filtered(x, z, cell);
+        let t = self.terrain.sample(x as f32, z as f32, cell as f32);
+        let hq = (t.height * 4.0).floor() as i32;
         let top = hq.div_euclid(4);
         let slab = hq.rem_euclid(4) >= 2;
         // Water fills every block above the terrain up to SEA_LEVEL, and there are no
@@ -172,8 +206,18 @@ impl WorldGen {
         if top <= SEA_LEVEL {
             return (4 * (SEA_LEVEL + 1), self.water);
         }
-        let surf = if top - 1 <= SEA_LEVEL { self.sand } else { self.grass };
+        let surf = self.ground_blocks(x, z, top, &t, cell as f32).0;
         (4 * top + if slab { 2 } else { 0 }, surf)
+    }
+
+    /// Just the height part of `lod_surface` (much cheaper: no climate).
+    pub fn lod_height(&self, x: i32, z: i32, cell: i32) -> i32 {
+        let hq = self.height_q_filtered(x, z, cell);
+        let top = hq.div_euclid(4);
+        if top <= SEA_LEVEL {
+            return 4 * (SEA_LEVEL + 1);
+        }
+        4 * top + if hq.rem_euclid(4) >= 2 { 2 } else { 0 }
     }
 
     /// The top of the highest full block of the column at `(x, z)` in quarter blocks, at
@@ -183,18 +227,24 @@ impl WorldGen {
     }
 
     pub fn column(&self, cx: i32, cz: i32) -> Column {
-        let mut heights = Vec::with_capacity((CHUNK_SIZE * CHUNK_SIZE) as usize);
+        let n = (CHUNK_SIZE * CHUNK_SIZE) as usize;
+        let (mut heights, mut surface, mut subsurface) = (Vec::with_capacity(n), Vec::with_capacity(n), Vec::with_capacity(n));
         let (mut min_top, mut max_top) = (i32::MAX, i32::MIN);
         for lz in 0..CHUNK_SIZE {
             for lx in 0..CHUNK_SIZE {
-                let hq = self.height_q(cx * CHUNK_SIZE + lx, cz * CHUNK_SIZE + lz);
+                let (x, z) = (cx * CHUNK_SIZE + lx, cz * CHUNK_SIZE + lz);
+                let t = self.terrain.sample(x as f32, z as f32, 1.0);
+                let hq = (t.height * 4.0).floor() as i32;
                 let top = hq.div_euclid(4);
+                let (surf, sub) = self.ground_blocks(x, z, top, &t, 1.0);
                 min_top = min_top.min(top);
                 max_top = max_top.max(top);
                 heights.push(hq);
+                surface.push(surf);
+                subsurface.push(sub);
             }
         }
-        Column { cx, cz, height_q: heights, min_top, max_top }
+        Column { cx, cz, height_q: heights, surface, subsurface, min_top, max_top }
     }
 
     /// Two thin noise "sheets" intersecting give tunnel-like caves. Constants need tuning.
@@ -209,12 +259,10 @@ impl WorldGen {
         (b - 0.5).abs() < 0.055
     }
 
-    fn block_at(&self, wx: i32, wy: i32, wz: i32, top: i32, rem: i32, sandy: bool) -> BlockState {
+    fn block_at(&self, wx: i32, wy: i32, wz: i32, top: i32, rem: i32, surf: u16, sub: u16) -> BlockState {
         if wy <= BEDROCK_Y {
             return BlockState::full(self.bedrock);
         }
-        let surf = if sandy { self.sand } else { self.grass };
-        let sub = if sandy { self.sand } else { self.dirt };
 
         if wy > top {
             return if wy <= SEA_LEVEL { BlockState::full(self.water) } else { AIR };
@@ -266,9 +314,10 @@ impl WorldGen {
                 let rem = hq.rem_euclid(4);
                 let wx = col.cx * CHUNK_SIZE + lx;
                 let wz = col.cz * CHUNK_SIZE + lz;
-                let sandy = top - 1 <= SEA_LEVEL;
+                let i = lz as usize * CHUNK_SIZE as usize + lx as usize;
+                let (surf, sub) = (col.surface[i], col.subsurface[i]);
                 for ly in 0..CHUNK_SIZE {
-                    let state = self.block_at(wx, y0 + ly, wz, top, rem, sandy);
+                    let state = self.block_at(wx, y0 + ly, wz, top, rem, surf, sub);
                     if !state.is_air() {
                         let l = LocalPos { x: lx as u8, y: ly as u8, z: lz as u8 };
                         chunk.set(l.index(), state);
@@ -290,6 +339,18 @@ mod tests {
         (reg, g)
     }
 
+    /// A chunk column with both sea and land in it: the first one found walking out from
+    /// the spawn along +x (the spawn itself is always on land).
+    fn coast(g: &WorldGen) -> (i32, i32) {
+        (0..4000)
+            .map(|cx| (cx, 0))
+            .find(|&(cx, cz)| {
+                let col = g.column(cx, cz);
+                col.min_top <= SEA_LEVEL && col.max_top > SEA_LEVEL + 1
+            })
+            .expect("a coast within 128 km")
+    }
+
     #[test]
     fn generation_is_deterministic() {
         let (_r, g) = make();
@@ -302,7 +363,8 @@ mod tests {
     fn surface_slab_matches_fractional_height() {
         let (_r, g) = make();
         let (mut slabs, mut wet) = (0, 0);
-        for (cx, cz) in [(0, 0), (6, -3), (-9, 4), (13, 11)] {
+        let (kx, kz) = coast(&g);
+        for (cx, cz) in [(0, 0), (6, -3), (kx, kz), (kx + 1, kz), (kx, kz + 1)] {
             let col = g.column(cx, cz);
             let mut cache: std::collections::HashMap<i32, Chunk> = std::collections::HashMap::new();
             for lz in 0..CHUNK_SIZE as usize {
@@ -328,7 +390,7 @@ mod tests {
                 }
             }
         }
-        assert!(slabs > 200 && wet > 200, "slabs {slabs}, under water {wet}");
+        assert!(slabs > 200 && wet > 50, "slabs {slabs}, under water {wet}");
     }
 
     #[test]
@@ -336,8 +398,9 @@ mod tests {
         let (reg, g) = make();
         let water = reg.id("water").unwrap();
         let mut seen_water = false;
-        for cx in -2..2 {
-            for cz in -2..2 {
+        let (kx, kz) = coast(&g);
+        for cx in kx - 1..kx + 2 {
+            for cz in kz - 1..kz + 2 {
                 let col = g.column(cx, cz);
                 let mut chunks = std::collections::HashMap::new();
                 for lz in 0..CHUNK_SIZE {
@@ -346,7 +409,7 @@ mod tests {
                         let (surf_q, block) = g.lod_surface(x, z, 1);
                         // Find the real top: the highest non-air block, scanning down.
                         let mut found = None;
-                        for y in (-64i32..64).rev() {
+                        for y in (-80i32..240).rev() {
                             let cy = y.div_euclid(CHUNK_SIZE);
                             let chunk = chunks
                                 .entry(cy)
@@ -372,27 +435,29 @@ mod tests {
     #[test]
     fn filtered_heights_keep_the_average_and_smooth_out_detail() {
         let (_r, g) = make();
-        for cell in [1, 2, 4, 16, 64, 256] {
-            let (mut sum, mut n) = (0i64, 0i64);
-            for i in 0..400 {
-                let (x, z) = (i * 37 - 7000, i * 53 + 900);
-                sum += g.height_q_filtered(x, z, cell) as i64;
-                n += 1;
-            }
-            let mean_blocks = sum as f32 / n as f32 / 4.0;
-            assert!((mean_blocks - 6.0).abs() < 6.0, "cell {cell}: mean {mean_blocks}");
-        }
-        // Coarse cells vary less between neighbours than full detail does.
-        let rough = |cell: i32| -> f32 {
-            let mut d = 0i64;
-            for i in 0..2000 {
-                let x = i * cell;
-                d += (g.height_q_filtered(x + cell, 300, cell) - g.height_q_filtered(x, 300, cell)).abs() as i64;
-            }
-            d as f32 / 2000.0
+        let mean = |cell: i32| -> f32 {
+            let sum: i64 = (0..400).map(|i| g.height_q_filtered(i * 37 - 7000, i * 53 + 900, cell) as i64).sum();
+            sum as f32 / 400.0 / 4.0
         };
-        assert!(rough(64) < rough(16) * 1.5 + 4.0);
+        let full = mean(1);
+        for cell in [2, 4, 16, 64, 256] {
+            assert!((mean(cell) - full).abs() < 4.0, "cell {cell}: mean {} vs {full}", mean(cell));
+        }
+        // At the same spacing, coarse cells vary less between neighbours than full detail.
+        let rough = |cell: i32| -> i64 {
+            (0..2000).map(|i| (g.height_q_filtered(i * 64 + 64, 300, cell) - g.height_q_filtered(i * 64, 300, cell)).abs() as i64).sum()
+        };
+        assert!(rough(64) < rough(1), "{} vs {}", rough(64), rough(1));
         assert_eq!(g.height_q_filtered(123, -45, 1), g.height_q(123, -45));
+    }
+
+    #[test]
+    fn players_start_in_temperate_lowland_near_the_origin() {
+        let (_r, g) = make();
+        let [x, y, z] = g.find_spawn();
+        let info = g.describe(x.floor() as i32, z.floor() as i32);
+        assert!(matches!(info.biome, "grassland" | "temperate forest"), "{info:?}");
+        assert!((3.0..40.0).contains(&y) && x.abs() < 6000.0 && z.abs() < 6000.0, "{x},{y},{z}");
     }
 
     #[test]

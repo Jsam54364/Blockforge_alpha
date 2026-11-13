@@ -20,6 +20,7 @@ use blockforge::raycast::{raycast, RayHit};
 use blockforge::registry::BlockRegistry;
 use blockforge::lod::LodSettings;
 use blockforge::server::{self, ServerConfig, ServerHandle};
+use blockforge::worldgen::{GroundInfo, WorldGen, WORLDGEN_VERSION};
 use winit::event::TouchPhase;
 
 use crate::ui::{Ui, LOD_DISTANCES, LOD_QUALITY};
@@ -31,7 +32,8 @@ const TAP_MAX: Duration = Duration::from_millis(300);
 const DRAG_PIXELS: f32 = 14.0;
 /// Settings and the camera, kept between launches next to the world save.
 const STATE_FILE: &str = "state.txt";
-const START_CAM: CameraView = CameraView { pos: [0.5, 70.0, 0.5], yaw: 0.0, pitch: -0.35 };
+/// The world's seed (one world for now).
+const SEED: u64 = 1337;
 /// A saved camera further out than this is treated as corrupt (f32 loses block precision).
 const MAX_SAVED_COORD: f32 = 1.0e6;
 
@@ -73,6 +75,29 @@ impl CameraView {
     }
 }
 
+/// Biome, climate and landform under the camera, for the stats overlay.
+pub fn place_lines(g: &GroundInfo) -> Vec<String> {
+    vec![
+        format!("{}  {:.0}C  RAIN {:.0}%", g.biome.to_uppercase(), g.climate.temperature, g.climate.rainfall * 100.0),
+        format!("{}  GROUND Y {:.0}", g.landform.to_uppercase(), g.height),
+    ]
+}
+
+/// The world save for the current generator: `world.bfwj` for the first one (so older
+/// saves keep working), `world_v2.bfwj` and so on after.
+fn world_file() -> String {
+    if WORLDGEN_VERSION <= 1 {
+        "world.bfwj".to_string()
+    } else {
+        format!("world_v{WORLDGEN_VERSION}.bfwj")
+    }
+}
+
+/// The generator version a state file was written with (1 before versions were saved).
+fn saved_generator(text: &str) -> u32 {
+    text.lines().find_map(|l| l.trim().strip_prefix("gen=")?.parse().ok()).unwrap_or(1)
+}
+
 struct TouchInfo {
     start: (f32, f32),
     last: (f32, f32),
@@ -88,6 +113,8 @@ pub struct Game {
     /// Where `state.txt` lives (None on platforms without a data directory).
     state_path: Option<PathBuf>,
     registry: Arc<BlockRegistry>,
+    /// The world's generator, for the stats overlay's biome lines.
+    gen: Arc<WorldGen>,
     pub cam: CameraView,
     pub size: (u32, u32),
     pub ui: Ui,
@@ -109,12 +136,19 @@ impl Game {
         let saved = state_path.as_ref().and_then(|p| std::fs::read_to_string(p).ok()).unwrap_or_default();
         let mut ui = Ui::new();
         ui.settings.apply_text(&saved);
-        let cam = CameraView::from_text(&saved).unwrap_or(START_CAM);
+        // A camera saved in a world from an older generator would be over different ground:
+        // start over at the spawn (that world's save is kept, under its own name).
+        let same_world = saved_generator(&saved) == WORLDGEN_VERSION;
+        let gen = Arc::new(WorldGen::new(SEED, &registry));
+        let cam = CameraView::from_text(&saved).filter(|_| same_world).unwrap_or_else(|| {
+            let [x, y, z] = gen.find_spawn();
+            CameraView { pos: [x, y + 24.0, z], yaw: 0.0, pitch: -0.35 }
+        });
 
         let cfg = ServerConfig {
-            seed: 1337,
+            seed: SEED,
             worker_threads: 2,
-            save_path: save_dir.map(|d| d.join("world.bfwj")),
+            save_path: save_dir.map(|d| d.join(world_file())),
             ..ServerConfig::default()
         };
         let server = server::spawn(cfg, registry.clone());
@@ -131,6 +165,7 @@ impl Game {
             server,
             state_path,
             registry,
+            gen,
             cam,
             size: (1, 1),
             ui,
@@ -155,7 +190,7 @@ impl Game {
 
     fn save_state(&self) {
         let Some(path) = &self.state_path else { return };
-        let text = format!("{}{}", self.ui.settings.to_text(), self.cam.to_text());
+        let text = format!("{}{}gen={WORLDGEN_VERSION}\n", self.ui.settings.to_text(), self.cam.to_text());
         let tmp = path.with_extension("tmp");
         if std::fs::write(&tmp, text).is_ok() {
             let _ = std::fs::rename(&tmp, path);
@@ -163,6 +198,11 @@ impl Game {
     }
 
     /// Far edge of the streamed area, in blocks: real chunks are drawn up to here.
+    /// The stats overlay's lines about the ground under the camera.
+    pub fn place(&self) -> Vec<String> {
+        place_lines(&self.gen.describe(self.cam.pos[0].floor() as i32, self.cam.pos[2].floor() as i32))
+    }
+
     pub fn view_blocks(&self) -> f32 {
         (self.ui.settings.render_chunks as f32 + 0.5) * CHUNK_SIZE as f32
     }
@@ -352,6 +392,13 @@ mod tests {
         // It shares a file with the settings, which must not confuse either parser.
         let both = format!("{}{}", crate::ui::Settings::default().to_text(), c.to_text());
         assert_eq!(CameraView::from_text(&both), Some(c));
+    }
+
+    #[test]
+    fn worlds_from_older_generators_are_kept_apart() {
+        assert_eq!(saved_generator("lod_level=5\ncam=1,2,3,0,0\n"), 1);
+        assert_eq!(saved_generator("cam=1,2,3,0,0\ngen=2\n"), 2);
+        assert_eq!(world_file(), format!("world_v{WORLDGEN_VERSION}.bfwj"));
     }
 
     #[test]

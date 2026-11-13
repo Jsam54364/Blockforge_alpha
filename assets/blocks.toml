@@ -61,3 +61,36 @@ hardness = 0.3
 [[block]]
 name = "bedrock"
 hardness = -1
+
+# Ground cover for the biomes (see src/biome.rs). New blocks go at the end so the ids of
+# existing blocks (and saved worlds) stay the same.
+
+[[block]]
+name = "snow"
+hardness = 0.2
+
+[[block]]
+name = "gravel"
+hardness = 0.6
+behavior = "falling"
+
+[[block]]
+name = "dry_grass"
+hardness = 0.6
+top = "dry_grass_top"
+side = "dry_grass_side"
+bottom = "dirt"
+
+[[block]]
+name = "lush_grass"
+hardness = 0.6
+top = "lush_grass_top"
+side = "lush_grass_side"
+bottom = "dirt"
+
+[[block]]
+name = "cold_grass"
+hardness = 0.6
+top = "cold_grass_top"
+side = "cold_grass_side"
+bottom = "dirt"

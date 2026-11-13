@@ -388,11 +388,11 @@ fn border_min(gen: &WorldGen, key: SectionKey, i: i32, j: i32) -> i32 {
     let cell = key.cell();
     let (ox, oz) = key.origin();
     let (bx, bz) = (ox + i * cell, oz + j * cell); // the neighbour cell's corner, this level
-    let mut m = gen.lod_surface(sample_at(bx, cell), sample_at(bz, cell), cell).0;
+    let mut m = gen.lod_height(sample_at(bx, cell), sample_at(bz, cell), cell);
     // One coarser: the 2-cell block containing the neighbour cell.
     let c2 = cell * 2;
     let (cx, cz) = (bx.div_euclid(c2) * c2, bz.div_euclid(c2) * c2);
-    m = m.min(gen.lod_surface(sample_at(cx, c2), sample_at(cz, c2), c2).0);
+    m = m.min(gen.lod_height(sample_at(cx, c2), sample_at(cz, c2), c2));
     // One finer: the two half-cells of the neighbour that touch this section's edge.
     if cell > 1 {
         let h = cell / 2;
@@ -408,7 +408,7 @@ fn border_min(gen: &WorldGen, key: SectionKey, i: i32, j: i32) -> i32 {
                 (_, Some(z)) => (bx + k * h, z),
                 _ => unreachable!(),
             };
-            m = m.min(gen.lod_surface(sample_at(fx, h), sample_at(fz, h), h).0);
+            m = m.min(gen.lod_height(sample_at(fx, h), sample_at(fz, h), h));
         }
     }
     // Neighbours round their heights to their own step, at most half the coarser step down.
@@ -416,6 +416,8 @@ fn border_min(gen: &WorldGen, key: SectionKey, i: i32, j: i32) -> i32 {
 }
 
 fn tex(reg: &BlockRegistry, block: u16, face: Face) -> u32 {
+    // Tall LOD side faces repeat the side texture once per block, grass fringe and all: that
+    // is what the stepped slopes they stand for look like up close.
     reg.def(block).tex[face.index()] as u32 & 255
 }
 

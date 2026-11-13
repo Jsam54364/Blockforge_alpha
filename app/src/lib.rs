@@ -12,6 +12,7 @@ mod glyphs;
 mod gpu_timer;
 mod math;
 mod perf;
+mod texgen;
 mod ui;
 
 use std::path::PathBuf;
@@ -116,6 +117,7 @@ impl ApplicationHandler for App {
                     (self.perf.lod_drawn, self.perf.lod_quads) = g.drawn_lod();
                     self.perf.lod_pending = self.game.client.lod.stats.pending;
                     self.perf.present_mode = g.present_mode_name();
+                    self.perf.place = self.game.place();
                     self.game.ui.build(&self.perf, &mut self.hud);
                     let settings = self.game.ui.settings;
                     let (fog_start, fog_end) = self.game.fog_range();

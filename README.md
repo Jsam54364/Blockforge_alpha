@@ -7,7 +7,7 @@ A mobile-first voxel engine in Rust, in two crates:
   architecture lives here and is tested without a GPU.
 * the **app** (`app/`): the Android front-end. winit + wgpu renderer, touch controls and HUD.
 
-> **Status:** 88 unit + 8 end-to-end tests in the core and 45 in the app (including WGSL
+> **Status:** 99 unit + 8 end-to-end tests in the core and 47 in the app (including WGSL
 > validation) pass. The APK builds on GitHub Actions and has been run and measured on a phone
 > (see the numbers further down).
 
@@ -32,7 +32,8 @@ cargo run --release --bin headless   # stream, mesh, edit; prints stats + an ASC
 |---|---|
 | `coords`, `block`, `chunk` | 32³ **cubic** chunks (`CHUNK_BITS` is one constant), `u16` state = 12-bit id + 4-bit **shape** (slabs/layers), palette-compressed storage (uniform chunks cost ~one entry) |
 | `registry` + `assets/blocks.toml` | **Data-driven blocks**; server sends the file to clients on join so ids always match |
-| `worldgen` | Deterministic terrain, pure function of (seed, chunk). Heights in **quarter-blocks**, so the surface ends in **half-slabs** (not under water: slabs aren't waterlogged yet). Caves, sea level, bedrock, `Column` heightmap layer |
+| `worldgen` | Deterministic terrain, pure function of (seed, chunk). Heights in **quarter-blocks**, so the surface ends in **half-slabs** (not under water: slabs aren't waterlogged yet). Caves, sea level, bedrock, `Column` heightmap + ground layer |
+| `terrain`, `climate`, `biome`, `noise` | Vintage Story-style world: continents, blended **landforms**, mountain chains; temperature from latitude and altitude, rainfall; biomes emerge from the climate (see "World generation") |
 | `world`, `save` | Procedural base + **edit journal** (undo/redo, tiny saves, delta sync). Versioned + CRC32 formats, atomic write-then-rename |
 | `mesh` | Padded 34³ snapshot (no locks), **8-byte packed vertices**, shape-aware face culling, per-vertex AO, 3 render layers, index-free quads |
 | `lod` | **Level-of-detail terrain** to the horizon: quadtree of sections built from the seed, mesher, streaming (see below) |
@@ -43,8 +44,8 @@ cargo run --release --bin headless   # stream, mesh, edit; prints stats + an ASC
 
 ## Known gaps (deliberate, in rough priority order)
 
-1. **Renderer**: `wgpu` + `winit`, pooled vertex buffers, one shared static index buffer
-   (`mesh::quad_indices`), opaque → cutout → translucent, ASTC/ETC2 texture array, fog.
+1. **Renderer**: pooled vertex buffers; leaves are drawn opaque (no alpha-tested cutout pass
+   yet); textures are generated at startup (no compressed ASTC/ETC2 yet).
 2. **Lighting**: vertices carry sky/block light fields but values are placeholders.
 3. **Greedy meshing**: implemented as a hybrid (see below) but not the default mesher yet.
 4. **LOD terrain** shows the world as generated: edits only show in the real chunks (see below).
@@ -224,19 +225,64 @@ phones; no code was copied from it or from other LOD mods.
   frame and checks every frame for holes and doubles.
 * Fog spans the far part of the LOD view, so the horizon fades into the sky.
 
-Measured on the build machine (headless demo; render distance 6, whole view before culling):
-medium quality at 16 km is 320 sections, about 280k quads (8.9 MB), built in ~80 ms on one
-thread; per frame the CPU spends ~30 us on it (coverage + planning). Only the sections in view
-are drawn.
+Measured on the build machine (headless demo; render distance 6, whole view before culling,
+around the origin of seed 1337, which is a mountain peak): medium quality at 16 km is 320
+sections, about 360k quads (11.6 MB), built in ~0.8 s on one thread; per frame the CPU spends
+~30 us on it (coverage + planning). Only the sections in view are drawn.
 
 Limits and next steps:
 
 * Edits don't show in LOD terrain yet. The next step is to keep a column summary of the chunks the
   client has seen (or have the server send one for edited areas) and use it instead of the seed.
-* The current world has no landforms larger than ~100 blocks, so past ~8 km the LOD terrain is a
-  plain. Larger-scale noise (continents, mountain ranges) would make the far view far more
-  interesting, but it changes every existing world, so it is a deliberate separate step.
+* The terrain is now made of many noise layers (continents, landforms, mountain chains, climate),
+  so building LOD sections costs about 10x what it did with the old four-octave terrain: medium
+  quality at 16 km is ~0.8 s on one thread on the build machine (it was ~80 ms). Sections are
+  built nearest first in the background, so this shows as the far view filling in for a few
+  seconds after a start or a long jump, not as stutter. If it is too slow on a phone, the
+  large-scale fields can be sampled on a coarse grid and interpolated per section.
 * Not yet measured on a phone: GPU time with LODs on at each quality.
+
+## World generation (`terrain.rs`, `climate.rs`, `biome.rs`)
+
+Modelled on Vintage Story's: about one block per metre, the shape of the land and its ground
+cover decided separately.
+
+* **Continents**: a large, domain-warped noise decides land and sea (about 60% land; the
+  spawn area is always land). Coasts are low, the land rises inland, the sea floor shelves
+  down to about -50.
+* **Landforms** (`terrain::LANDFORMS`): plains, rolling hills, high hills, plateaus (terraced),
+  mountains, wetlands (ponds). Each ~900-block region picks one by weight; neighbouring
+  regions blend smoothly. **Mountain chains** run for kilometres along the zero lines of
+  another large noise, through whatever landforms they cross; peaks reach about 175 blocks.
+* **Climate** (`climate.rs`): temperature follows latitude along z (`POLE_DISTANCE` = 25,000
+  blocks from equator to pole; the spawn is temperate, -z is towards the equator, +z towards
+  a pole, and the bands repeat beyond) and drops 1.5 C per 10 blocks of altitude, so peaks
+  are snowy. Rainfall has Earth-like belts (wet equator, dry subtropics, wet mid-latitudes)
+  plus its own map, and coasts are wetter.
+* **Biomes emerge from the climate** (`biome::BIOMES`): the first entry whose temperature,
+  rainfall and altitude ranges match wins. Each names its surface and subsurface blocks.
+  **To add a biome, add an entry** (more specific ones first). Today: snowy peaks, glacier,
+  bare rock, scree, tundra, boreal forest, cold steppe, temperate forest, grassland, steppe,
+  desert, savanna, rainforest, plus beaches and sea floors.
+* New players start at the nearest temperate lowland to the origin (`find_spawn`). The stats
+  overlay shows the biome, temperature, rainfall and landform under the camera.
+* `cargo run --release --example worldmap -- <seed> <blocks per pixel> map.ppm` draws a
+  top-down map of the biomes.
+* Worlds are versioned (`WORLDGEN_VERSION`): the app keeps a world from an older generator in
+  its own save file and starts the new one fresh at the spawn.
+
+Next: trees and plants per biome, rivers, rain shadows behind mountains.
+
+## Block textures (`app/src/texgen.rs`)
+
+Every block texture is painted in code at startup: 32 x 32, seamless, in a muted, realistic
+style (stone with fine cracks, dirt with pebbles, grass of four kinds with hanging fringes,
+sand, gravel, snow, water, bark, rings, leaves). They come from tileable noise, Voronoi cells
+and strokes, shaded by a height field so they read with some relief; nothing is copied from a
+texture pack and nothing is loaded from files. They are uploaded as one mipmapped texture array
+(averaged in linear light, so distant terrain doesn't darken) and sampled with world-position
+coordinates, so greedy-merged quads and LOD terrain repeat them once per block. Half-slab sides
+start the texture at their own top, so they show the grass fringe instead of dirt.
 
 ## Greedy meshing (`greedy.rs`)
 

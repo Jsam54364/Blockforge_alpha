@@ -288,6 +288,7 @@ pub fn stats_lines(perf: &Perf) -> Vec<String> {
         v.push(format!("LOD BUILDING {}", perf.lod_pending));
     }
     v.push(format!("PRESENT {}", perf.present_mode));
+    v.extend(perf.place.iter().cloned());
     v
 }
 
@@ -760,6 +761,9 @@ mod tests {
         p.main_thread = Some(0.42);
         p.quads = 123_456;
         p.present_mode = "IMMEDIATE";
+        p.place = crate::game::place_lines(&blockforge::worldgen::WorldGen::new(1, &blockforge::registry::BlockRegistry::builtin()).describe(0, 0));
+        p.place.extend(blockforge::biome::BIOMES.iter().map(|b| b.name.to_uppercase()));
+        p.place.extend(blockforge::terrain::LANDFORMS.iter().map(|l| l.name.to_uppercase()));
         let mut all = stats_lines(&p);
         p.cpu_cores = None;
         p.gpu_ms = None;

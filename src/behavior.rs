@@ -170,10 +170,10 @@ mod tests {
         let reg = Arc::new(BlockRegistry::builtin());
         let g = Arc::new(WorldGen::new(1, &reg));
         let mut w = World::new(reg.clone(), g.clone());
-        let cp = crate::coords::ChunkPos::new(0, 5, 0); // high sky chunk: all air
+        let cp = crate::coords::ChunkPos::new(0, 10, 0); // y 320..351: always sky (peaks stay under ~200)
         let col = w.column(0, 0);
         w.insert_generated(cp, g.generate_chunk(cp, &col));
-        let pos = BlockPos::new(1, 5 * 32 + 10, 1);
+        let pos = BlockPos::new(1, 10 * 32 + 10, 1);
         let sand = reg.state("sand").unwrap();
         let mut rng = Rng::new(0);
         let mut out = Vec::new();

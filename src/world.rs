@@ -274,9 +274,9 @@ mod tests {
     #[test]
     fn edit_undo_redo() {
         let mut w = world();
-        let p = ChunkPos::new(0, 2, 0); // y 64..95: always sky (terrain tops out near y=42)
+        let p = ChunkPos::new(0, 10, 0); // y 320..351: always sky (peaks stay under ~200)
         load(&mut w, p);
-        let pos = BlockPos::new(3, 70, 3);
+        let pos = BlockPos::new(3, 330, 3);
         let stone = w.registry.state("stone").unwrap();
         assert_eq!(w.get_block(pos).unwrap().is_air(), true);
         assert!(w.set_block(pos, stone, true).is_some());

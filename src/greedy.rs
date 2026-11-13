@@ -263,6 +263,7 @@ fn emit_merged(
         }
         verts[i] = vertex;
     }
+    crate::mesh::anchor_texture_top(face, &mut verts);
     // Same diagonal rule as the per-face mesher (rotating the order flips the split).
     let order: [usize; 4] = if ao_of(0) + ao_of(2) >= ao_of(1) + ao_of(3) { [0, 1, 2, 3] } else { [1, 2, 3, 0] };
     for &i in &order {

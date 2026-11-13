@@ -45,6 +45,8 @@ pub struct Perf {
     pub present_mode: &'static str,
     /// Fraction of one core the main (render) thread used over the last second.
     pub main_thread: Option<f32>,
+    /// Where the camera is: biome, climate and landform lines (see `Game::place_lines`).
+    pub place: Vec<String>,
 }
 
 impl Default for Perf {
@@ -81,6 +83,7 @@ impl Perf {
             lod_pending: 0,
             present_mode: "FIFO",
             main_thread: None,
+            place: Vec::new(),
         }
     }
 

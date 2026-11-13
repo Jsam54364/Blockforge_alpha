@@ -145,8 +145,11 @@ fn axis_span(d: i32) -> (i32, i32, i32) {
 /// 8 bytes:
 ///   a: x(8) | y(8)<<8 | z(8)<<16 | face(3)<<24 | ao(2)<<27
 ///   b: texture(16) | sky(4)<<16 | block(4)<<20 | grow_u(1)<<24 | grow_v(1)<<25 | merged(1)<<26
-/// The last three are set on greedy-merged quads: which side of the quad this corner is on
-/// along the face's two tangent axes, and the flag the shader uses to grow merged quads slightly.
+///      | tex_top(2)<<27
+/// grow_u/grow_v/merged are set on greedy-merged quads: which side of the quad this corner is
+/// on along the face's two tangent axes, and the flag the shader uses to grow merged quads
+/// slightly. tex_top (side faces) lifts the texture so its top row starts at the quad's top
+/// when that top is not on a whole block (a half-slab shows the grass fringe, not dirt).
 /// x/y/z are quarter-block units within the chunk (0..=128 fits in 8 bits).
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
@@ -170,6 +173,10 @@ impl PackedVertex {
     pub fn with_grow(mut self, u_max: bool, v_max: bool) -> PackedVertex {
         self.b |= ((u_max as u32) << 24) | ((v_max as u32) << 25) | (1 << 26);
         self
+    }
+
+    pub fn tex_top(self) -> u32 {
+        (self.b >> 27) & 3
     }
 
     pub fn grows(self) -> bool {
@@ -368,10 +375,24 @@ pub(crate) fn emit_quad(
         let pz = oz + c[2] * 4;
         verts[i] = PackedVertex::pack(px as u32, py as u32, pz as u32, face, ao[i], tex, sky, block);
     }
+    anchor_texture_top(face, &mut verts);
     // Split along the brighter diagonal; rotate the order to flip it.
     let order: [usize; 4] = if ao[0] + ao[2] >= ao[1] + ao[3] { [0, 1, 2, 3] } else { [1, 2, 3, 0] };
     for &i in &order {
         layer.vertices.push(verts[i]);
+    }
+}
+
+/// For side faces, sets each corner's `tex_top`: how far (in quarter blocks) the quad's top
+/// is below the next whole block, so the texture's top row lines up with the quad's top.
+pub fn anchor_texture_top(face: Face, verts: &mut [PackedVertex; 4]) {
+    if matches!(face, Face::PosY | Face::NegY) {
+        return;
+    }
+    let top = verts.iter().map(|v| v.y()).max().unwrap_or(0);
+    let lift = (4 - top % 4) % 4;
+    for v in verts.iter_mut() {
+        v.b = (v.b & !(3 << 27)) | (lift << 27);
     }
 }
 
@@ -686,6 +707,26 @@ mod tests {
         assert_eq!(v.face_index(), Face::NegZ as u32);
         assert_eq!((v.ao(), v.tex(), v.sky(), v.block_light()), (2, 513, 15, 9));
         assert_eq!(std::mem::size_of::<PackedVertex>(), 8);
+    }
+
+    #[test]
+    fn side_textures_start_at_the_top_of_half_slabs() {
+        let quad = |y0: u32, y1: u32| {
+            let mut v = [
+                PackedVertex::pack(0, y0, 0, Face::PosX, 3, 1, 15, 0),
+                PackedVertex::pack(0, y1, 0, Face::PosX, 3, 1, 15, 0),
+                PackedVertex::pack(0, y1, 4, Face::PosX, 3, 1, 15, 0),
+                PackedVertex::pack(0, y0, 4, Face::PosX, 3, 1, 15, 0),
+            ];
+            anchor_texture_top(Face::PosX, &mut v);
+            v.map(|v| v.tex_top())
+        };
+        assert_eq!(quad(8, 10), [2; 4]); // a half-slab from y 2 to 2.5: lift by half a block
+        assert_eq!(quad(8, 12), [0; 4]); // a full block
+        assert_eq!(quad(4, 11), [1; 4]);
+        let mut top = [PackedVertex::pack(0, 10, 0, Face::PosY, 3, 1, 15, 0); 4];
+        anchor_texture_top(Face::PosY, &mut top);
+        assert!(top.iter().all(|v| v.tex_top() == 0));
     }
 
     #[test]
