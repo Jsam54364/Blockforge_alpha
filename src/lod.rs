@@ -31,9 +31,16 @@
 //!   level can have there.
 //! * **A section is only replaced once its replacement is ready**, so switching detail as
 //!   the camera moves never opens a hole (`LodManager::render_set`).
+//! * **Edits show far away too.** The server sends the top of every block column an edit
+//!   has touched (`ColumnTop`, from the edit journal, so edits from earlier sessions count),
+//!   and sections use those instead of the seed (`SurfaceEdits`). A cell shows the highest
+//!   edited column inside it when that rises above the terrain (so a tower stays visible
+//!   from kilometres away), or the edited column at its sample point otherwise (a pit shows
+//!   once cells are small enough to land in it). Sections an edit touches are rebuilt,
+//!   and drawn as they were until the new mesh is ready.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::coords::{Face, CHUNK_SIZE};
 use crate::jobs::JobPool;
@@ -52,6 +59,108 @@ pub const MAX_LEVEL: u8 = 9;
 pub const MASKED_MAX_LEVEL: u8 = 2;
 /// A typical surface height, used to measure how far above the terrain the camera is.
 const REFERENCE_Y: f32 = 8.0;
+
+// ---------------------------------------------------------------------------------------
+// Edits
+// ---------------------------------------------------------------------------------------
+
+/// The top of one block column as edits left it: the height of its top surface in quarter
+/// blocks and the block there.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct ColumnTop {
+    pub x: i32,
+    pub z: i32,
+    pub top_q: i32,
+    pub block: u16,
+}
+
+/// Edited column tops, grouped by chunk column.
+#[derive(Clone, Debug, Default)]
+pub struct SurfaceEdits {
+    by_chunk: HashMap<(i32, i32), Vec<ColumnTop>>,
+}
+
+/// What edits put in one LOD cell: the highest edited column in it, and the edited column
+/// at its sample point if there is one.
+#[derive(Copy, Clone, Debug)]
+struct CellEdits {
+    highest: ColumnTop,
+    at_sample: Option<ColumnTop>,
+}
+
+impl SurfaceEdits {
+    pub fn is_empty(&self) -> bool {
+        self.by_chunk.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.by_chunk.values().map(|v| v.len()).sum()
+    }
+
+    pub fn get(&self, x: i32, z: i32) -> Option<ColumnTop> {
+        let v = self.by_chunk.get(&(x.div_euclid(CHUNK_SIZE), z.div_euclid(CHUNK_SIZE)))?;
+        v.iter().find(|t| t.x == x && t.z == z).copied()
+    }
+
+    /// Records `t`, replacing what was known of its column. Returns whether anything changed.
+    pub fn set(&mut self, t: ColumnTop) -> bool {
+        let v = self.by_chunk.entry((t.x.div_euclid(CHUNK_SIZE), t.z.div_euclid(CHUNK_SIZE))).or_default();
+        match v.iter_mut().find(|o| o.x == t.x && o.z == t.z) {
+            Some(o) if *o == t => false,
+            Some(o) => {
+                *o = t;
+                true
+            }
+            None => {
+                v.push(t);
+                true
+            }
+        }
+    }
+
+    /// The edits in each cell of `key`, its one-cell border included, by cell `(i, j)`.
+    fn cells(&self, key: SectionKey) -> HashMap<(i32, i32), CellEdits> {
+        let mut out: HashMap<(i32, i32), CellEdits> = HashMap::new();
+        if self.by_chunk.is_empty() {
+            return out;
+        }
+        let cell = key.cell();
+        let (ox, oz) = key.origin();
+        let (x0, z0) = (ox - cell, oz - cell);
+        let (x1, z1) = (ox + key.width() + cell, oz + key.width() + cell);
+        let (c0x, c0z, c1x, c1z) = (x0.div_euclid(CHUNK_SIZE), z0.div_euclid(CHUNK_SIZE), (x1 - 1).div_euclid(CHUNK_SIZE), (z1 - 1).div_euclid(CHUNK_SIZE));
+        let mut add = |t: &ColumnTop| {
+            if t.x < x0 || t.x >= x1 || t.z < z0 || t.z >= z1 {
+                return;
+            }
+            let (i, j) = ((t.x - ox).div_euclid(cell), (t.z - oz).div_euclid(cell));
+            let at = sample_at(ox + i * cell, cell) == t.x && sample_at(oz + j * cell, cell) == t.z;
+            let e = out.entry((i, j)).or_insert(CellEdits { highest: *t, at_sample: None });
+            if t.top_q > e.highest.top_q {
+                e.highest = *t;
+            }
+            if at {
+                e.at_sample = Some(*t);
+            }
+        };
+        // Whichever is fewer: the section's chunk columns, or the edited ones.
+        let span = (c1x - c0x + 1) as usize * (c1z - c0z + 1) as usize;
+        if span <= self.by_chunk.len() {
+            for cx in c0x..=c1x {
+                for cz in c0z..=c1z {
+                    self.by_chunk.get(&(cx, cz)).into_iter().flatten().for_each(&mut add);
+                }
+            }
+        } else {
+            for (&(cx, cz), v) in &self.by_chunk {
+                if (c0x..=c1x).contains(&cx) && (c0z..=c1z).contains(&cz) {
+                    v.iter().for_each(&mut add);
+                }
+            }
+        }
+        out
+    }
+}
 
 // ---------------------------------------------------------------------------------------
 // Positions
@@ -366,9 +475,21 @@ fn quantize(surf_q: i32, block: u16, water: u16, cell: i32) -> i32 {
 
 /// The surface of cell `(i, j)` of a section as it is drawn (quantized), in quarter blocks.
 pub fn cell_surface(gen: &WorldGen, key: SectionKey, i: i32, j: i32) -> (i32, u16) {
+    cell_surface_edited(gen, key, i, j, None)
+}
+
+/// `cell_surface`, with the edits in the cell (see `SurfaceEdits`).
+fn cell_surface_edited(gen: &WorldGen, key: SectionKey, i: i32, j: i32, edits: Option<&CellEdits>) -> (i32, u16) {
     let cell = key.cell();
     let (ox, oz) = key.origin();
-    let (s, b) = gen.lod_surface(sample_at(ox + i * cell, cell), sample_at(oz + j * cell, cell), cell);
+    let (mut s, mut b) = gen.lod_surface(sample_at(ox + i * cell, cell), sample_at(oz + j * cell, cell), cell);
+    if let Some(e) = edits {
+        if e.highest.top_q > s {
+            (s, b) = (e.highest.top_q, e.highest.block);
+        } else if let Some(t) = e.at_sample {
+            (s, b) = (t.top_q, t.block);
+        }
+    }
     (quantize(s, b, gen.water_id(), cell), b)
 }
 
@@ -462,6 +583,12 @@ impl Emit {
 
 /// Builds the mesh of one section from the world seed.
 pub fn build_section(gen: &WorldGen, reg: &BlockRegistry, key: SectionKey) -> LodMesh {
+    build_section_edited(gen, reg, &SurfaceEdits::default(), key)
+}
+
+/// `build_section` over the terrain as edits left it.
+pub fn build_section_edited(gen: &WorldGen, reg: &BlockRegistry, edits: &SurfaceEdits, key: SectionKey) -> LodMesh {
+    let edited = edits.cells(key);
     let mut grid = Grid { surf: vec![0; (GRID * GRID) as usize], block: vec![0; (GRID * GRID) as usize] };
     for j in -1..=CELLS {
         for i in -1..=CELLS {
@@ -469,7 +596,7 @@ pub fn build_section(gen: &WorldGen, reg: &BlockRegistry, key: SectionKey) -> Lo
             if corner {
                 continue; // never a neighbour of a face
             }
-            let (s, b) = cell_surface(gen, key, i, j);
+            let (s, b) = cell_surface_edited(gen, key, i, j, edited.get(&(i, j)));
             let k = Grid::idx(i, j);
             grid.surf[k] = s;
             grid.block[k] = b;
@@ -478,7 +605,12 @@ pub fn build_section(gen: &WorldGen, reg: &BlockRegistry, key: SectionKey) -> Lo
     // Neighbour heights for border sides: the lowest any neighbouring level can show.
     for t in 0..CELLS {
         for (i, j) in [(-1, t), (CELLS, t), (t, -1), (t, CELLS)] {
-            grid.surf[Grid::idx(i, j)] = border_min(gen, key, i, j);
+            let mut m = border_min(gen, key, i, j);
+            if let Some(e) = edited.get(&(i, j)) {
+                // An edit may have lowered the neighbour (a pit at the border).
+                m = m.min(cell_surface_edited(gen, key, i, j, Some(e)).0 - height_step(key.cell() * 2) / 2 - 4);
+            }
+            grid.surf[Grid::idx(i, j)] = m;
         }
     }
 
@@ -636,6 +768,12 @@ pub struct LodManager {
     planned_at: Option<[f32; 3]>,
     camera: [f32; 3],
     dirty: bool,
+    /// Edited column tops, shared with the workers. Replaced, never changed in place, so a
+    /// worker only holds the lock long enough to take a reference.
+    edits: Arc<Mutex<Arc<SurfaceEdits>>>,
+    /// Built (or building) sections that edits have changed since: built again, and drawn
+    /// as they were until then.
+    redo: HashSet<SectionKey>,
     pub stats: LodStats,
 }
 
@@ -654,14 +792,50 @@ impl LodManager {
             planned_at: None,
             camera: [0.0; 3],
             dirty: true,
+            edits: Arc::new(Mutex::new(Arc::new(SurfaceEdits::default()))),
+            redo: HashSet::new(),
             stats: LodStats::default(),
         }
     }
 
     /// Starts the workers once the world (seed and blocks) is known.
     pub fn start(&mut self, gen: Arc<WorldGen>, reg: Arc<BlockRegistry>) {
-        self.pool = Some(JobPool::new(self.workers, move |key: SectionKey| build_section(&gen, &reg, key)));
+        let edits = self.edits.clone();
+        self.pool = Some(JobPool::new(self.workers, move |key: SectionKey| {
+            let e = edits.lock().map(|e| e.clone()).unwrap_or_default();
+            build_section_edited(&gen, &reg, &e, key)
+        }));
         self.clear();
+    }
+
+    /// The edited column tops so far.
+    pub fn edits(&self) -> Arc<SurfaceEdits> {
+        self.edits.lock().map(|e| e.clone()).unwrap_or_default()
+    }
+
+    /// Takes in edited column tops (`ServerMsg::Surface`); the sections they change are
+    /// built again.
+    pub fn set_surface(&mut self, tops: &[ColumnTop]) {
+        let mut next = (*self.edits()).clone();
+        let changed: Vec<ColumnTop> = tops.iter().copied().filter(|&t| next.set(t)).collect();
+        if changed.is_empty() {
+            return;
+        }
+        if let Ok(mut e) = self.edits.lock() {
+            *e = Arc::new(next);
+        }
+        for t in changed {
+            for level in 0..=MAX_LEVEL {
+                // The section holding the column, and those holding it in their border.
+                let c = 1 << level;
+                for (dx, dz) in [(0, 0), (-c, 0), (c, 0), (0, -c), (0, c)] {
+                    let k = SectionKey::containing(level, t.x + dx, t.z + dz);
+                    if self.built.contains_key(&k) || self.pending.contains(&k) {
+                        self.redo.insert(k);
+                    }
+                }
+            }
+        }
     }
 
     pub fn settings(&self) -> LodSettings {
@@ -685,6 +859,7 @@ impl LodManager {
     fn clear(&mut self) {
         self.evicted.extend(self.built.keys().copied());
         self.built.clear();
+        self.redo.clear();
         self.outbox.clear();
         self.wanted.clear();
         self.render.clear();
@@ -716,7 +891,9 @@ impl LodManager {
             if !self.settings.enabled() {
                 continue;
             }
-            self.built.insert(key, SectionInfo { quads: mesh.quads() as u32, min_y: mesh.min_y, max_y: mesh.max_y, uploaded: false });
+            // A rebuild keeps drawing the old mesh until the renderer has the new one.
+            let uploaded = self.built.get(&key).is_some_and(|i| i.uploaded);
+            self.built.insert(key, SectionInfo { quads: mesh.quads() as u32, min_y: mesh.min_y, max_y: mesh.max_y, uploaded });
             self.outbox.retain(|m| m.key != key);
             self.outbox.push(mesh);
             self.stats.built += 1;
@@ -729,12 +906,13 @@ impl LodManager {
             let mut missing: Vec<(f32, SectionKey)> = self
                 .wanted
                 .iter()
-                .filter(|k| !self.built.contains_key(k) && !self.pending.contains(k))
+                .filter(|k| (!self.built.contains_key(k) || self.redo.contains(k)) && !self.pending.contains(k))
                 .map(|&k| (k.distance_to(camera[0], camera[2]), k))
                 .collect();
             missing.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
             for (d, k) in missing.into_iter().take(max_in_flight - pool.in_flight()) {
                 self.pending.insert(k);
+                self.redo.remove(&k);
                 pool.submit(k, d as u32);
             }
         }
@@ -795,6 +973,7 @@ impl LodManager {
         let drop: Vec<SectionKey> = self.built.keys().filter(|k| !keep.contains(k)).copied().collect();
         for k in drop {
             self.built.remove(&k);
+            self.redo.remove(&k);
             self.outbox.retain(|m| m.key != k);
             self.evicted.push(k);
         }
@@ -847,7 +1026,7 @@ impl LodManager {
 
     /// Nothing queued or running, everything wanted is built.
     pub fn is_idle(&self) -> bool {
-        self.pending.is_empty() && self.wanted.iter().all(|k| self.built.contains_key(k))
+        self.pending.is_empty() && self.wanted.iter().all(|k| self.built.contains_key(k) && !self.redo.contains(k))
     }
 }
 
@@ -1012,6 +1191,87 @@ mod tests {
         let far = LodSettings { radius: 32768.0, ..s }.select([0.0, 20.0, 0.0]).len();
         // 32x the distance (1024x the area) costs only a few more rings of sections.
         assert!(far < near * 5, "{near} -> {far}");
+    }
+
+    #[test]
+    fn edits_show_in_lod_sections_far_and_near() {
+        let (reg, g) = world();
+        let stone = reg.id("stone").unwrap();
+        // A 40-block tower somewhere in a 8-block-cell section, and a deep pit in a 1-block one.
+        let key = SectionKey::new(3, 2, -1);
+        let (ox, oz) = key.origin();
+        let (tx, tz) = (ox + 37, oz + 101);
+        let base = g.lod_surface(tx, tz, 1).0;
+        let mut edits = SurfaceEdits::default();
+        assert!(edits.set(ColumnTop { x: tx, z: tz, top_q: base + 160, block: stone }));
+        assert!(!edits.set(ColumnTop { x: tx, z: tz, top_q: base + 160, block: stone }), "no change");
+        // The height of the top face over cell (i, j).
+        let top_at = |m: &LodMesh, i: u32, j: u32| -> i32 {
+            m.vertices
+                .chunks(4)
+                .filter(|q| q[0].face() == Face::PosY as u32)
+                .find(|q| {
+                    let (x0, x1) = (q.iter().map(|v| v.x()).min().unwrap(), q.iter().map(|v| v.x()).max().unwrap());
+                    let (z0, z1) = (q.iter().map(|v| v.z()).min().unwrap(), q.iter().map(|v| v.z()).max().unwrap());
+                    (x0..x1).contains(&i) && (z0..z1).contains(&j)
+                })
+                .map(|q| q[0].y_q())
+                .expect("a top face over the cell")
+        };
+        let (i, j) = (((tx - ox) / key.cell()) as u32, ((tz - oz) / key.cell()) as u32);
+        let plain = build_section(&g, &reg, key);
+        let edited = build_section_edited(&g, &reg, &edits, key);
+        assert!(top_at(&edited, i, j) >= base + 160 - 16, "{} vs {}", top_at(&edited, i, j), base + 160);
+        assert!(top_at(&plain, i, j) < base + 100);
+        check_winding(&edited);
+
+        let near = SectionKey::containing(0, tx + 40, tz);
+        let (px, pz) = (tx + 40, tz);
+        let ground = g.lod_surface(px, pz, 1).0;
+        edits.set(ColumnTop { x: px, z: pz, top_q: ground - 40, block: stone });
+        let m = build_section_edited(&g, &reg, &edits, near);
+        let (no, _) = near.origin();
+        let (pi, pj) = ((px - no) as u32, (pz - near.origin().1) as u32);
+        assert_eq!(top_at(&m, pi, pj), ground - 40);
+        assert_eq!(top_at(&build_section(&g, &reg, near), pi, pj), ground);
+    }
+
+    #[test]
+    fn edited_sections_are_built_again_and_drawn_meanwhile() {
+        let (reg, g) = world();
+        let mut m = LodManager::new(2);
+        m.start(Arc::new(g), Arc::new(reg));
+        m.set_settings(medium(2000.0));
+        let cam = [0.0, 40.0, 0.0];
+        let settle = |m: &mut LodManager| {
+            for _ in 0..4000 {
+                m.update(cam);
+                m.take_built(usize::MAX);
+                if m.is_idle() {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            panic!("never settled");
+        };
+        settle(&mut m);
+        m.update(cam);
+        let before = m.stats.built;
+        let drawn = m.render_set().to_vec();
+        let at = |k: SectionKey| (k.origin().0 + 5, k.origin().1 + 5);
+        let (x, z) = at(*drawn.iter().find(|k| k.level == 2).expect("a level-2 section"));
+        m.set_surface(&[ColumnTop { x, z, top_q: 4 * 150, block: 1 }]);
+        assert_eq!(m.edits().get(x, z).map(|t| t.top_q), Some(600));
+        assert!(!m.is_idle(), "sections to rebuild");
+        // Nothing stops being drawn while they are rebuilt.
+        m.update(cam);
+        assert_eq!(m.render_set().len(), drawn.len());
+        settle(&mut m);
+        m.update(cam);
+        assert!(m.stats.built > before, "rebuilt");
+        assert_eq!(m.render_set().len(), drawn.len());
+        let k = SectionKey::containing(2, x, z);
+        assert!(m.info(k).unwrap().max_y >= 149.0);
     }
 
     fn check_winding(m: &LodMesh) {

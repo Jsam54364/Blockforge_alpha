@@ -234,6 +234,10 @@ fn save_now_writes_edits_that_a_new_server_loads() {
     let pos = BlockPos::new(sx, ground, sz);
     c.break_block(pos);
     assert!(pump_until(&mut c, Duration::from_secs(10), |c| c.store.block(pos).map_or(false, |s| s.is_air())));
+    // LOD terrain hears about it too: the column's top is now lower.
+    assert!(pump_until(&mut c, Duration::from_secs(10), |c| c.lod.edits().get(sx, sz).is_some()));
+    let top = c.lod.edits().get(sx, sz).unwrap();
+    assert!(top.top_q <= 4 * ground, "{top:?} vs ground {ground}");
     assert!(h.save_now(Duration::from_secs(5)));
     assert!(path.exists(), "save_now should have written the world");
     // Simulate the OS killing the app: the file on disk is all that survives.
@@ -245,6 +249,8 @@ fn save_now_writes_edits_that_a_new_server_loads() {
     let (_h2, mut c2) = open(&cfg);
     settle(&mut c2);
     assert!(c2.store.block(pos).map_or(false, |s| s.is_air()), "the broken block came back");
+    // A new session hears of edits from earlier ones, loaded or not.
+    assert_eq!(c2.lod.edits().get(sx, sz), Some(top));
     let _ = std::fs::remove_dir_all(&dir);
 }
 

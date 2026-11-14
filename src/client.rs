@@ -422,6 +422,7 @@ impl Client {
                     self.links_gen += 1;
                 }
             }
+            ServerMsg::Surface { tops } => self.lod.set_surface(&tops),
             ServerMsg::BlockUpdate { pos, state } => {
                 if self.store.set_block(pos, state).is_some() {
                     self.stats.block_updates += 1;

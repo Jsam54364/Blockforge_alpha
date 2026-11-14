@@ -360,6 +360,16 @@ impl WorldGen {
         BlockState::full(rock)
     }
 
+    /// The generated block at `(wx, wy, wz)`, which must lie in `col` (what `generate_chunk`
+    /// puts there).
+    pub fn seed_block(&self, col: &Column, wx: i32, wy: i32, wz: i32) -> BlockState {
+        let (lx, lz) = (wx - col.cx * CHUNK_SIZE, wz - col.cz * CHUNK_SIZE);
+        debug_assert!((0..CHUNK_SIZE).contains(&lx) && (0..CHUNK_SIZE).contains(&lz));
+        let hq = col.height_q_at(lx as usize, lz as usize);
+        let i = lz as usize * CHUNK_SIZE as usize + lx as usize;
+        self.block_at(wx, wy, wz, hq.div_euclid(4), hq.rem_euclid(4), col.surface[i], col.subsurface[i], col.rock[i])
+    }
+
     pub fn generate_chunk(&self, pos: ChunkPos, col: &Column) -> Chunk {
         let y0 = pos.y * CHUNK_SIZE;
         let y1 = y0 + CHUNK_SIZE - 1;

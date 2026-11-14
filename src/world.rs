@@ -8,9 +8,10 @@ use std::sync::Arc;
 
 use crate::block::BlockState;
 use crate::chunk::Chunk;
-use crate::coords::{BlockPos, ChunkPos};
+use crate::coords::{BlockPos, ChunkPos, LocalPos, CHUNK_SIZE};
+use crate::lod::ColumnTop;
 use crate::registry::BlockRegistry;
-use crate::worldgen::{Column, WorldGen};
+use crate::worldgen::{Column, WorldGen, BEDROCK_Y, SEA_LEVEL};
 
 const HISTORY_LIMIT: usize = 4096;
 
@@ -112,6 +113,45 @@ impl EditJournal {
 
     pub fn len(&self) -> usize {
         self.edits.values().map(|m| m.len()).sum()
+    }
+
+    /// The state recorded at `pos`, if it was edited.
+    pub fn get(&self, pos: BlockPos) -> Option<BlockState> {
+        self.edits.get(&pos.chunk()).and_then(|m| m.get(&(pos.local().index() as u16))).copied()
+    }
+
+    /// Every block column `(x, z)` with an edit somewhere in it, and its highest edited y.
+    pub fn edited_columns(&self) -> HashMap<(i32, i32), i32> {
+        let mut out: HashMap<(i32, i32), i32> = HashMap::new();
+        for (cp, m) in &self.edits {
+            for &i in m.keys() {
+                let l = LocalPos::from_index(i as usize);
+                let y = cp.y * CHUNK_SIZE + l.y as i32;
+                let e = out.entry((cp.x * CHUNK_SIZE + l.x as i32, cp.z * CHUNK_SIZE + l.z as i32)).or_insert(y);
+                *e = (*e).max(y);
+            }
+        }
+        out
+    }
+
+    /// The highest edited y in block column `(x, z)`.
+    pub fn top_edit_y(&self, x: i32, z: i32) -> Option<i32> {
+        let (cx, cz) = (x.div_euclid(CHUNK_SIZE), z.div_euclid(CHUNK_SIZE));
+        let (lx, lz) = (x.rem_euclid(CHUNK_SIZE) as u8, z.rem_euclid(CHUNK_SIZE) as u8);
+        let mut top = None;
+        for (cp, m) in &self.edits {
+            if cp.x != cx || cp.z != cz {
+                continue;
+            }
+            for &i in m.keys() {
+                let l = LocalPos::from_index(i as usize);
+                if l.x == lx && l.z == lz {
+                    let y = cp.y * CHUNK_SIZE + l.y as i32;
+                    top = Some(top.map_or(y, |t: i32| t.max(y)));
+                }
+            }
+        }
+        top
     }
 
     pub fn is_empty(&self) -> bool {
@@ -233,6 +273,40 @@ impl World {
         Some(edit)
     }
 
+    /// The top of block column `(x, z)` as it is now (generated terrain plus edits, whether
+    /// or not its chunks are loaded): what LOD terrain should show there.
+    pub fn column_top(&mut self, x: i32, z: i32) -> ColumnTop {
+        let e = self.journal.top_edit_y(x, z);
+        self.column_top_below(x, z, e)
+    }
+
+    /// The top of every block column with edits (what a client joining needs).
+    pub fn edited_column_tops(&mut self) -> Vec<ColumnTop> {
+        let mut cols: Vec<((i32, i32), i32)> = self.journal.edited_columns().into_iter().collect();
+        cols.sort_unstable();
+        cols.into_iter().map(|((x, z), e)| self.column_top_below(x, z, Some(e))).collect()
+    }
+
+    /// `column_top`, given the highest edited y in the column.
+    fn column_top_below(&mut self, x: i32, z: i32, top_edit: Option<i32>) -> ColumnTop {
+        let col = self.column(x.div_euclid(CHUNK_SIZE), z.div_euclid(CHUNK_SIZE));
+        let hq = col.height_q_at(x.rem_euclid(CHUNK_SIZE) as usize, z.rem_euclid(CHUNK_SIZE) as usize);
+        // Nothing generated is above the terrain's top block or the sea; edits may be.
+        let mut y = (hq.div_euclid(4) + 1).max(SEA_LEVEL);
+        if let Some(e) = top_edit {
+            y = y.max(e);
+        }
+        while y > BEDROCK_Y {
+            let pos = BlockPos::new(x, y, z);
+            let s = self.journal.get(pos).unwrap_or_else(|| self.generator.seed_block(&col, x, y, z));
+            if !s.is_air() {
+                return ColumnTop { x, z, top_q: 4 * y + s.shape().y_range_q().1, block: s.id() };
+            }
+            y -= 1;
+        }
+        ColumnTop { x, z, top_q: 4 * (BEDROCK_Y + 1), block: self.generator.seed_block(&col, x, BEDROCK_Y, z).id() }
+    }
+
     /// Undo the most recent player edit. Returns the edit actually applied.
     pub fn undo(&mut self) -> Option<Edit> {
         while let Some(e) = self.undo.pop_back() {
@@ -287,6 +361,54 @@ mod tests {
         assert!(w.get_block(pos).unwrap().is_air());
         w.redo().unwrap();
         assert_eq!(w.get_block(pos), Some(stone));
+    }
+
+    #[test]
+    fn column_tops_follow_edits_whether_or_not_chunks_are_loaded() {
+        let mut w = world();
+        let stone = w.registry.state("stone").unwrap();
+        let (x, z) = (7, 9);
+        // The real top of the column, read from generated chunks.
+        let real_top = |w: &mut World| -> (i32, u16) {
+            for y in (-128..400).rev() {
+                let p = BlockPos::new(x, y, z);
+                if !w.has_chunk(p.chunk()) {
+                    load(w, p.chunk());
+                }
+                let s = w.get_block(p).unwrap();
+                if !s.is_air() {
+                    return (4 * y + s.shape().y_range_q().1, s.id());
+                }
+            }
+            unreachable!()
+        };
+        let t = w.column_top(x, z);
+        assert_eq!((t.top_q, t.block), real_top(&mut w), "untouched");
+        // A pillar on top, then a pit dug into the ground beside it.
+        let (top_q, _) = real_top(&mut w);
+        let ground_y = (top_q - 1).div_euclid(4);
+        for dy in 1..=6 {
+            w.set_block(BlockPos::new(x, ground_y + dy, z), stone, true);
+        }
+        let t = w.column_top(x, z);
+        assert_eq!((t.top_q, t.block), (4 * (ground_y + 7), stone.id()));
+        assert_eq!((t.top_q, t.block), real_top(&mut w));
+        for dy in 0..3 {
+            w.set_block(BlockPos::new(x + 1, ground_y - dy, z), crate::block::AIR, true);
+        }
+        let pit = w.column_top(x + 1, z);
+        // Unloaded now: the journal still knows.
+        let positions = w.loaded_positions();
+        for p in positions {
+            w.unload(p);
+        }
+        assert_eq!(w.column_top(x + 1, z), pit);
+        assert!(pit.top_q <= 4 * (ground_y - 2), "{pit:?} vs ground {ground_y}");
+        let cols = w.journal().edited_columns();
+        assert_eq!(cols.get(&(x, z)), Some(&(ground_y + 6)));
+        assert!(cols.get(&(x + 1, z)).is_some_and(|&y| y <= ground_y), "(the neighbour's ground may be lower)");
+        assert_eq!(cols.len(), 2);
+        assert_eq!(w.edited_column_tops(), vec![w.column_top(x, z), pit]);
     }
 
     #[test]

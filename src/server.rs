@@ -284,6 +284,10 @@ impl Server {
                     blocks_toml: self.world.registry.source().to_string(),
                 };
                 self.sessions[si].link.send(welcome);
+                let tops = self.world.edited_column_tops();
+                if !tops.is_empty() {
+                    self.sessions[si].link.send(ServerMsg::Surface { tops });
+                }
             }
             ClientMsg::Position { pos } => {
                 self.sessions[si].center = BlockPos::from_f32(pos).chunk();
@@ -360,6 +364,10 @@ impl Server {
         self.unsaved = true;
         self.stats.block_edits += 1;
         self.broadcast_block(e.pos, e.new);
+        let top = self.world.column_top(e.pos.x, e.pos.z);
+        for s in &self.sessions {
+            s.link.send(ServerMsg::Surface { tops: vec![top] });
+        }
         if !e.old.is_air() {
             self.events.push_back((e.pos, BlockEvent::Broken(e.old)));
         }

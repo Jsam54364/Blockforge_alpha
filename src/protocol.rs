@@ -10,6 +10,7 @@ use std::time::Duration;
 use crate::block::BlockState;
 use crate::chunk::Chunk;
 use crate::coords::{BlockPos, ChunkPos};
+use crate::lod::ColumnTop;
 
 #[derive(Debug)]
 pub enum ClientMsg {
@@ -33,6 +34,9 @@ pub enum ServerMsg {
     ChunkData { pos: ChunkPos, chunk: Box<Chunk> },
     ChunkUnload { pos: ChunkPos },
     BlockUpdate { pos: BlockPos, state: BlockState },
+    /// The top of block columns that edits have touched (all of them right after `Welcome`,
+    /// then each one an edit changes), so LOD terrain can show edits far from the player.
+    Surface { tops: Vec<ColumnTop> },
 }
 
 /// One end of a bidirectional channel: sends `S`, receives `R`.

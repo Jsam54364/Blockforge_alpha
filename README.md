@@ -7,7 +7,7 @@ A mobile-first voxel engine in Rust, in two crates:
   architecture lives here and is tested without a GPU.
 * the **app** (`app/`): the Android front-end. winit + wgpu renderer, touch controls and HUD.
 
-> **Status:** 111 unit + 9 end-to-end tests in the core and 78 in the app (plus WGSL
+> **Status:** 114 unit + 9 end-to-end tests in the core and 78 in the app (plus WGSL
 > validation) pass. The APK builds on GitHub Actions and has been run and measured on a phone
 > (see the numbers further down).
 
@@ -255,8 +255,14 @@ sections, about 360k quads (11.6 MB), built in ~0.8 s on one thread; per frame t
 
 Limits and next steps:
 
-* Edits don't show in LOD terrain yet. The next step is to keep a column summary of the chunks the
-  client has seen (or have the server send one for edited areas) and use it instead of the seed.
+* **Edits show in LOD terrain.** The server works out the top of every block column an edit
+  has touched (generated terrain plus the edit journal, so it needs no loaded chunks) and sends
+  them all when a client joins, then each one an edit changes (`ServerMsg::Surface`). LOD
+  sections use them instead of the seed: a cell shows the highest edited column inside it
+  when that rises above the terrain (a tower stays visible kilometres away), otherwise the
+  edited column at its sample point (a pit shows once cells are small enough to land in it).
+  Sections an edit touches are rebuilt and drawn as they were until the new mesh is ready.
+  Edits from earlier sessions count too, since they come from the saved journal.
 * The terrain is now made of many noise layers (continents, landforms, mountain chains, climate),
   so building LOD sections costs about 10x what it did with the old four-octave terrain: medium
   quality at 16 km is ~0.8 s on one thread on the build machine (it was ~80 ms). Sections are
@@ -475,6 +481,5 @@ Also texture repeat across merged quads.
 1. Flip the default mesher to GREEDY once it has been checked on a phone (the menu choice is
    now remembered, so switching it once is enough to keep testing it); then try one instance
    per quad (8 bytes) on a phone. (The faster per-face scan is done.)
-2. Show edits in LOD terrain (see "Level-of-detail terrain").
-3. Pooled vertex buffers instead of one buffer per chunk.
-4. Immersive mode / real window insets instead of the fixed HUD insets.
+2. Pooled vertex buffers instead of one buffer per chunk.
+3. Immersive mode / real window insets instead of the fixed HUD insets.
