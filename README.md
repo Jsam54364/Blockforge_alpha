@@ -7,7 +7,7 @@ A mobile-first voxel engine in Rust, in two crates:
   architecture lives here and is tested without a GPU.
 * the **app** (`app/`): the Android front-end. winit + wgpu renderer, touch controls and HUD.
 
-> **Status:** 105 unit + 9 end-to-end tests in the core and 78 in the app (plus WGSL
+> **Status:** 111 unit + 9 end-to-end tests in the core and 78 in the app (plus WGSL
 > validation) pass. The APK builds on GitHub Actions and has been run and measured on a phone
 > (see the numbers further down).
 
@@ -36,6 +36,7 @@ cargo run --release --bin headless   # stream, mesh, edit; prints stats + an ASC
 | `terrain`, `climate`, `biome`, `noise` | Vintage Story-style world: continents, blended **landforms**, mountain chains; temperature from latitude and altitude, rainfall; biomes emerge from the climate (see "World generation") |
 | `world`, `save` | Procedural base + **edit journal** (undo/redo, tiny saves, delta sync). Versioned + CRC32 formats, atomic write-then-rename |
 | `mesh` | Padded 36³ snapshot (no locks; two cells of each neighbour, the second for water shores), **8-byte packed vertices**, shape-aware face culling, per-vertex AO, 3 render layers, index-free quads |
+| `cull` | **Occlusion culling**: per-chunk face links from a flood fill, a walk from the camera that skips chunks hidden behind terrain |
 | `lod` | **Level-of-detail terrain** to the horizon: quadtree of sections built from the seed, mesher, streaming (see below) |
 | `behavior` | Event-driven blocks emitting commands (deterministic, budgeted). Example: falling sand |
 | `server`, `client`, `protocol` | **Client/server split even in singleplayer**; sim distance independent of view distance |
@@ -118,10 +119,25 @@ The HUD keeps clear of Android's status bar (top) and navigation bar (right, in 
 fixed insets measured from a real phone (`SAFE_TOP_DP`, `SAFE_RIGHT_DP` in `ui.rs`). Immersive
 mode or real inset queries would replace these.
 
-Culling: back faces (solid terrain only) and a real six-plane frustum test per chunk bounding
-box (`math::Frustum`, tested to never reject a visible box). The menu's CULL row cycles
-ALL / FRUST / BACK / OFF so each can be measured on a device; the overlay's DRAWN line shows
-how many chunk meshes survived culling out of those resident.
+Culling: back faces (solid terrain only), a real six-plane frustum test per chunk bounding
+box (`math::Frustum`, tested to never reject a visible box), and occlusion culling of chunks
+hidden behind terrain (`cull.rs`, below). The menu's CULL row cycles
+ALL / NOCAVE (no occlusion) / FRUST / BACK / OFF so each can be measured on a device; the
+overlay's DRAWN line shows how many chunk meshes survived culling out of those resident, and
+HIDDEN how many in range and in view were skipped as hidden behind terrain.
+
+**Occlusion culling** (`cull.rs`), after Tommaso Checchi's "advanced cave culling" (what
+Minecraft has used since 1.8): when a chunk is meshed its see-through space is flood filled,
+and for each of the 15 pairs of its faces it records whether one open region touches both
+(an opaque full cube blocks sight; slabs, water and leaves don't). Each frame a breadth-first
+walk starts at the camera's chunk and enters a neighbour only through faces the current chunk
+connects, never doubling back against a direction already taken (sight lines are straight).
+Chunks it never reaches are skipped. It is conservative (a reached chunk may still be hidden,
+an unknown chunk counts as open) and the walk is redone only when the camera changes chunk or
+links change (at most 20 times a second while chunks stream in); it takes well under a
+millisecond. Around the spawn of seed 1337 standing on the ground it keeps 280 of 674 meshed
+chunks (the ground below the first layer and caves out of sight go); renders of the test
+views are pixel-identical with it on and off.
 
 Frustum culling, same camera at each distance (render distance: drawn / meshed chunks):
 6: 94/458, 8: 156/602, 10: 230/706, 12: 315/985, i.e. about 21-33% of meshed chunks. GPU
@@ -140,8 +156,9 @@ the GPU is the bottleneck and geometry per chunk is what to cut.
 Measured earlier on a mid-range phone, fog off, flying over terrain (GPU time of the main pass):
 render distance 6 = 7.1 ms (43% busy), 8 = 11.7 ms (70%), 10 = 12.9 ms (77%), 12 = 16.7 ms
 (94%, 56 fps). CPU stayed near 5% of the device; memory 100-220 MB. The renderer is GPU-bound,
-so the next wins after frustum culling are occlusion culling and fewer real chunks (a lower render
-distance, now that LOD terrain carries the view past it).
+so the next wins after frustum culling were occlusion culling (now done, not yet measured on a
+phone) and fewer real chunks (a lower render distance, now that LOD terrain carries the view
+past it).
 
 Solid terrain is drawn nearest chunk first so the depth test can reject hidden fragments
 before they are shaded (water still goes far to near for blending). This has not been measured
@@ -458,8 +475,6 @@ Also texture repeat across merged quads.
 1. Flip the default mesher to GREEDY once it has been checked on a phone (the menu choice is
    now remembered, so switching it once is enough to keep testing it); then try one instance
    per quad (8 bytes) on a phone. (The faster per-face scan is done.)
-2. Occlusion culling (cave-style flood fill) to skip chunks hidden behind terrain, which should
-   help most underground.
-3. Show edits in LOD terrain (see "Level-of-detail terrain").
-4. Pooled vertex buffers instead of one buffer per chunk.
-5. Immersive mode / real window insets instead of the fixed HUD insets.
+2. Show edits in LOD terrain (see "Level-of-detail terrain").
+3. Pooled vertex buffers instead of one buffer per chunk.
+4. Immersive mode / real window insets instead of the fixed HUD insets.

@@ -34,7 +34,10 @@ pub const SAFE_RIGHT_DP: f32 = 56.0;
 /// Which culling is active. Useful for measuring what each one buys on a real device.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CullMode {
+    /// Frustum, back faces and occlusion (chunks hidden behind terrain, `blockforge::cull`).
     All,
+    /// Frustum and back faces, no occlusion.
+    NoCaves,
     Frustum,
     Back,
     Off,
@@ -42,16 +45,21 @@ pub enum CullMode {
 
 impl CullMode {
     pub fn frustum(self) -> bool {
-        matches!(self, CullMode::All | CullMode::Frustum)
+        matches!(self, CullMode::All | CullMode::NoCaves | CullMode::Frustum)
     }
 
     pub fn backface(self) -> bool {
-        matches!(self, CullMode::All | CullMode::Back)
+        matches!(self, CullMode::All | CullMode::NoCaves | CullMode::Back)
+    }
+
+    pub fn occlusion(self) -> bool {
+        self == CullMode::All
     }
 
     pub fn next(self) -> CullMode {
         match self {
-            CullMode::All => CullMode::Frustum,
+            CullMode::All => CullMode::NoCaves,
+            CullMode::NoCaves => CullMode::Frustum,
             CullMode::Frustum => CullMode::Back,
             CullMode::Back => CullMode::Off,
             CullMode::Off => CullMode::All,
@@ -61,6 +69,7 @@ impl CullMode {
     pub fn label(self) -> &'static str {
         match self {
             CullMode::All => "ALL",
+            CullMode::NoCaves => "NOCAVE",
             CullMode::Frustum => "FRUST",
             CullMode::Back => "BACK",
             CullMode::Off => "OFF",
@@ -68,7 +77,7 @@ impl CullMode {
     }
 
     fn from_label(s: &str) -> Option<CullMode> {
-        [CullMode::All, CullMode::Frustum, CullMode::Back, CullMode::Off].into_iter().find(|m| m.label() == s)
+        [CullMode::All, CullMode::NoCaves, CullMode::Frustum, CullMode::Back, CullMode::Off].into_iter().find(|m| m.label() == s)
     }
 }
 
@@ -362,7 +371,7 @@ pub fn stats_lines(perf: &Perf) -> Vec<String> {
         v.push(format!("MEM {:.0}MB", m));
     }
     v.push(format!("CHUNKS {}", perf.chunks));
-    v.push(format!("DRAWN {}/{}", perf.drawn, perf.meshes));
+    v.push(format!("DRAWN {}/{}  HIDDEN {}", perf.drawn, perf.meshes, perf.hidden));
     v.push(format!("QUADS {}", perf.quads));
     v.push(format!("LOD {} SECT {}K QUADS", perf.lod_drawn, perf.lod_quads / 1000));
     if perf.lod_pending > 0 {
@@ -840,10 +849,13 @@ mod tests {
     }
 
     #[test]
-    fn cull_mode_cycles_through_all_four_states_and_maps_to_the_right_flags() {
+    fn cull_mode_cycles_through_all_five_states_and_maps_to_the_right_flags() {
         let mut u = ui();
         assert_eq!(u.settings.cull, CullMode::All);
-        assert!(u.settings.cull.frustum() && u.settings.cull.backface());
+        assert!(u.settings.cull.frustum() && u.settings.cull.backface() && u.settings.cull.occlusion());
+        u.apply(Action::CycleCull);
+        assert_eq!(u.settings.cull, CullMode::NoCaves);
+        assert!(u.settings.cull.frustum() && u.settings.cull.backface() && !u.settings.cull.occlusion());
         u.apply(Action::CycleCull);
         assert_eq!(u.settings.cull, CullMode::Frustum);
         assert!(u.settings.cull.frustum() && !u.settings.cull.backface());

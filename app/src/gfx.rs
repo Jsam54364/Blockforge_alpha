@@ -92,6 +92,8 @@ pub struct RenderOptions {
     pub frustum_cull: bool,
     /// Use the back-face-culling pipeline for solid terrain.
     pub backface_cull: bool,
+    /// Skip chunks hidden behind terrain (`blockforge::cull`).
+    pub occlusion_cull: bool,
     /// true = FIFO (capped at the display rate); false = the fastest uncapped mode available.
     pub vsync: bool,
     /// Where fog starts and where it is complete, in blocks from the camera.
@@ -621,6 +623,7 @@ pub struct Gfx {
     chunks: HashMap<ChunkPos, GpuChunk>,
     lods: HashMap<SectionKey, GpuLod>,
     last_drawn: usize,
+    last_hidden: usize,
     last_quads: u64,
     last_lod_drawn: usize,
     last_lod_quads: u64,
@@ -944,6 +947,7 @@ impl Gfx {
             chunks: HashMap::new(),
             lods: HashMap::new(),
             last_drawn: 0,
+            last_hidden: 0,
             last_quads: 0,
             last_lod_drawn: 0,
             last_lod_quads: 0,
@@ -1005,6 +1009,11 @@ impl Gfx {
     /// Chunk meshes drawn last frame (after distance and frustum culling).
     pub fn drawn_chunks(&self) -> usize {
         self.last_drawn
+    }
+
+    /// Chunk meshes in range and in view skipped last frame as hidden behind terrain.
+    pub fn hidden_chunks(&self) -> usize {
+        self.last_hidden
     }
 
     /// Quads in those meshes: what greedy meshing is meant to reduce.
@@ -1151,6 +1160,11 @@ impl Gfx {
         let frustum = math::Frustum::from_view_proj(&vp);
         let size = CHUNK_SIZE as f32;
         let half = size * 0.5;
+        if opts.occlusion_cull {
+            client.update_sight(cam.pos);
+        }
+        let seen = if opts.occlusion_cull { client.seen_chunks() } else { None };
+        let mut hidden = 0;
         let mut vis: Vec<(f32, ChunkPos)> = Vec::new();
         for pos in self.chunks.keys() {
             let o = pos.origin();
@@ -1169,8 +1183,13 @@ impl Gfx {
             {
                 continue;
             }
+            if seen.is_some_and(|s| !s.contains(pos)) {
+                hidden += 1;
+                continue;
+            }
             vis.push((d2, *pos));
         }
+        self.last_hidden = hidden;
         vis.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
         vis.truncate(MAX_INSTANCES);
         vis.reverse(); // far to near, for the translucent pass

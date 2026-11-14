@@ -120,6 +120,7 @@ impl ApplicationHandler for App {
                         self.perf.add_gpu_sample(ms);
                     }
                     self.perf.drawn = g.drawn_chunks();
+                    self.perf.hidden = g.hidden_chunks();
                     self.perf.quads = g.drawn_quads();
                     (self.perf.lod_drawn, self.perf.lod_quads) = g.drawn_lod();
                     self.perf.lod_pending = self.game.client.lod.stats.pending;
@@ -132,6 +133,7 @@ impl ApplicationHandler for App {
                         fog: settings.fog,
                         frustum_cull: settings.cull.frustum(),
                         backface_cull: settings.cull.backface(),
+                        occlusion_cull: settings.cull.occlusion(),
                         vsync: settings.vsync,
                         fog_start,
                         fog_end,

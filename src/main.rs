@@ -67,6 +67,31 @@ fn compare_meshers(c: &Client, reg: &BlockRegistry) {
     );
 }
 
+/// How many meshed chunks the occlusion walk keeps, standing on the ground and in a cave.
+fn report_occlusion(c: &mut Client, reg: &BlockRegistry) {
+    println!("\nOcclusion culling (chunks with geometry that may be seen / all of them):");
+    let top = highest_solid(c, reg, 0, 0).unwrap_or(0) as f32;
+    let mut spots = vec![("on the ground", [0.5, top + 2.0, 0.5])];
+    // A cave: the first open, enclosed cell well under the ground near the origin.
+    'find: for y in (-90..(top as i32 - 20)).rev() {
+        for x in -40..40 {
+            let p = BlockPos::new(x, y, 3);
+            if !c.is_solid(p) && c.is_solid(BlockPos::new(x, y - 1, 3)) && c.store.block(p).is_some() {
+                spots.push(("in a cave", [x as f32 + 0.5, y as f32 + 0.5, 3.5]));
+                break 'find;
+            }
+        }
+    }
+    for (what, at) in spots {
+        c.update_sight(at);
+        let seen = c.seen_chunks().map(|s| c.meshes.keys().filter(|p| s.contains(p)).count()).unwrap_or(0);
+        let t = Instant::now();
+        c.update_sight([at[0] + 64.0, at[1], at[2]]);
+        let took = t.elapsed();
+        println!("  {what:>14} at y={:.0}: {seen} / {} (walk took {took:.2?})", at[1], c.meshes.len());
+    }
+}
+
 fn highest_solid(c: &Client, reg: &BlockRegistry, x: i32, z: i32) -> Option<i32> {
     for y in (-96..=127).rev() {
         if let Some(s) = c.store.block(BlockPos::new(x, y, z)) {
@@ -179,6 +204,7 @@ fn main() {
 
     print_map(&client, &registry);
     compare_meshers(&client, &registry);
+    report_occlusion(&mut client, &registry);
     lod_figures(&registry, client.seed);
 
     if let Some(g) = highest_solid(&client, &registry, 0, 0) {

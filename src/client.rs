@@ -27,6 +27,7 @@ use crate::chunk::Chunk;
 use crate::coords::{BlockPos, ChunkPos, Face, LocalPos, CHUNK_SIZE};
 use crate::jobs::JobPool;
 use crate::lod::LodManager;
+use crate::cull::{self, Links};
 use crate::mesh::{has_no_faces, mesh_chunk_with, ChunkMesh, Mesher, PaddedChunk};
 use crate::protocol::{ClientMsg, Endpoint, ServerMsg};
 use crate::registry::BlockRegistry;
@@ -44,6 +45,16 @@ struct MeshResult {
     pos: ChunkPos,
     version: u64,
     mesh: ChunkMesh,
+    links: Links,
+}
+
+/// The last occlusion walk (see `cull`): where from, over which links, and what it reached.
+struct Sight {
+    from: ChunkPos,
+    links_gen: u64,
+    reach: (i32, i32),
+    at: Instant,
+    seen: HashSet<ChunkPos>,
 }
 
 #[derive(Default, Debug, Clone)]
@@ -90,6 +101,11 @@ pub struct Client {
     /// Resolved chunks that block the view from above all over (see `bottom_is_closed` and
     /// `lod_coverage`).
     closed_bottom: HashSet<ChunkPos>,
+    /// Which faces of each resolved chunk see each other through it (occlusion culling), and
+    /// a counter bumped whenever any of them changes.
+    links: HashMap<ChunkPos, Links>,
+    links_gen: u64,
+    sight: Option<Sight>,
     /// Level-of-detail terrain past the loaded chunks.
     pub lod: LodManager,
 }
@@ -174,6 +190,9 @@ impl Client {
             mesher: Mesher::Simple,
             resolved: HashSet::new(),
             closed_bottom: HashSet::new(),
+            links: HashMap::new(),
+            links_gen: 0,
+            sight: None,
             // One worker: a section is a few hundred microseconds of noise sampling, and
             // chunk meshing near the player matters more.
             lod: LodManager::new(1),
@@ -308,6 +327,28 @@ impl Client {
 
     /// Up to `max` chunk positions whose mesh changed (or was removed) since the last call.
     /// The renderer re-uploads `meshes[pos]` if present, or frees its GPU buffers if not.
+    /// Redoes the occlusion walk (`cull::visible`) for a camera at `cam` when the camera has
+    /// moved to another chunk, or when chunks' links changed (at most 20 times a second for
+    /// that: chunks stream in every frame while loading). See `seen_chunks`.
+    pub fn update_sight(&mut self, cam: [f32; 3]) {
+        let from = BlockPos::from_f32(cam).chunk();
+        let reach = (self.view_chunks + 1, self.view_chunks.min(self.vertical_view) + 1);
+        if let Some(s) = &self.sight {
+            let fresh = s.links_gen == self.links_gen || s.at.elapsed() < Duration::from_millis(50);
+            if s.from == from && s.reach == reach && fresh {
+                return;
+            }
+        }
+        let links = &self.links;
+        let seen = cull::visible(from, reach.0, reach.1, |p| links.get(&p).copied().unwrap_or(Links::ALL));
+        self.sight = Some(Sight { from, links_gen: self.links_gen, reach, at: Instant::now(), seen: seen.into_iter().collect() });
+    }
+
+    /// The chunks the last `update_sight` found may be seen; `None` before the first.
+    pub fn seen_chunks(&self) -> Option<&HashSet<ChunkPos>> {
+        self.sight.as_ref().map(|s| &s.seen)
+    }
+
     pub fn take_mesh_changes(&mut self, max: usize) -> Vec<ChunkPos> {
         let n = max.min(self.mesh_changes.len());
         self.mesh_changes.drain(..n).collect()
@@ -353,7 +394,8 @@ impl Client {
                         let for_workers = reg.clone();
                         self.pool = Some(JobPool::new(self.workers, move |job: MeshJob| {
                             let mesh = mesh_chunk_with(job.mesher, &for_workers, &job.snapshot);
-                            MeshResult { pos: job.pos, version: job.version, mesh }
+                            let links = cull::links_of(&for_workers, &job.snapshot);
+                            MeshResult { pos: job.pos, version: job.version, mesh, links }
                         }));
                         self.registry = Some(reg);
                     }
@@ -376,6 +418,9 @@ impl Client {
                 self.versions.remove(&pos);
                 self.resolved.remove(&pos);
                 self.closed_bottom.remove(&pos);
+                if self.links.remove(&pos).is_some() {
+                    self.links_gen += 1;
+                }
             }
             ServerMsg::BlockUpdate { pos, state } => {
                 if self.store.set_block(pos, state).is_some() {
@@ -489,6 +534,14 @@ impl Client {
                 } else {
                     self.closed_bottom.remove(&p);
                 }
+                // (it is uniform: that is the only way a chunk has no faces)
+                let links = match self.store.get(p).and_then(|c| c.uniform_state()) {
+                    Some(s) => cull::links_uniform(reg, s),
+                    None => Links::ALL,
+                };
+                if self.links.insert(p, links) != Some(links) {
+                    self.links_gen += 1;
+                }
                 self.stats.meshes_skipped += 1;
                 continue;
             }
@@ -504,9 +557,13 @@ impl Client {
         }
     }
 
-    /// `pos` now has its current geometry; note whether its bottom is closed.
-    fn mark_resolved(&mut self, pos: ChunkPos) {
+    /// `pos` now has its current geometry; note whether its bottom is closed and how it lets
+    /// sight through.
+    fn mark_resolved(&mut self, pos: ChunkPos, links: Links) {
         self.resolved.insert(pos);
+        if self.links.insert(pos, links) != Some(links) {
+            self.links_gen += 1;
+        }
         let closed = match (self.store.get(pos), self.registry.as_ref()) {
             (Some(chunk), Some(reg)) => bottom_is_closed(reg, chunk),
             _ => false,
@@ -532,7 +589,7 @@ impl Client {
                     self.meshes.insert(r.pos, r.mesh);
                     self.mesh_changes.push(r.pos);
                 }
-                self.mark_resolved(r.pos);
+                self.mark_resolved(r.pos, r.links);
                 self.stats.meshes_built += 1;
             } else {
                 // A newer edit superseded this snapshot; its replacement is queued.
