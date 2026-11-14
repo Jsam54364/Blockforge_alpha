@@ -43,3 +43,21 @@ pub fn safe_insets(vm: *mut c_void, activity: *mut c_void) -> Option<[f32; 4]> {
     }
     Some(b.map(|v| v as f32))
 }
+
+/// The phone's time zone: seconds to add to UTC now (`java.util.TimeZone.getDefault()`).
+pub fn utc_offset(vm: *mut c_void, unix_ms: i64) -> Option<i64> {
+    if vm.is_null() {
+        return None;
+    }
+    // SAFETY: the pointer comes from android-activity and lives as long as the app.
+    let vm = unsafe { JavaVM::from_raw(vm.cast()) }.ok()?;
+    let mut env = vm.attach_current_thread().ok()?;
+    let got: jni::errors::Result<i32> = env.with_local_frame(4, |env| {
+        let tz = env.call_static_method("java/util/TimeZone", "getDefault", "()Ljava/util/TimeZone;", &[])?.l()?;
+        env.call_method(&tz, "getOffset", "(J)I", &[jni::objects::JValue::Long(unix_ms)])?.i()
+    });
+    if env.exception_check().unwrap_or(false) {
+        let _ = env.exception_clear();
+    }
+    got.ok().map(|ms| ms as i64 / 1000)
+}

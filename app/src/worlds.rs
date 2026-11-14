@@ -31,11 +31,18 @@ pub struct WorldInfo {
     /// Seconds since 1970.
     pub created: u64,
     pub last_played: u64,
+    /// Seconds spent in it.
+    pub play_seconds: u64,
+    /// Bytes its folder takes (not saved: measured by `list`).
+    pub size_bytes: u64,
 }
 
 impl WorldInfo {
     fn to_text(&self) -> String {
-        format!("name={}\nseed={}\ncreated={}\nlast_played={}\n", self.name, self.seed, self.created, self.last_played)
+        format!(
+            "name={}\nseed={}\ncreated={}\nlast_played={}\nplay_seconds={}\n",
+            self.name, self.seed, self.created, self.last_played, self.play_seconds
+        )
     }
 
     fn from_text(folder: &str, text: &str) -> Option<WorldInfo> {
@@ -46,6 +53,8 @@ impl WorldInfo {
             seed: get("seed")?.trim().parse().ok()?,
             created: get("created").and_then(|v| v.trim().parse().ok()).unwrap_or(0),
             last_played: get("last_played").and_then(|v| v.trim().parse().ok()).unwrap_or(0),
+            play_seconds: get("play_seconds").and_then(|v| v.trim().parse().ok()).unwrap_or(0),
+            size_bytes: 0,
         })
     }
 }
@@ -104,7 +113,9 @@ pub fn list(save_dir: &Path) -> Vec<WorldInfo> {
         .filter_map(|e| {
             let folder = e.file_name().to_string_lossy().to_string();
             let text = fs::read_to_string(e.path().join(LEVEL_FILE)).ok()?;
-            WorldInfo::from_text(&folder, &text)
+            let mut w = WorldInfo::from_text(&folder, &text)?;
+            w.size_bytes = folder_size(&e.path());
+            Some(w)
         })
         .collect();
     out.sort_by(|a, b| b.last_played.cmp(&a.last_played).then_with(|| a.name.cmp(&b.name)));
@@ -117,7 +128,7 @@ pub fn create(save_dir: &Path, name: &str, seed: u64) -> io::Result<WorldInfo> {
     let folder = free_folder(save_dir, &name);
     fs::create_dir_all(dir(save_dir, &folder))?;
     let t = now();
-    let w = WorldInfo { folder, name, seed, created: t, last_played: t };
+    let w = WorldInfo { folder, name, seed, created: t, last_played: t, play_seconds: 0, size_bytes: 0 };
     write_level(save_dir, &w)?;
     Ok(w)
 }
@@ -136,6 +147,129 @@ pub fn touch(save_dir: &Path, folder: &str) -> io::Result<WorldInfo> {
     w.last_played = now();
     write_level(save_dir, &w)?;
     Ok(w)
+}
+
+/// Adds time spent playing a world.
+pub fn add_play_time(save_dir: &Path, folder: &str, secs: u64) -> io::Result<()> {
+    let mut w = read(save_dir, folder)?;
+    w.play_seconds += secs;
+    write_level(save_dir, &w)
+}
+
+fn folder_size(p: &Path) -> u64 {
+    fs::read_dir(p).map_or(0, |entries| {
+        entries.filter_map(|e| e.ok()).map(|e| e.metadata().map_or(0, |m| if m.is_dir() { folder_size(&e.path()) } else { m.len() })).sum()
+    })
+}
+
+/// Thumbnails (`icon.png` in a world's folder), as the world list shows them.
+pub const THUMB_FILE: &str = "icon.png";
+pub const THUMB_W: u32 = 256;
+pub const THUMB_H: u32 = 144;
+
+/// Shrinks a picture (RGBA, `w` x `h`) to a thumbnail: the middle 16:9 of it, averaged
+/// down to `THUMB_W` x `THUMB_H`.
+pub fn shrink(rgba: &[u8], w: u32, h: u32) -> Vec<u8> {
+    let (cw, ch) = if w * 9 > h * 16 { (h * 16 / 9, h) } else { (w, w * 9 / 16) };
+    let (x0, y0) = ((w - cw) / 2, (h - ch) / 2);
+    let mut out = vec![0u8; (THUMB_W * THUMB_H * 4) as usize];
+    for ty in 0..THUMB_H {
+        let (sy0, sy1) = (y0 + ty * ch / THUMB_H, (y0 + (ty + 1) * ch / THUMB_H).max(y0 + ty * ch / THUMB_H + 1));
+        for tx in 0..THUMB_W {
+            let (sx0, sx1) = (x0 + tx * cw / THUMB_W, (x0 + (tx + 1) * cw / THUMB_W).max(x0 + tx * cw / THUMB_W + 1));
+            let mut acc = [0u32; 4];
+            for sy in sy0..sy1.min(h) {
+                for sx in sx0..sx1.min(w) {
+                    let i = ((sy * w + sx) * 4) as usize;
+                    for c in 0..4 {
+                        acc[c] += rgba[i + c] as u32;
+                    }
+                }
+            }
+            let n = ((sy1.min(h) - sy0) * (sx1.min(w) - sx0)).max(1);
+            let o = ((ty * THUMB_W + tx) * 4) as usize;
+            for c in 0..4 {
+                out[o + c] = (acc[c] / n) as u8;
+            }
+        }
+    }
+    out
+}
+
+/// Saves a world's thumbnail (from a picture of any size).
+pub fn save_thumbnail(save_dir: &Path, folder: &str, rgba: &[u8], w: u32, h: u32) -> io::Result<()> {
+    let small = shrink(rgba, w, h);
+    let path = dir(save_dir, folder).join(THUMB_FILE);
+    let f = fs::File::create(&path)?;
+    let mut e = png::Encoder::new(io::BufWriter::new(f), THUMB_W, THUMB_H);
+    e.set_color(png::ColorType::Rgba);
+    e.set_depth(png::BitDepth::Eight);
+    e.write_header().and_then(|mut wr| wr.write_image_data(&small)).map_err(io::Error::other)
+}
+
+/// A world's thumbnail (`THUMB_W` x `THUMB_H` RGBA), if it has one.
+pub fn load_thumbnail(save_dir: &Path, folder: &str) -> Option<Vec<u8>> {
+    let f = fs::File::open(dir(save_dir, folder).join(THUMB_FILE)).ok()?;
+    let mut r = png::Decoder::new(io::BufReader::new(f)).read_info().ok()?;
+    let mut buf = vec![0u8; r.output_buffer_size()];
+    let info = r.next_frame(&mut buf).ok()?;
+    (info.width == THUMB_W && info.height == THUMB_H && info.color_type == png::ColorType::Rgba).then(|| {
+        buf.truncate((THUMB_W * THUMB_H * 4) as usize);
+        buf
+    })
+}
+
+/// "November 14, 2026 - 10:45 AM" for seconds since 1970, shifted by `offset` seconds (the
+/// phone's time zone).
+pub fn date_time_label(secs: u64, offset: i64) -> String {
+    const MONTHS: [&str; 12] =
+        ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+    let t = secs as i64 + offset;
+    let (y, m, d) = civil(t.div_euclid(86400));
+    let mins = t.rem_euclid(86400) / 60;
+    let (hh, mm) = (mins / 60, mins % 60);
+    let (h12, ampm) = match hh {
+        0 => (12, "AM"),
+        1..=11 => (hh, "AM"),
+        12 => (12, "PM"),
+        _ => (hh - 12, "PM"),
+    };
+    format!("{} {d}, {y} - {h12}:{mm:02} {ampm}", MONTHS[(m - 1) as usize])
+}
+
+/// "12h 34m", "5m", "Under a minute".
+pub fn play_time_label(secs: u64) -> String {
+    let m = secs / 60;
+    match (m / 60, m % 60) {
+        (0, 0) => "Under a minute".to_string(),
+        (0, m) => format!("{m}m"),
+        (h, m) => format!("{h}h {m}m"),
+    }
+}
+
+/// "256 MB", "1.2 MB", "48 KB".
+pub fn size_label(bytes: u64) -> String {
+    let mb = bytes as f64 / 1_048_576.0;
+    if mb >= 10.0 {
+        format!("{:.0} MB", mb)
+    } else if mb >= 1.0 {
+        format!("{:.1} MB", mb)
+    } else {
+        format!("{} KB", (bytes as f64 / 1024.0).ceil() as u64)
+    }
+}
+
+/// Days since 1970 to (year, month, day): Howard Hinnant's days-to-civil.
+fn civil(days: i64) -> (i64, i64, i64) {
+    let z = days + 719468;
+    let era = z.div_euclid(146097);
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    (yoe + era * 400 + (m <= 2) as i64, m, d)
 }
 
 /// Deletes a world and everything in its folder, for good.
@@ -272,7 +406,8 @@ mod tests {
         assert!(into.join("world.bfwj").exists() && into.join(STATE_FILE).exists());
         assert!(!d.join("world_v4.bfwj").exists() && !d.join(STATE_FILE).exists());
         assert!(fs::read_to_string(d.join(SETTINGS_FILE)).unwrap().contains("fog=true"));
-        assert_eq!(list(&d), vec![read(&d, &w.folder).unwrap()]);
+        let listed: Vec<WorldInfo> = list(&d).into_iter().map(|w| WorldInfo { size_bytes: 0, ..w }).collect();
+        assert_eq!(listed, vec![read(&d, &w.folder).unwrap()]);
         // Only once.
         assert_eq!(migrate(&d).unwrap(), None);
         // A fresh install gets an empty list.
@@ -290,6 +425,48 @@ mod tests {
         assert_eq!(seed_from_text("GLACIER"), seed_from_text("GLACIER"));
         assert_ne!(seed_from_text("GLACIER"), seed_from_text("GLACIERS"));
         assert_ne!(seed_from_text(""), seed_from_text("GLACIER"));
+    }
+
+    #[test]
+    fn labels_for_the_world_list() {
+        assert_eq!(date_time_label(1_763_136_000, 0), "November 14, 2025 - 4:00 PM");
+        assert_eq!(date_time_label(1_763_136_000, -7 * 3600), "November 14, 2025 - 9:00 AM");
+        assert_eq!(date_time_label(0, 0), "January 1, 1970 - 12:00 AM");
+        assert_eq!(play_time_label(30), "Under a minute");
+        assert_eq!(play_time_label(5 * 60 + 10), "5m");
+        assert_eq!(play_time_label(12 * 3600 + 34 * 60), "12h 34m");
+        assert_eq!(size_label(256 * 1_048_576), "256 MB");
+        assert_eq!(size_label(1_258_291), "1.2 MB");
+        assert_eq!(size_label(48 * 1024), "48 KB");
+    }
+
+    #[test]
+    fn thumbnails_are_shrunk_saved_and_read_back() {
+        let d = temp("thumbs");
+        let w = create(&d, "Pic", 1).unwrap();
+        assert_eq!(load_thumbnail(&d, &w.folder), None);
+        // A 2400 x 1080 picture: left half red, right half blue.
+        let (pw, ph) = (2400u32, 1080u32);
+        let mut px = vec![0u8; (pw * ph * 4) as usize];
+        for y in 0..ph {
+            for x in 0..pw {
+                let i = ((y * pw + x) * 4) as usize;
+                px[i..i + 4].copy_from_slice(if x < pw / 2 { &[255, 0, 0, 255] } else { &[0, 0, 255, 255] });
+            }
+        }
+        save_thumbnail(&d, &w.folder, &px, pw, ph).unwrap();
+        let t = load_thumbnail(&d, &w.folder).expect("saved");
+        assert_eq!(t.len(), (THUMB_W * THUMB_H * 4) as usize);
+        assert_eq!(&t[0..4], &[255, 0, 0, 255]);
+        let last = t.len() - 4;
+        assert_eq!(&t[last..], &[0, 0, 255, 255]);
+        // Play time adds up; the folder's size shows in the list.
+        add_play_time(&d, &w.folder, 90).unwrap();
+        add_play_time(&d, &w.folder, 30).unwrap();
+        let listed = list(&d);
+        assert_eq!(listed[0].play_seconds, 120);
+        assert!(listed[0].size_bytes > 100, "{}", listed[0].size_bytes);
+        fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]

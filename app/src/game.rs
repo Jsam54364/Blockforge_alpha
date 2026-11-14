@@ -388,7 +388,6 @@ impl Game {
             _ => {}
         }
         let greedy_before = self.ui.settings.greedy;
-        let menu_was_open = self.ui.menu_open;
         let screen_before = self.ui.screen;
         if let Action::Time(h) = action {
             self.clock.shift(h as f64);
@@ -405,31 +404,32 @@ impl Game {
             // Fingers on the old screen don't carry over (no stick left pushed, no button held).
             self.touches.clear();
             self.held.clear();
-            if screen_before == Screen::Playing {
-                self.persist(); // back to the title screen: as safe as quitting
-            } else if screen_before == Screen::Settings {
-                self.save_state();
+            self.ui_touches.clear();
+            if screen_before == Screen::Settings {
+                self.save_state(); // keeps what was applied
             }
-        }
-        if menu_was_open && !self.ui.menu_open {
-            self.save_state(); // closing the menu keeps what was chosen in it
         }
     }
 
     pub fn touch(&mut self, id: u64, phase: TouchPhase, x: f32, y: f32) {
-        // Off the game (title screen and its pages), touches only press buttons.
+        // Off the game (its menu, settings, loading), touches only press buttons, which act
+        // when the finger lifts off them.
         if self.ui.screen != Screen::Playing {
-            if phase == TouchPhase::Started {
-                if let Some(action) = self.ui.hit(x, y) {
-                    self.ui_action(id, action);
-                }
+            let action = match phase {
+                TouchPhase::Started => self.ui.press(id, x, y),
+                TouchPhase::Ended => self.ui.release(id, x, y),
+                TouchPhase::Cancelled => self.ui.release(id, f32::NAN, f32::NAN),
+                TouchPhase::Moved => None,
+            };
+            if let Some(a) = action {
+                self.ui_action(id, a);
             }
             return;
         }
         // HUD first: a touch that starts on a button belongs to the HUD until it ends.
         match phase {
             TouchPhase::Started => {
-                if let Some(action) = self.ui.hit(x, y) {
+                if let Some(action) = self.ui.press(id, x, y) {
                     self.ui_touches.insert(id);
                     self.ui_action(id, action);
                     return;

@@ -97,55 +97,87 @@ CI flow (GitHub Actions, all from a phone):
 2. When `CI` succeeds, `Android APK` runs: host type-check + WGSL validation, then `cargo apk build`.
 3. The APK is published to the repo's **Releases** page as `blockforge-debug.apk`.
 
+### Menus (`app/src/ui`, `app/src/ui.wgsl`, `assets/ui`, `tools/make_ui_atlas.py`)
+
+Every menu is drawn in one style: dark stone buttons with metal rims and rivets, framed panels
+with corner brackets, a title plaque with blue gems, the BlockForge logo, serif text (Crimson
+Text) and pixel text (Pixelify Sans) with icons (Material Icons), and a blue glow on the button
+under the finger. Menu buttons act when the finger lifts off them (slide off to cancel); the
+in-game buttons act on the touch.
+
+Everything comes from one 2048 x 2048 atlas (`assets/ui/atlas.png` and `atlas.json`), built by
+`tools/make_ui_atlas.py` from the fonts: the frames are painted procedurally as nine-slice
+pieces, and the text and icons are signed distance fields, so they stay sharp at any size. The
+UI shader (`ui.wgsl`) has three modes per vertex: atlas colour, SDF text, and the world
+thumbnails' texture. The fonts are under the SIL Open Font License and the icons under Apache
+2.0 (`assets/ui/CREDITS.md`, `assets/ui/licenses`).
+
 ### Title screen (`app/src/title.rs`, `app/src/title.wgsl`, `assets/title`)
 
-The app opens on a main menu in the style of Minecraft's: the BLOCKFORGE logo with a tilted,
-pulsing yellow splash line (a different one each launch), and SINGLEPLAYER, MULTIPLAYER, MODS,
-SETTINGS and COSMETICS in grey stone buttons. Behind it a panorama of a sunset over the sea turns
-once every three minutes. The panorama was photographed in the game itself: twelve views 30
-degrees apart from one spot off a west-facing coast (seed 1337, near x -1848, z 40, at 18:18),
-rendered with the god rays off so they match, and stitched into one cylindrical picture
-(`tools/stitch_panorama.py`: 4096 x 683, 30 degrees above and below the horizon, 425 KB as JPEG).
-The title shader turns each screen pixel into a compass direction and elevation and samples it.
+The app opens on a main menu: the BlockForge logo over Single Player, Multi Player, Settings,
+Customize and Mods, with Quit below them (it closes the app). Single Player glows until another
+button is pressed. Behind it a panorama of a sunset over the sea turns once every three minutes.
+The panorama was photographed in the game itself: twelve views 30 degrees apart from one spot
+off a west-facing coast (seed 1337, near x -1848, z 40, at 18:18), rendered with the god rays off
+so they match, and stitched into one cylindrical picture (`tools/stitch_panorama.py`: 4096 x
+683, 30 degrees above and below the horizon, 425 KB as JPEG). The title shader turns each screen
+pixel into a compass direction and elevation and samples it.
 
-SETTINGS opens the game's settings panel with DONE beside it (no TIME there: the time of day
-belongs to each world). MULTIPLAYER, MODS and COSMETICS open pages that say what is and is not
-there yet (no network play, mods or skins so far). The in-game menu's MAIN MENU button saves the
-world, closes it and goes back to the title screen.
+Multi Player, Customize and Mods open pages that say what is and is not there yet (no network
+play, skins or mods so far).
 
 ### Worlds (`app/src/worlds.rs`)
 
-SINGLEPLAYER opens the world list, as in Minecraft: every saved world with its name, when it was
-last played and its seed, the most recent first (UP/DOWN scroll a long list). Tap a world to pick
-it and again to play it, or use PLAY SELECTED WORLD. CREATE NEW WORLD asks for a name and an
-optional seed (a number is used as it is, a word is hashed so it always gives the same world,
-blank is random). EDIT renames the picked world, RE-CREATE opens the create page filled in with
-its name and seed (a fresh copy of the same terrain), DELETE asks first and then removes its
-folder for good. Names and seeds are typed on an on-screen keyboard (capitals, digits, space and
-`-`; Android's own keyboard does not reach a NativeActivity reliably); a hardware keyboard works
-too. Opening a world shows LOADING TERRAIN over the panorama until the player has ground under
-him (or 25 seconds have passed).
+Single Player opens the world list: on the left every saved world with its picture, name, seed,
+when it was last played (date and time, in the phone's time zone) and its size on disk, the most
+recent first (the scroll bar's top and bottom halves scroll); on the right the picked world's
+picture, name, seed, play time and size, with Edit and Delete. Tap a world to pick it and again
+to play it, or use Play; the pencil on a row edits that world. Create New World asks for a name
+and an optional seed (a number is used as it is, a word is hashed so it always gives the same
+world, blank is random). Edit renames the picked world, Re-Create opens the create page filled
+in with its name and seed (a fresh copy of the same terrain), Delete asks first and then removes
+its folder for good. Names and seeds are typed on an on-screen keyboard (shift, digits, space and
+`-`; a name starts with a capital, as on a phone; Android's own keyboard does not reach a
+NativeActivity reliably); a hardware keyboard works too. Opening a world shows Loading terrain
+with a progress bar until the player has ground under him (or 25 seconds have passed). On a
+portrait screen the picked world's panel moves under the list.
+
+A world's picture is taken when it is closed: the renderer draws the world once more without the
+HUD into a texture, reads it back, and `icon.png` (256 x 144, the middle 16:9 averaged down) is
+saved in the world's folder. Worlds without one show a crop of the title panorama around the
+sun. Play time is added up each time a world is closed.
 
 Each world lives in its own folder, `worlds/<FOLDER>/`: `level.txt` (name, seed, created, last
-played), `state.txt` (player, camera, time of day) and the server's edit journal. The folder
-name comes from the world's name (`NEW_WORLD`, `NEW_WORLD-2`, ...), so two worlds may share a
-name. Settings are the app's (`settings.txt` beside `worlds/`), not a world's. The single world
-of earlier versions moves into the list as MY WORLD (seed 1337) the first time the app starts,
-edits and all.
+played, play time), `state.txt` (player, camera, time of day), `icon.png` and the server's edit
+journal. The folder name comes from the world's name (`NEW_WORLD`, `NEW_WORLD-2`, ...), so two
+worlds may share a name. Settings are the app's (`settings.txt` beside `worlds/`), not a world's.
+The single world of earlier versions moves into the list as MY WORLD (seed 1337) the first time
+the app starts, edits and all.
 
-### HUD and settings
+### Settings and the game menu
 
-Top-left overlay (toggle in the menu): FPS and frame time, this app's CPU use (from
+Settings has three groups, as tabs on the left: General (walk or fly, the camera: first person,
+behind or in front, stats on/off, and the time of day when opened from a world), Video (render
+distance 2-12 chunks, LOD distance OFF, 1K ... 32K blocks, LOD quality, fog, clouds, god rays,
+VSync) and Performance (culling, mesher). Switches, steppers and choices change a copy: Apply
+keeps it (and sends a new render distance to the server), Back forgets it, Reset to Default puts
+the defaults back. With many settings and a wide panel they go in two columns.
+
+In a world, the pause button at the top right opens the game menu over the world (which keeps
+running behind it): Back to Game, Settings, and Save & Quit to Title, which saves the world, takes
+its picture, closes it and goes back to the title screen.
+
+### HUD
+
+Top-left overlay (Show Stats): FPS and frame time, this app's CPU use (from
 `/proc/self/stat`, so it is the app's share, not the whole phone), CPU time per frame
 (excluding the wait for the display), GPU time (timestamp queries; shows N/A on devices
 without them) with a derived busy%, memory (VmRSS) and chunk/mesh counts. Android exposes no
-public GPU-usage percentage, hence the derived figure.
-
-Top-right menu button: render distance (2-12 chunks, applied to the server stream too),
-LOD distance (OFF, 1K ... 32K blocks) and LOD quality (LODQ: LOW/MED/HIGH, the width of the
-first LOD ring), time of day (TIME: an hour back or forward), fog, clouds and god rays on/off, walk or fly, the view (1ST, 3RD behind, FRONT looking back),
-stats on/off, and MAIN MENU (back to the title screen). The overlay's LOD line shows the sections and quads drawn. The HUD is drawn by a tiny immediate-mode layer (`ui.rs`) with its own 5x7 bitmap
-font (`font.rs`, `glyphs.rs`), so there are no UI dependencies.
+public GPU-usage percentage, hence the derived figure. The overlay's LOD line shows the sections
+and quads drawn. In walk mode the character's buttons sit at the bottom right (Crouch, Crawl,
+Roll, Jump) and Act beside the pause button opens a grid of everything else he can do. The HUD
+and menus are drawn by a small immediate-mode layer (`ui.rs`, `ui/screens.rs`, `ui/draw.rs`)
+with no UI dependencies.
 
 Back-face culling is on for solid terrain (water stays double-sided so the surface is visible
 from underwater). Tests prove every face is wound counter-clockwise from outside, both in the
@@ -165,8 +197,8 @@ phone (`SAFE_TOP_DP`, `SAFE_RIGHT_DP` in `ui.rs`).
 
 Culling: back faces (solid terrain only), a real six-plane frustum test per chunk bounding
 box (`math::Frustum`, tested to never reject a visible box), and occlusion culling of chunks
-hidden behind terrain (`cull.rs`, below). The menu's CULL row cycles
-ALL / NOCAVE (no occlusion) / FRUST / BACK / OFF so each can be measured on a device; the
+hidden behind terrain (`cull.rs`, below). Settings > Performance > Culling cycles
+All / No Caves (no occlusion) / Frustum / Back Faces / Off so each can be measured on a device; the
 overlay's DRAWN line shows how many chunk meshes survived culling out of those resident, and
 HIDDEN how many in range and in view were skipped as hidden behind terrain.
 
@@ -186,7 +218,7 @@ views are pixel-identical with it on and off.
 Frustum culling, same camera at each distance (render distance: drawn / meshed chunks):
 6: 94/458, 8: 156/602, 10: 230/706, 12: 315/985, i.e. about 21-33% of meshed chunks. GPU
 milliseconds at a vsync-capped 60 fps are NOT a reliable cost measure (the GPU clocks down to
-fill the frame), so use the menu's VSYNC toggle to read uncapped FPS when comparing settings.
+fill the frame), so use the VSync switch (Settings > Video) to read uncapped FPS when comparing settings.
 The overlay's MAIN THREAD line is the render thread's own CPU use: near 100% = CPU-bound,
 low with low FPS = GPU-bound.
 
@@ -222,7 +254,7 @@ pixel-identical to the old per-chunk buffers on the OpenGL backend.
 
 `world.bfwj` (block edits) and `state.txt` (menu settings, the camera, the time of day) live in the app's
 internal data folder. Both are written when the app goes to the background, because Android
-can kill it there without warning; settings are also written when the menu is closed. The
+can kill it there without warning; settings are also written when they are applied. The
 world file is only rewritten when a block actually changed. When the app comes back, every
 chunk mesh is handed to the new GPU surface again (`Client::requeue_all_meshes`).
 
@@ -419,8 +451,8 @@ Next: trees and plants per biome, rivers, rain shadows behind mountains.
 * **The day** lasts 20 real minutes (`sky::DAY_SECONDS`); a new game starts at 09:00. The sun
   follows a real path (latitude 35 degrees, spring): it rises in the east, stands 65 degrees
   high in the south at noon and sets in the west. As it gets low the glare fades and the sky
-  toward it turns gold and orange; then comes the night (below). The menu's TIME row moves the
-  clock an hour; the time is saved with the camera.
+  toward it turns gold and orange; then comes the night (below). Settings > General > Time of Day (opened from
+  a world's game menu) moves the clock an hour; the time is saved with the camera.
 * **The night** is a second photograph, ambientCG's *Night Sky HDRI 003* (CC0): stars, the Milky
   Way and a moon with its halo. `bake_sky.py --night` takes its smooth background out (the game
   draws that by elevation in the world, in the photo's colours) and keeps the whole sphere,
@@ -448,8 +480,8 @@ Next: trees and plants per biome, rivers, rain shadows behind mountains.
 
 ## The character (`app/src/hyrig`, `app/src/player.rs`, `assets/hyrig`)
 
-* **Walk mode** (the default; MODE in the menu switches to the flying camera and back): you are
-  the HyRig character, seen from behind. VIEW (in the menu, or ACT > VIEW) cycles like
+* **Walk mode** (the default; Settings > General > Mode switches to the flying camera and back): you are
+  the HyRig character, seen from behind. Camera (in Settings, or Act > View) cycles like
   Minecraft's F5: behind, in front looking back at him (the camera sits 3.7 blocks out along
   where you look; blocks are still aimed from his eyes), then first person. The
   left stick walks, jogs or sprints by how far it is pushed; JUMP and ROLL repeat while held;
@@ -494,7 +526,7 @@ Next: trees and plants per biome, rivers, rain shadows behind mountains.
   (terrain and clouds block it); the next frame smears that mask away from the sun's place on
   screen with 12 samples per pixel and adds it on top. Both passes are skipped while the sun is
   down or out of view, and the depth buffer is only kept when they run.
-* The menu's CLOUDS and RAYS buttons turn each off.
+* The Clouds and God Rays switches (Settings > Video) turn each off.
 * The block texture array never has a multiple of six layers (`gfx::array_layers`): on OpenGL
   ES, wgpu would make it a cube map and every block would show the wrong texture.
 
@@ -513,7 +545,7 @@ shader grows them by 0.002 blocks, hiding T-junction cracks.
 
 The tests prove the greedy and simple meshers cover exactly the same unit faces (random blocky
 scenes, flat plates, slab neighbours and real generated terrain) and that every triangle is
-wound outward. The menu's MESH row switches between them at runtime (default SIMPLE until it has
+wound outward. Settings > Performance > Mesher switches between them at runtime (default Simple until it has
 been checked on a phone); the overlay's QUADS line shows the result. The headless demo prints
 quad counts and meshing time for both.
 
@@ -532,9 +564,9 @@ Also texture repeat across merged quads.
 ## Planned next
 
 
-1. Flip the default mesher to GREEDY once it has been checked on a phone (the menu choice is
+1. Flip the default mesher to Greedy once it has been checked on a phone (the setting is
    now remembered, so switching it once is enough to keep testing it); then try one instance
    per quad (8 bytes) on a phone. (The faster per-face scan is done.)
 2. Measure on a phone what occlusion culling, the vertex pool and the faster scan buy (CULL
-   ALL vs NOCAVE, the GPU and MAIN THREAD lines), and check immersive mode on a phone with a
+   All vs No Caves, the GPU and MAIN THREAD lines), and check immersive mode on a phone with a
    camera cut-out and one with 3-button navigation.

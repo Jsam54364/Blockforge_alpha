@@ -624,29 +624,3 @@ fn fs_char(f: CharOut) -> @location(0) vec4<f32> {
     }
     return vec4<f32>(display(col), 1.0);
 }
-
-// ---- HUD: coloured triangles in pixel coordinates (origin top-left) ----
-struct HudIn {
-    @location(0) pos: vec2<f32>,
-    @location(1) color: vec4<f32>,
-};
-
-struct HudOut {
-    @builtin(position) clip: vec4<f32>,
-    @location(0) color: vec4<f32>,
-};
-
-@vertex
-fn vs_hud(v: HudIn) -> HudOut {
-    var o: HudOut;
-    let ndc = vec2<f32>(v.pos.x / g.screen.x * 2.0 - 1.0, 1.0 - v.pos.y / g.screen.y * 2.0);
-    o.clip = vec4<f32>(ndc, 0.0, 1.0);
-    o.color = v.color;
-    return o;
-}
-
-@fragment
-fn fs_hud(f: HudOut) -> @location(0) vec4<f32> {
-    // HUD colours are authored as sRGB bytes; the surface is sRGB, so go to linear first.
-    return vec4<f32>(pow(f.color.rgb, vec3<f32>(2.2)), f.color.a);
-}

@@ -58,7 +58,7 @@ const SHADER: &str = include_str!("shader.wgsl");
 
 const VERTEX_ATTRS: [wgpu::VertexAttribute; 1] = wgpu::vertex_attr_array![0 => Uint32x2];
 const INSTANCE_ATTRS: [wgpu::VertexAttribute; 1] = wgpu::vertex_attr_array![1 => Float32x4];
-const HUD_ATTRS: [wgpu::VertexAttribute; 2] = wgpu::vertex_attr_array![0 => Float32x2, 1 => Unorm8x4];
+const HUD_ATTRS: [wgpu::VertexAttribute; 4] = wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Unorm8x4, 3 => Uint32];
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -612,7 +612,11 @@ pub struct Gfx {
     pipe_water: wgpu::RenderPipeline,
     pipe_lod: wgpu::RenderPipeline,
     pipe_sky: wgpu::RenderPipeline,
-    pipe_hud: wgpu::RenderPipeline,
+    /// The HUD and menus (`ui.wgsl`): pipeline, atlas, thumbnails.
+    ui: UiGpu,
+    /// Set by `capture_world`: the next `render` draws into a texture and keeps the picture.
+    capture_next: bool,
+    captured: Option<(Vec<u8>, u32, u32)>,
     /// The title screen's turning panorama (`title.rs`, `title.wgsl`).
     pipe_title: wgpu::RenderPipeline,
     bind_title: wgpu::BindGroup,
@@ -891,7 +895,7 @@ impl Gfx {
             },
             true,
         );
-        let pipe_hud = hud_pipeline(&device, &layout, &shader, format);
+        let ui = ui_pipeline(&device, &queue, format);
         let (pipe_title, bind_title, title_uniform) = title_pipeline(&device, &queue, format);
 
         let index_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -943,7 +947,9 @@ impl Gfx {
             pipe_water,
             pipe_lod,
             pipe_sky,
-            pipe_hud,
+            ui,
+            capture_next: false,
+            captured: None,
             pipe_title,
             bind_title,
             title_uniform,
@@ -1053,6 +1059,41 @@ impl Gfx {
     /// Newest GPU frame time in ms, if the device supports timing and a result arrived.
     pub fn take_gpu_ms(&mut self) -> Option<f32> {
         self.timer.as_mut().and_then(|t| t.take())
+    }
+
+    fn write_ui_screen(&self) {
+        let size = [self.config.width as f32, self.config.height as f32, 0.0, 0.0];
+        self.queue.write_buffer(&self.ui.uniform, 0, as_bytes(&size));
+    }
+
+    /// Puts a world's picture (`THUMB_W` x `THUMB_H` RGBA, sRGB) in thumbnail slot `slot`.
+    pub fn set_thumbnail(&self, slot: usize, rgba: &[u8]) {
+        if slot >= THUMB_SLOTS || rgba.len() != (THUMB_W * THUMB_H * 4) as usize {
+            return;
+        }
+        let (x, y) = thumb_origin(slot);
+        self.queue.write_texture(
+            wgpu::ImageCopyTexture { texture: &self.ui.thumbs, mip_level: 0, origin: wgpu::Origin3d { x, y, z: 0 }, aspect: wgpu::TextureAspect::All },
+            rgba,
+            wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(4 * THUMB_W), rows_per_image: Some(THUMB_H) },
+            wgpu::Extent3d { width: THUMB_W, height: THUMB_H, depth_or_array_layers: 1 },
+        );
+    }
+
+    /// Draws the world once, without the HUD, into a texture, and returns the picture
+    /// (RGBA, sRGB, full window size): a world's thumbnail is made from it.
+    pub fn capture_world(
+        &mut self,
+        client: &mut Client,
+        cam: &CameraView,
+        view_blocks: f32,
+        opts: &RenderOptions,
+    ) -> Option<(Vec<u8>, u32, u32)> {
+        self.capture_next = true;
+        self.captured = None;
+        let _ = self.render(client, cam, view_blocks, opts, &[]);
+        self.capture_next = false;
+        self.captured.take()
     }
 
     pub fn resize(&mut self, w: u32, h: u32) {
@@ -1307,15 +1348,36 @@ impl Gfx {
         globals.fog_params[2] = 0.65;
         self.queue.write_buffer(&self.globals_water, 0, as_bytes(std::slice::from_ref(&globals)));
 
-        let hud_verts = hud.len().min(MAX_HUD_VERTS);
+        // A capture (`capture_world`) draws the world alone into a texture of its own.
+        let capture = std::mem::take(&mut self.capture_next);
+        let hud_verts = if capture { 0 } else { hud.len().min(MAX_HUD_VERTS) };
         if hud_verts > 0 {
             self.queue.write_buffer(&self.hud_buf, 0, as_bytes(&hud[..hud_verts]));
+            self.write_ui_screen();
         }
 
         let acquire_start = Instant::now();
-        let frame = self.surface.get_current_texture()?;
+        let (frame, offscreen) = if capture {
+            let t = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("capture"),
+                size: wgpu::Extent3d { width: self.config.width, height: self.config.height, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: self.config.format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+            (None, Some(t))
+        } else {
+            (Some(self.surface.get_current_texture()?), None)
+        };
         let acquire_wait = acquire_start.elapsed();
-        let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let view = match (&frame, &offscreen) {
+            (Some(f), _) => f.texture.create_view(&wgpu::TextureViewDescriptor::default()),
+            (None, Some(t)) => t.create_view(&wgpu::TextureViewDescriptor::default()),
+            _ => unreachable!(),
+        };
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame") });
@@ -1416,8 +1478,8 @@ impl Gfx {
 
             // HUD (crosshair, stats, menu)
             if hud_verts > 0 {
-                pass.set_pipeline(&self.pipe_hud);
-                pass.set_bind_group(0, &self.bind_solid, &[]);
+                pass.set_pipeline(&self.ui.pipe);
+                pass.set_bind_group(0, &self.ui.bind, &[]);
                 pass.set_vertex_buffer(0, self.hud_buf.slice(0..(hud_verts * std::mem::size_of::<HudVertex>()) as u64));
                 pass.draw(0..hud_verts as u32, 0..1);
             }
@@ -1444,9 +1506,13 @@ impl Gfx {
         if let Some(t) = self.timer.as_mut() {
             t.encode(&mut encoder);
         }
+        if let Some(t) = &offscreen {
+            self.captured = read_back(&self.device, &self.queue, encoder, t, self.config.format);
+            return Ok(acquire_wait);
+        }
         self.queue.submit(std::iter::once(encoder.finish()));
         let present_start = Instant::now();
-        frame.present();
+        frame.expect("a frame").present();
         let present_wait = present_start.elapsed();
         if let Some(t) = self.timer.as_mut() {
             t.after_submit(&self.device);
@@ -1460,8 +1526,7 @@ impl Gfx {
         let (w, h) = (self.config.width as f32, self.config.height as f32);
         let view = [yaw, (crate::title::FOVY * 0.5).tan(), w / h.max(1.0), 1.0];
         self.queue.write_buffer(&self.title_uniform, 0, as_bytes(&view));
-        // The HUD needs only the screen size from the globals.
-        self.queue.write_buffer(&self.globals_solid, std::mem::offset_of!(Globals, screen) as u64, as_bytes(&[w, h, 0.0, 0.0]));
+        self.write_ui_screen();
         let hud_verts = hud.len().min(MAX_HUD_VERTS);
         if hud_verts > 0 {
             self.queue.write_buffer(&self.hud_buf, 0, as_bytes(&hud[..hud_verts]));
@@ -1491,8 +1556,8 @@ impl Gfx {
             pass.set_bind_group(0, &self.bind_title, &[]);
             pass.draw(0..3, 0..1);
             if hud_verts > 0 {
-                pass.set_pipeline(&self.pipe_hud);
-                pass.set_bind_group(0, &self.bind_solid, &[]);
+                pass.set_pipeline(&self.ui.pipe);
+                pass.set_bind_group(0, &self.ui.bind, &[]);
                 pass.set_vertex_buffer(0, self.hud_buf.slice(0..(hud_verts * std::mem::size_of::<HudVertex>()) as u64));
                 pass.draw(0..hud_verts as u32, 0..1);
             }
@@ -1749,18 +1814,170 @@ fn title_pipeline(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::Text
     (pipe, bind, uniform)
 }
 
-fn hud_pipeline(
+/// Thumbnails: 256 x 144 pictures, 4 across and 7 down a 1024 x 1024 texture.
+pub const THUMB_W: u32 = crate::worlds::THUMB_W;
+pub const THUMB_H: u32 = crate::worlds::THUMB_H;
+pub const THUMB_SLOTS: usize = 28;
+const THUMBS_SIZE: u32 = 1024;
+
+/// Where thumbnail slot `slot` starts in the thumbnails' texture, in pixels.
+pub fn thumb_origin(slot: usize) -> (u32, u32) {
+    ((slot % 4) as u32 * THUMB_W, (slot / 4) as u32 * THUMB_H)
+}
+
+/// The thumbnails' texture coordinates of slot `slot` (u0, v0, u1, v1).
+pub fn thumb_uv(slot: usize) -> [f32; 4] {
+    let (x, y) = thumb_origin(slot);
+    let s = THUMBS_SIZE as f32;
+    [x as f32 / s, y as f32 / s, (x + THUMB_W) as f32 / s, (y + THUMB_H) as f32 / s]
+}
+
+struct UiGpu {
+    pipe: wgpu::RenderPipeline,
+    bind: wgpu::BindGroup,
+    uniform: wgpu::Buffer,
+    thumbs: wgpu::Texture,
+}
+
+/// Copies `t` into a buffer, waits for it, and returns its pixels as RGBA.
+fn read_back(
     device: &wgpu::Device,
-    layout: &wgpu::PipelineLayout,
-    shader: &wgpu::ShaderModule,
+    queue: &wgpu::Queue,
+    mut encoder: wgpu::CommandEncoder,
+    t: &wgpu::Texture,
     format: wgpu::TextureFormat,
-) -> wgpu::RenderPipeline {
-    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("hud"),
-        layout: Some(layout),
+) -> Option<(Vec<u8>, u32, u32)> {
+    let (w, h) = (t.width(), t.height());
+    let row = (4 * w).div_ceil(256) * 256;
+    let buf = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("capture read back"),
+        size: (row * h) as u64,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    encoder.copy_texture_to_buffer(
+        wgpu::ImageCopyTexture { texture: t, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+        wgpu::ImageCopyBuffer { buffer: &buf, layout: wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: Some(h) } },
+        wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+    );
+    queue.submit(std::iter::once(encoder.finish()));
+    let slice = buf.slice(..);
+    let (tx, rx) = std::sync::mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |r| {
+        let _ = tx.send(r);
+    });
+    device.poll(wgpu::Maintain::Wait);
+    rx.recv().ok()?.ok()?;
+    let data = slice.get_mapped_range();
+    let bgra = matches!(format, wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb);
+    let mut out = Vec::with_capacity((w * h * 4) as usize);
+    for y in 0..h {
+        let r = &data[(y * row) as usize..(y * row + 4 * w) as usize];
+        for p in r.chunks_exact(4) {
+            if bgra {
+                out.extend_from_slice(&[p[2], p[1], p[0], 255]);
+            } else {
+                out.extend_from_slice(&[p[0], p[1], p[2], 255]);
+            }
+        }
+    }
+    drop(data);
+    buf.unmap();
+    Some((out, w, h))
+}
+
+/// The HUD's pipeline: `ui.wgsl` with the UI atlas and the thumbnails' texture.
+fn ui_pipeline(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::TextureFormat) -> UiGpu {
+    let texture = |label: &str, w: u32, h: u32| {
+        device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(label),
+            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        })
+    };
+    // The atlas.
+    let dec = png::Decoder::new(crate::atlas::ATLAS_PNG);
+    let mut reader = dec.read_info().expect("UI atlas PNG");
+    let mut px = vec![0u8; reader.output_buffer_size()];
+    let info = reader.next_frame(&mut px).expect("UI atlas pixels");
+    let (aw, ah) = (info.width, info.height);
+    let atlas = texture("ui atlas", aw, ah);
+    queue.write_texture(
+        wgpu::ImageCopyTexture { texture: &atlas, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+        &px[..(aw * ah * 4) as usize],
+        wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(4 * aw), rows_per_image: Some(ah) },
+        wgpu::Extent3d { width: aw, height: ah, depth_or_array_layers: 1 },
+    );
+    let thumbs = texture("world thumbnails", THUMBS_SIZE, THUMBS_SIZE);
+    let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("ui"),
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        ..Default::default()
+    });
+    let uniform = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("ui screen"),
+        size: 16,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let tex_entry = |binding| wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Texture {
+            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+            view_dimension: wgpu::TextureViewDimension::D2,
+            multisampled: false,
+        },
+        count: None,
+    };
+    let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("ui layout"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
+                count: None,
+            },
+            tex_entry(1),
+            tex_entry(2),
+            wgpu::BindGroupLayoutEntry {
+                binding: 3,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+        ],
+    });
+    let atlas_view = atlas.create_view(&wgpu::TextureViewDescriptor::default());
+    let thumbs_view = thumbs.create_view(&wgpu::TextureViewDescriptor::default());
+    let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("ui"),
+        layout: &bgl,
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: uniform.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&atlas_view) },
+            wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&thumbs_view) },
+            wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&sampler) },
+        ],
+    });
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("ui"), bind_group_layouts: &[&bgl], push_constant_ranges: &[] });
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("ui shader"),
+        source: wgpu::ShaderSource::Wgsl(include_str!("ui.wgsl").into()),
+    });
+    let pipe = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("ui"),
+        layout: Some(&layout),
         vertex: wgpu::VertexState {
-            module: shader,
-            entry_point: "vs_hud",
+            module: &shader,
+            entry_point: "vs_ui",
             compilation_options: wgpu::PipelineCompilationOptions::default(),
             buffers: &[wgpu::VertexBufferLayout {
                 array_stride: std::mem::size_of::<HudVertex>() as u64,
@@ -1769,17 +1986,13 @@ fn hud_pipeline(
             }],
         },
         fragment: Some(wgpu::FragmentState {
-            module: shader,
-            entry_point: "fs_hud",
+            module: &shader,
+            entry_point: "fs_ui",
             compilation_options: wgpu::PipelineCompilationOptions::default(),
-            targets: &[Some(wgpu::ColorTargetState {
-                format,
-                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
+            targets: &[Some(wgpu::ColorTargetState { format, blend: Some(wgpu::BlendState::ALPHA_BLENDING), write_mask: wgpu::ColorWrites::ALL })],
         }),
         primitive: wgpu::PrimitiveState::default(),
-        // The pass has a depth attachment, so every pipeline in it must declare depth state.
+        // The passes have a depth attachment, so every pipeline in them declares depth state.
         depth_stencil: Some(wgpu::DepthStencilState {
             format: DEPTH_FORMAT,
             depth_write_enabled: false,
@@ -1790,7 +2003,8 @@ fn hud_pipeline(
         multisample: wgpu::MultisampleState::default(),
         multiview: None,
         cache: None,
-    })
+    });
+    UiGpu { pipe, bind, uniform, thumbs }
 }
 
 #[cfg(test)]
@@ -1880,7 +2094,7 @@ mod tests {
         assert!(ray_params(&vp, eye, sun, sun, 0.0).is_none(), "sun below the horizon");
         let away = [-sun[0], -sun[1], -sun[2]];
         assert!(ray_params(&math::view_proj(eye, away, 2.0), eye, away, sun, 1.0).is_none(), "sun behind");
-        assert_eq!(std::mem::size_of::<HudVertex>(), 12);
+        assert_eq!(std::mem::size_of::<HudVertex>(), 24);
     }
 
     #[test]
