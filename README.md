@@ -7,7 +7,7 @@ A mobile-first voxel engine in Rust, in two crates:
   architecture lives here and is tested without a GPU.
 * the **app** (`app/`): the Android front-end. winit + wgpu renderer, touch controls and HUD.
 
-> **Status:** 104 unit + 9 end-to-end tests in the core and 78 in the app (plus WGSL
+> **Status:** 105 unit + 9 end-to-end tests in the core and 78 in the app (plus WGSL
 > validation) pass. The APK builds on GitHub Actions and has been run and measured on a phone
 > (see the numbers further down).
 
@@ -440,15 +440,24 @@ wound outward. The menu's MESH row switches between them at runtime (default SIM
 been checked on a phone); the overlay's QUADS line shows the result. The headless demo prints
 quad counts and meshing time for both.
 
-Not yet done: iterate only the non-eligible voxels in the per-face path (it still scans all 32^3),
-draw one instance per quad (8 bytes instead of 32), texture repeat across merged quads.
+The per-face path no longer looks at every cell: it first builds one 64-bit mask per row along x
+(which cells hold a block, which are full height, which hide any face touching them) and visits
+only blocks that are not full height or are not walled in on all six sides, which skips deep
+stone and air in a few instructions per row. On the build machine that made the SIMPLE mesher
+about 4x faster (685 chunks around the spawn: 517 ms before, 122 ms after; same quads, checked by
+a test against a plain per-face look on random scenes).
+
+Not yet done: one instance per quad (8 bytes instead of 32). Held back on purpose: drawing
+instances of 4 vertices is slow on some phone GPUs (vertex work is shaded in batches, and tiny
+instances waste most of each batch), so it should be tried on a phone first, behind a switch.
+Also texture repeat across merged quads.
 
 ## Planned next
 
 
 1. Flip the default mesher to GREEDY once it has been checked on a phone (the menu choice is
-   now remembered, so switching it once is enough to keep testing it); then one instance per
-   quad (8 bytes) and a faster scan for the per-face path.
+   now remembered, so switching it once is enough to keep testing it); then try one instance
+   per quad (8 bytes) on a phone. (The faster per-face scan is done.)
 2. Occlusion culling (cave-style flood fill) to skip chunks hidden behind terrain, which should
    help most underground.
 3. Show edits in LOD terrain (see "Level-of-detail terrain").

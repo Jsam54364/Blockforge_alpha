@@ -469,15 +469,75 @@ pub fn mesh_chunk_greedy(reg: &BlockRegistry, pc: &PaddedChunk) -> ChunkMesh {
     mesh
 }
 
+/// One row of cells along x (the chunk's 32 and one neighbour on each side, bit x + 1) as bit
+/// masks: which hold a block, which are full height, and which hide any face that touches
+/// them (opaque full cubes, and unloaded neighbours).
+#[derive(Clone, Copy, Default)]
+struct Row {
+    block: u64,
+    full: u64,
+    hides: u64,
+}
+
+const ROW_SPAN: i32 = CHUNK_SIZE + 2;
+
+/// The rows of a chunk and its one-voxel shell, indexed [(y + 1) * ROW_SPAN + z + 1].
+fn rows(reg: &BlockRegistry, pc: &PaddedChunk) -> Vec<Row> {
+    let mut rows = vec![Row::default(); (ROW_SPAN * ROW_SPAN) as usize];
+    // Runs of one block are the rule (stone, air, water), so remember the last answer.
+    let mut last = (UNKNOWN, (false, false, true));
+    for y in -1..=CHUNK_SIZE {
+        for z in -1..=CHUNK_SIZE {
+            let row = &mut rows[((y + 1) * ROW_SPAN + z + 1) as usize];
+            for x in -1..=CHUNK_SIZE {
+                let s = pc.at(x, y, z);
+                let (block, full, hides) = if s == last.0 {
+                    last.1
+                } else {
+                    let k = if s == UNKNOWN {
+                        (false, false, true)
+                    } else if s.is_air() {
+                        (false, false, false)
+                    } else {
+                        let full = s.shape().y_range_q() == (0, 4);
+                        (true, full, full && reg.get(s).opaque)
+                    };
+                    last = (s, k);
+                    k
+                };
+                let bit = 1u64 << (x + 1);
+                if block {
+                    row.block |= bit;
+                }
+                if full {
+                    row.full |= bit;
+                }
+                if hides {
+                    row.hides |= bit;
+                }
+            }
+        }
+    }
+    rows
+}
+
 fn mesh_chunk_impl(reg: &BlockRegistry, pc: &PaddedChunk, skip_greedy: bool) -> ChunkMesh {
     let mut mesh = ChunkMesh::default();
+    // Only blocks that can show a face are visited: a full-height block with a hiding block on
+    // all six sides has none, and most of a chunk is either that (deep stone) or air.
+    let rows = rows(reg, pc);
+    let at = |y: i32, z: i32| rows[((y + 1) * ROW_SPAN + z + 1) as usize];
+    let inside: u64 = ((1u64 << CHUNK_SIZE) - 1) << 1;
     for y in 0..CHUNK_SIZE {
         for z in 0..CHUNK_SIZE {
-            for x in 0..CHUNK_SIZE {
+            let r = at(y, z);
+            let enclosed =
+                (r.hides << 1) & (r.hides >> 1) & at(y - 1, z).hides & at(y + 1, z).hides & at(y, z - 1).hides & at(y, z + 1).hides;
+            let mut todo = r.block & !(r.full & enclosed) & inside;
+            while todo != 0 {
+                let x = todo.trailing_zeros() as i32 - 1;
+                todo &= todo - 1;
                 let state = pc.at(x, y, z);
-                if state.is_air() {
-                    continue;
-                }
                 if skip_greedy && crate::greedy::is_eligible(reg, state) {
                     continue;
                 }
@@ -674,6 +734,58 @@ mod tests {
         let m = mesh_chunk(&r, &pc);
         assert_eq!(m.opaque.quad_count(), 0);
         assert_eq!(m.translucent.quad_count(), 10);
+    }
+
+    #[test]
+    fn the_row_scan_finds_every_visible_face() {
+        // Against a plain look at every face of every block, in random scenes of all shapes,
+        // with loaded and unloaded borders.
+        let r = reg();
+        let id = |n: &str| r.id(n).unwrap();
+        let pal = [
+            AIR,
+            AIR,
+            BlockState::full(id("stone")),
+            BlockState::full(id("water")),
+            BlockState::full(id("leaves")),
+            BlockState::full(id("glowstone")),
+            BlockState::new(id("stone"), Shape::SlabBottom),
+            BlockState::new(id("stone"), Shape::SlabTop),
+            BlockState::new(id("dirt"), Shape::Quarter),
+        ];
+        for seed in 0..6u64 {
+            let mut pc = PaddedChunk::filled(UNKNOWN);
+            for y in -1..=CHUNK_SIZE {
+                for z in -1..=CHUNK_SIZE {
+                    for x in -1..=CHUNK_SIZE {
+                        let border = !(0..CHUNK_SIZE).contains(&x) || !(0..CHUNK_SIZE).contains(&y) || !(0..CHUNK_SIZE).contains(&z);
+                        if border && seed % 2 == 0 {
+                            continue;
+                        }
+                        let k = 1 + seed as i32 % 3;
+                        let h = crate::rng::hash3(seed, x.div_euclid(k), y.div_euclid(k), z.div_euclid(k));
+                        pc.set(x, y, z, pal[(h % pal.len() as u64) as usize]);
+                    }
+                }
+            }
+            let mut faces = 0;
+            for y in 0..CHUNK_SIZE {
+                for z in 0..CHUNK_SIZE {
+                    for x in 0..CHUNK_SIZE {
+                        let s = pc.at(x, y, z);
+                        if s.is_air() {
+                            continue;
+                        }
+                        for f in Face::ALL {
+                            let (nx, ny, nz) = f.normal();
+                            faces += !face_hidden(&r, s, f, pc.at(x + nx, y + ny, z + nz)) as usize;
+                        }
+                    }
+                }
+            }
+            assert!(faces > 1000, "seed {seed}: a scene with faces");
+            assert_eq!(mesh_chunk(&r, &pc).quad_count(), faces, "seed {seed}");
+        }
     }
 
     #[test]
