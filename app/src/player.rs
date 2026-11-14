@@ -11,6 +11,13 @@ use crate::hyrig::{BlockWorld, Blocks, Config, Controller, Input, Rig, View, Wor
 const STEP: f64 = 0.6;
 /// How far the eyes are above the feet, for placing the camera before the character exists.
 const EYE: f64 = 1.6;
+/// A change of footing at least this high in one frame is a step (a half slab, a quarter
+/// layer), not ordinary motion; it is shown eased over a moment instead of as a jolt.
+const STEP_MIN: f64 = 0.2;
+/// How fast the eased step catches up, per second (most of it in a sixth of a second).
+const STEP_EASE: f64 = 14.0;
+/// How far in front of his face the front camera sits.
+const FRONT_DISTANCE: f64 = 3.74;
 /// Falling out of the world (through unloaded or dug-out ground) puts him back on top.
 const VOID_Y: f64 = -300.0;
 
@@ -35,6 +42,23 @@ pub struct Player {
     presses: Vec<String>,
     /// The camera's place as of the last frame.
     eye: [f32; 3],
+    /// Stepping onto or off a half slab moves him at once (so collisions stay exact); this is
+    /// how far the drawn body and the camera still lag behind, easing to zero.
+    lift: f64,
+    /// His height and whether he stood on the ground in the last frame.
+    last_y: f64,
+    last_grounded: bool,
+}
+
+/// The lag to add when the footing changed from `before` to `after` in one frame: the whole
+/// change for a step taken on the ground, nothing for anything else (jumps, falls, climbing).
+fn step_lag(before: f64, after: f64, on_ground: bool) -> f64 {
+    let dy = after - before;
+    if on_ground && dy.abs() >= STEP_MIN && dy.abs() <= STEP + 0.05 {
+        -dy
+    } else {
+        0.0
+    }
 }
 
 impl Player {
@@ -53,6 +77,9 @@ impl Player {
             roll: false,
             presses: Vec::new(),
             eye: [at[0] as f32, (at[1] + EYE) as f32, at[2] as f32],
+            lift: 0.0,
+            last_y: at[1],
+            last_grounded: false,
         }
     }
 
@@ -86,7 +113,9 @@ impl Player {
     /// One frame: moves and poses the character and returns where the camera goes.
     /// `stick` is (right, forward); `look` is the view's (yaw, pitch) in the controller's
     /// sense (yaw 0 faces +Z). With `control` off he stands by himself (the fly camera).
-    pub fn update(&mut self, client: &Client, dt: f64, stick: (f32, f32), look: (f64, f64), aspect: f64, control: bool) -> [f32; 3] {
+    /// `front` puts the camera in front of him, looking back (only in the follow view).
+    #[allow(clippy::too_many_arguments)]
+    pub fn update(&mut self, client: &Client, dt: f64, stick: (f32, f32), look: (f64, f64), aspect: f64, control: bool, front: bool) -> [f32; 3] {
         let blocks = ClientBlocks(client);
         let world = BlockWorld { step_height: STEP, ..BlockWorld::new(&blocks) };
         if let Some(at) = self.waiting {
@@ -96,6 +125,7 @@ impl Player {
             }
             self.ctl.teleport(&world, at[0], Some(at[1]), at[2], Some(look.0));
             self.waiting = None;
+            (self.lift, self.last_y, self.last_grounded) = (0.0, at[1], false);
         }
         let p = self.ctl.pos;
         if !world.loaded(p[0], p[1], p[2]) {
@@ -114,7 +144,16 @@ impl Player {
             roll: control && self.roll,
             actions: std::mem::take(&mut self.presses),
         };
-        let out = self.ctl.update(&world, dt, &input);
+        let mut out = self.ctl.update(&world, dt, &input);
+        // Steps are eased: the body and the camera rise or sink over a moment.
+        let stepping = self.last_grounded && out.grounded && !self.ctl.is_climbing();
+        self.lift += step_lag(self.last_y, out.position[1], stepping);
+        self.lift *= (-dt * STEP_EASE).exp();
+        if self.lift.abs() < 1e-3 {
+            self.lift = 0.0;
+        }
+        (self.last_y, self.last_grounded) = (out.position[1], out.grounded);
+        out.position[1] += self.lift;
         let pose = self.rig.pose(&out, [0.0; 3]);
         self.verts.clear();
         self.rig.triangles(&pose, &mut self.verts);
@@ -123,9 +162,20 @@ impl Player {
         let cam = self.ctl.camera(dt, head, aspect);
         let mut at = cam.position;
         if out.view == View::Follow {
-            // Keep the camera out of the ground and walls: walk from the shoulder back toward
-            // where it wants to be and stop short of the first solid block.
-            let from = self.ctl.camera_pivot();
+            // Behind him: from the shoulder back to where the controller puts the camera.
+            // In front: from his face out along the way he is looking, to look back at him.
+            let mut from = self.ctl.camera_pivot();
+            if front {
+                let (cp, sp) = (look.1.cos(), look.1.sin());
+                from = [head[0], head[1] + 0.1, head[2]];
+                at = [from[0] + look.0.sin() * cp * FRONT_DISTANCE, from[1] + sp * FRONT_DISTANCE, from[2] + look.0.cos() * cp * FRONT_DISTANCE];
+            } else {
+                // The controller's camera follows his true height; ease it over steps too.
+                from[1] += self.lift * 0.5;
+                at[1] += self.lift * 0.5;
+            }
+            // Keep the camera out of the ground and walls: walk toward where it wants to be
+            // and stop short of the first solid block.
             let d = [at[0] - from[0], at[1] - from[1], at[2] - from[2]];
             let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
             let inside = |t: f64| {
@@ -162,6 +212,22 @@ mod tests {
     use std::time::Duration;
 
     #[test]
+    fn only_steps_taken_on_the_ground_are_eased() {
+        assert_eq!(step_lag(10.0, 10.5, true), -0.5, "up a half slab: drawn half a block low at first");
+        assert_eq!(step_lag(10.5, 10.0, true), 0.5, "and down one");
+        assert_eq!(step_lag(10.0, 10.25, true), -0.25);
+        assert_eq!(step_lag(10.0, 10.5, false), 0.0, "not in the air");
+        assert_eq!(step_lag(10.0, 10.03, true), 0.0, "not ordinary motion (climbing, slopes)");
+        assert_eq!(step_lag(10.0, 11.0, true), 0.0, "not a teleport");
+        // Most of a step is caught up within a sixth of a second.
+        let mut lift: f64 = 0.5;
+        for _ in 0..10 {
+            lift *= (-STEP_EASE / 60.0f64).exp();
+        }
+        assert!(lift < 0.06 && lift > 0.01, "{lift}");
+    }
+
+    #[test]
     fn he_drops_onto_real_terrain_then_runs_and_jumps_across_it_without_entering_a_block() {
         let reg = Arc::new(BlockRegistry::builtin());
         let handle = server::spawn(ServerConfig { seed: 1337, worker_threads: 2, ..ServerConfig::default() }, reg.clone());
@@ -176,7 +242,7 @@ mod tests {
         // The world arrives; he is put down and falls the last few blocks.
         for _ in 0..5000 {
             client.update();
-            p.update(&client, 1.0 / 60.0, (0.0, 0.0), (0.0, 0.0), 1.8, true);
+            p.update(&client, 1.0 / 60.0, (0.0, 0.0), (0.0, 0.0), 1.8, true, false);
             if p.waiting.is_none() && p.ctl.is_grounded() {
                 break;
             }
@@ -205,7 +271,10 @@ mod tests {
                 client.set_position([q[0] as f32, q[1] as f32, q[2] as f32]);
             }
             client.update();
-            let eye = p.update(&client, 1.0 / 60.0, (0.0, 1.0), (0.0, -0.2), 1.8, true);
+            let eye = p.update(&client, 1.0 / 60.0, (0.0, 1.0), (0.0, -0.2), 1.8, true, i % 2 == 1);
+            // The back camera is behind him (he runs toward +Z), the front one ahead.
+            let ahead = eye[2] as f64 - p.position()[2];
+            assert!(if i % 2 == 1 { ahead > -0.5 } else { ahead < 0.5 }, "camera {ahead:.2} ahead on frame {i}");
             let q = p.position();
             assert!(!solid_at(&client, [q[0], q[1] + 0.9, q[2]]), "his middle is inside a block at {q:?} (frame {i})");
             assert!(!solid_at(&client, [eye[0] as f64, eye[1] as f64, eye[2] as f64]), "the camera is inside a block at {eye:?}");

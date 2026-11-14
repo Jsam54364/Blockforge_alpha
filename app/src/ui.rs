@@ -91,8 +91,47 @@ pub struct Settings {
     pub god_rays: bool,
     /// Walking as the character (true) or the free-flying camera.
     pub walk: bool,
-    /// The camera behind the character (true) or in his head.
-    pub third_person: bool,
+    /// Where the camera is while walking.
+    pub view: CamView,
+}
+
+/// The walking camera, cycled like Minecraft's F5: behind the character, in front of him
+/// looking back, or in his head.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CamView {
+    First,
+    Back,
+    Front,
+}
+
+impl CamView {
+    pub fn next(self) -> CamView {
+        match self {
+            CamView::Back => CamView::Front,
+            CamView::Front => CamView::First,
+            CamView::First => CamView::Back,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            CamView::First => "1ST",
+            CamView::Back => "3RD",
+            CamView::Front => "FRONT",
+        }
+    }
+
+    fn key(self) -> &'static str {
+        match self {
+            CamView::First => "first",
+            CamView::Back => "back",
+            CamView::Front => "front",
+        }
+    }
+
+    fn from_key(s: &str) -> Option<CamView> {
+        [CamView::First, CamView::Back, CamView::Front].into_iter().find(|v| v.key() == s)
+    }
 }
 
 impl Default for Settings {
@@ -109,7 +148,7 @@ impl Default for Settings {
             clouds: true,
             god_rays: true,
             walk: true,
-            third_person: true,
+            view: CamView::Back,
         }
     }
 }
@@ -118,7 +157,7 @@ impl Settings {
     /// `key=value` lines, one per setting, for the settings file kept between launches.
     pub fn to_text(&self) -> String {
         format!(
-            "render_chunks={}\nlod_level={}\nlod_quality={}\nfog={}\ncull={}\nvsync={}\ngreedy={}\nshow_stats={}\nclouds={}\ngod_rays={}\nwalk={}\nthird_person={}\n",
+            "render_chunks={}\nlod_level={}\nlod_quality={}\nfog={}\ncull={}\nvsync={}\ngreedy={}\nshow_stats={}\nclouds={}\ngod_rays={}\nwalk={}\nview={}\n",
             self.render_chunks,
             self.lod_level,
             self.lod_quality,
@@ -130,7 +169,7 @@ impl Settings {
             self.clouds,
             self.god_rays,
             self.walk,
-            self.third_person
+            self.view.key()
         )
     }
 
@@ -144,6 +183,11 @@ impl Settings {
                 "render_chunks" => {
                     if let Ok(v) = value.parse::<u8>() {
                         self.render_chunks = v.clamp(RENDER_MIN, RENDER_MAX);
+                    }
+                }
+                "view" => {
+                    if let Some(v) = CamView::from_key(value) {
+                        self.view = v;
                     }
                 }
                 "lod_level" => {
@@ -167,7 +211,8 @@ impl Settings {
                         "fog" => self.fog = v,
                         "clouds" => self.clouds = v,
                         "walk" => self.walk = v,
-                        "third_person" => self.third_person = v,
+                        // (what the view was saved as before there were three)
+                        "third_person" => self.view = if v { CamView::Back } else { CamView::First },
                         "god_rays" => self.god_rays = v,
                         "vsync" => self.vsync = v,
                         "greedy" => self.greedy = v,
@@ -417,7 +462,7 @@ impl Ui {
                 false
             }
             Action::ToggleView => {
-                self.settings.third_person = !self.settings.third_person;
+                self.settings.view = self.settings.view.next();
                 false
             }
             Action::ToggleActs => {
@@ -607,7 +652,7 @@ impl Ui {
             (Action::ToggleClouds, format!("CLOUDS {}", on_off(s.clouds))),
             (Action::ToggleRays, format!("RAYS {}", on_off(s.god_rays))),
             (Action::ToggleWalk, format!("MODE {}", if s.walk { "WALK" } else { "FLY" })),
-            (Action::ToggleView, format!("VIEW {}", if s.third_person { "3RD" } else { "1ST" })),
+            (Action::ToggleView, format!("VIEW {}", s.view.label())),
         ];
         let cell_w = (panel_w - pad * 4.0) / 3.0;
         for (i, (action, label)) in toggles.iter().enumerate() {
@@ -661,7 +706,7 @@ mod tests {
             clouds: false,
             god_rays: false,
             walk: false,
-            third_person: false,
+            view: CamView::Front,
         };
         let mut back = Settings::default();
         back.apply_text(&s.to_text());

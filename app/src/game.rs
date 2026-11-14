@@ -30,7 +30,7 @@ use winit::event::TouchPhase;
 use crate::hyrig::View;
 use crate::player::Player;
 use crate::sky::Clock;
-use crate::ui::{Action, Ui, LOD_DISTANCES, LOD_QUALITY};
+use crate::ui::{Action, CamView, Ui, LOD_DISTANCES, LOD_QUALITY};
 
 const LOOK_SENS: f32 = 0.0045;
 const FLY_SPEED: f32 = 14.0;
@@ -173,7 +173,7 @@ impl Game {
 
         // The character starts where he was left, or at the spawn (a little above the ground:
         // he drops onto it once it has loaded).
-        let view = if ui.settings.third_person { View::Follow } else { View::First };
+        let view = if ui.settings.view == CamView::First { View::First } else { View::Follow };
         let player_at = saved_player(&saved).filter(|_| same_world).unwrap_or_else(|| {
             let [x, y, z] = gen.find_spawn();
             [x as f64 + 0.5, y as f64 + 1.5, z as f64 + 0.5]
@@ -322,7 +322,8 @@ impl Game {
             self.player.place([c[0] as f64, c[1] as f64 - 1.6, c[2] as f64]);
         }
         self.walking = walk;
-        let view = if self.ui.settings.third_person { View::Follow } else { View::First };
+        let cam_view = self.ui.settings.view;
+        let view = if cam_view == CamView::First { View::First } else { View::Follow };
         if self.player.ctl.view != view {
             self.player.ctl.set_view(view);
         }
@@ -340,7 +341,7 @@ impl Game {
         let aspect = self.size.0 as f64 / self.size.1 as f64;
         self.player.jump = self.held.values().any(|b| *b == "jump");
         self.player.roll = self.held.values().any(|b| *b == "roll");
-        let eye = self.player.update(&self.client, dt as f64, (strafe, forward), look, aspect, walk);
+        let eye = self.player.update(&self.client, dt as f64, (strafe, forward), look, aspect, walk, cam_view == CamView::Front);
         if walk {
             self.cam.pos = eye;
         }
@@ -440,9 +441,26 @@ impl Game {
         }
     }
 
+    /// The camera to draw with. It is `cam` (where you look), except in the front view,
+    /// where the camera is out in front of the character and looks back the other way.
+    pub fn render_cam(&self) -> CameraView {
+        if self.ui.settings.walk && self.ui.settings.view == CamView::Front {
+            CameraView { pos: self.cam.pos, yaw: self.cam.yaw + std::f32::consts::PI, pitch: -self.cam.pitch }
+        } else {
+            self.cam
+        }
+    }
+
     fn target(&self) -> Option<RayHit> {
+        let s = self.ui.settings;
+        if s.walk && s.view == CamView::Front {
+            // The camera is in front of him: reach from his own eyes instead.
+            let p = self.player.position();
+            let eyes = [p[0] as f32, p[1] as f32 + 1.6, p[2] as f32];
+            return raycast(eyes, self.cam.forward(), REACH, |p| self.client.is_solid(p));
+        }
         // Behind the character, the camera is further from what he can reach.
-        let behind = if self.ui.settings.walk && self.ui.settings.third_person { 4.0 } else { 0.0 };
+        let behind = if s.walk && s.view == CamView::Back { 4.0 } else { 0.0 };
         raycast(self.cam.pos, self.cam.forward(), REACH + behind, |p| self.client.is_solid(p))
     }
 

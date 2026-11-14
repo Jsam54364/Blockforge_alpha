@@ -140,7 +140,8 @@ impl ApplicationHandler for App {
                         god_rays: settings.god_rays,
                     };
                     g.set_character(self.game.player.triangles());
-                    match g.render(&mut self.game.client, &self.game.cam, view_blocks, &opts, &self.hud) {
+                    let render_cam = self.game.render_cam();
+                    match g.render(&mut self.game.client, &render_cam, view_blocks, &opts, &self.hud) {
                         Ok(display_wait) => {
                             self.perf.end_frame(frame_start.elapsed().saturating_sub(display_wait));
                         }

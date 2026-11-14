@@ -7,7 +7,7 @@ A mobile-first voxel engine in Rust, in two crates:
   architecture lives here and is tested without a GPU.
 * the **app** (`app/`): the Android front-end. winit + wgpu renderer, touch controls and HUD.
 
-> **Status:** 103 unit + 9 end-to-end tests in the core and 77 in the app (plus WGSL
+> **Status:** 103 unit + 9 end-to-end tests in the core and 78 in the app (plus WGSL
 > validation) pass. The APK builds on GitHub Actions and has been run and measured on a phone
 > (see the numbers further down).
 
@@ -105,7 +105,7 @@ public GPU-usage percentage, hence the derived figure.
 
 Top-right menu button: render distance (2-12 chunks, applied to the server stream too),
 LOD distance (OFF, 1K ... 32K blocks) and LOD quality (LODQ: LOW/MED/HIGH, the width of the
-first LOD ring), time of day (TIME: an hour back or forward), fog, clouds and god rays on/off, walk or fly, first or third person,
+first LOD ring), time of day (TIME: an hour back or forward), fog, clouds and god rays on/off, walk or fly, the view (1ST, 3RD behind, FRONT looking back),
 stats on/off. The overlay's LOD line shows the sections and quads drawn. The HUD is drawn by a tiny immediate-mode layer (`ui.rs`) with its own 5x7 bitmap
 font (`font.rs`, `glyphs.rs`), so there are no UI dependencies.
 
@@ -306,12 +306,19 @@ Next: trees and plants per biome, rivers, rain shadows behind mountains.
   sides mirrored only, so fringes stay on top), and the tint map carries a gentle brightness
   variation over tens of blocks.
 * **Water** (`water_shade` in the shader), after open sea under a bright sky: a deep navy body,
-  nearly opaque; eight travelling waves whose strength drifts across the sea bend the surface
-  normal (ripples only up close); the reflection of the sky (the real one, see below) takes over
-  toward the horizon (Fresnel), with sun and moon glints. The waves are sines made irregular
-  by noise: the surface they run over is warped by slowly drifting noise, each family of waves
-  comes and goes in patches, and gusts roughen some areas. A wave fades out before it gets
-  shorter than a few pixels on screen, so far water is calm instead of drawing moire rings. The surface sits 1/8 block (4 of 32 pixels) below the top of its block,
+  nearly opaque; the reflection of the sky (the real one, see below) takes over toward the
+  horizon (Fresnel), with sun and moon glints. The waves follow the open procedural-ocean
+  shaders (afl_ext's "very fast procedural ocean" and the sum-of-sines method of GPU Gems
+  chapter 1): sixteen wave trains from 34 blocks down to under half a block, each
+  `exp(sin x - 1)` (broad troughs, sharp crests), each turned by an angle that never lines up
+  again, and each dragging the point the shorter ones are measured at by its own slope, so
+  ripples bunch on the faces of the swell and no pattern repeats. Long waves travel faster
+  (deep-water speed). The surface is also warped by drifting noise, swell and chop come and go
+  in patches, and gusts roughen some areas. Up close, where water reflects little, ripples
+  shade the body: facets tilted toward the sun's side are a little lighter, the others a little
+  darker (same colour on average). A wave train fades out before it gets shorter than a few
+  pixels on screen (which also ends the loop early far away), so far water is calm instead of
+  drawing moire rings. The surface sits 1/8 block (4 of 32 pixels) below the top of its block,
   like Minecraft's, so shores show a small lip; LOD water matches.
 * All textures are uploaded as one mipmapped texture array (averaged in linear light) and
   sampled with world-position coordinates, so greedy quads and LOD terrain repeat them once
@@ -359,7 +366,9 @@ Next: trees and plants per biome, rivers, rain shadows behind mountains.
 ## The character (`app/src/hyrig`, `app/src/player.rs`, `assets/hyrig`)
 
 * **Walk mode** (the default; MODE in the menu switches to the flying camera and back): you are
-  the HyRig character, in third person (VIEW, or ACT > VIEW, switches to first person). The
+  the HyRig character, seen from behind. VIEW (in the menu, or ACT > VIEW) cycles like
+  Minecraft's F5: behind, in front looking back at him (the camera sits 3.7 blocks out along
+  where you look; blocks are still aimed from his eyes), then first person. The
   left stick walks, jogs or sprints by how far it is pushed; JUMP and ROLL repeat while held;
   CROUCH and CRAWL toggle; ACT opens everything else: punch, swing, chop, hit, use with either
   hand, eat, wave, sit, die and revive, and the four carry states. Breaking a block punches,
@@ -367,7 +376,9 @@ Next: trees and plants per biome, rivers, rain shadows behind mountains.
 * **Block rules** (Minecraft's, where the kit has none): half slabs are walked up and down
   (a step is 0.6); a full block needs a jump (1.05 high); the body is 0.6 wide and 1.8 tall, so
   a two-block-high opening is walked through; a two-block wall is climbed by jumping at it
-  (the kit's ledge climb, 1.4 to 2.55 blocks). Water is walked through: there is no swimming
+  (the kit's ledge climb, 1.4 to 2.55 blocks). Collisions move him onto a slab at once, but the
+  body and the camera ease the rest of the way (most of it in a sixth of a second), so steps up
+  and down look smooth. Water is walked through: there is no swimming
   yet. The follow camera stops short of walls and ground.
 * **The state machine** is the kit's controller ported to Rust function for function
   (`hyrig/controller.rs`): gaits blended in step, jumps from either foot chained on touchdown,

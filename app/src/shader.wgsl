@@ -321,53 +321,61 @@ fn vnoise(p: vec2<f32>) -> f32 {
     );
 }
 
-// One travelling wave: adds its slope (d height / dx, d height / dz) to s. `footprint` is how
-// much water one screen pixel covers, in blocks: a wave shorter than a few pixels would only
-// shimmer and draw moire rings, so it fades out before that.
-fn wave(s: ptr<function, vec2<f32>>, p: vec2<f32>, dir: vec2<f32>, wavelength: f32, amp: f32, speed: f32, footprint: f32) {
-    let k = 6.2831853 / wavelength;
-    let c = cos(k * (dot(dir, p) - speed * g.flags.y));
-    *s += dir * (amp * k * c * smoothstep(2.5, 7.0, wavelength / footprint));
-}
+// How many wave trains the water sums, longest first (each 1.34 times shorter than the one
+// before: 34 blocks down to under half a block).
+const WAVE_OCTAVES: i32 = 16;
 
-// Water, after open sea under a bright sky: a deep navy body, mostly opaque; irregular waves
-// bend the surface normal, so facets alternate between the dark body and reflected sky;
-// reflections take over toward the horizon (Fresnel), with sun and moon glints. The waves are
-// travelling sine waves in many directions, made irregular three ways: the surface they run
-// over is warped by slowly drifting noise (wave fronts bend and wander), each wave's height
-// comes and goes in patches, and wind gusts roughen some areas more than others. Returns the
-// colour and how opaque it is (the translucent pass blends with it; LOD water is drawn opaque).
+// Water, after open sea under a bright sky: a deep navy body, mostly opaque; waves bend the
+// surface normal, so facets alternate between the dark body and reflected sky; reflections
+// take over toward the horizon (Fresnel), with sun and moon glints.
+//
+// The waves follow the method of the open procedural-ocean shaders (afl_ext's "Very fast
+// procedural ocean", and the sum-of-sines chapters it grew from):
+//   * each wave train is exp(sin(x) - 1), not sin(x): broad troughs and sharp crests;
+//   * many trains, each shorter and weaker than the last, each turned by an angle that never
+//     lines up again, so no direction or spacing repeats;
+//   * each train drags the point the next ones are measured at by its own slope (a domain
+//     warp), which bunches small waves on the faces of big ones and breaks straight fronts.
+// On top of that the surface the waves run over is warped by slowly drifting noise, swell
+// and chop come and go in noise patches, and gusts roughen some areas. Long waves travel
+// faster than short ones, as in deep water. A train fades out before it is shorter than a few
+// pixels on screen (no shimmer or moire far away), which also ends the loop early there.
+// Returns the colour and how opaque it is (the translucent pass blends with it; LOD water is
+// drawn opaque).
 fn water_shade(world: vec3<f32>, face: u32, light: vec3<f32>) -> vec4<f32> {
     let to_cam = g.cam_pos.xyz - world;
     let dist = length(to_cam);
     let v = to_cam / max(dist, 1e-4);
     var n = face_normal(face);
     if (face == 2u) {
-        var s = vec2<f32>(0.0);
         let t = g.flags.y;
         // One pixel's footprint on the water, stretched at grazing angles.
         let fp = dist * (1.1 / g.screen.y) / max(abs(v.y), 0.04);
         // Warp: every point is pushed around by noise that drifts with time.
         let q = world.xz * 0.043;
         let warp = vec2<f32>(vnoise(q + vec2<f32>(t * 0.021, -t * 0.013)), vnoise(q + vec2<f32>(37.2 - t * 0.017, 11.7 + t * 0.019))) - 0.5;
-        let p = world.xz + warp * 9.0;
-        // Patches where each family of waves is high or low, and gusts.
-        let m = world.xz * 0.019;
-        let a1 = 0.35 + 1.1 * vnoise(m + vec2<f32>(t * 0.011, 0.0));
-        let a2 = 0.35 + 1.1 * vnoise(m * 1.7 + vec2<f32>(5.3, 9.1 - t * 0.014));
-        let a3 = 0.35 + 1.1 * vnoise(m * 2.9 + vec2<f32>(-t * 0.02, 3.3));
-        let gust = 0.4 + 1.2 * vnoise(world.xz * 0.007 + vec2<f32>(t * 0.006, t * 0.004));
-        // Swell, then chop, then ripples.
-        wave(&s, p, vec2<f32>(0.8, 0.6), 37.0, 0.22 * a2, 2.6, fp);
-        wave(&s, p, vec2<f32>(-0.28, 0.96), 21.0, 0.15 * a3, 2.1, fp);
-        wave(&s, p, vec2<f32>(0.8, 0.6), 12.3, 0.13 * a1, 1.7, fp);
-        wave(&s, p, vec2<f32>(-0.45, 0.89), 7.1, 0.10 * a2, 1.3, fp);
-        wave(&s, p, vec2<f32>(0.97, -0.24), 4.3, 0.07 * a3 * gust, 1.05, fp);
-        wave(&s, p, vec2<f32>(0.31, 0.95), 5.6, 0.06 * a1 * gust, 1.2, fp);
-        wave(&s, p, vec2<f32>(-0.83, -0.56), 2.7, 0.05 * a2 * gust, 0.85, fp);
-        wave(&s, p, vec2<f32>(0.2, -0.98), 1.9, 0.035 * gust, 0.7, fp);
-        wave(&s, p, vec2<f32>(-0.96, 0.27), 1.4, 0.022 * a1 * gust, 0.6, fp);
-        wave(&s, p, vec2<f32>(0.66, 0.75), 1.05, 0.015 * gust, 0.5, fp);
+        var p = world.xz + warp * 9.0;
+        // Patches where the swell is high or low, and gusts that roughen the small waves.
+        let swell = 0.5 + 0.8 * vnoise(world.xz * 0.019 + vec2<f32>(t * 0.011, 5.3));
+        let gust = 0.4 + 1.2 * vnoise(world.xz * 0.011 + vec2<f32>(t * 0.008, -t * 0.006));
+        var s = vec2<f32>(0.0);
+        var freq = 6.2831853 / 34.0;
+        var weight = 0.8;
+        var angle = 0.6;
+        for (var i = 0; i < WAVE_OCTAVES; i++) {
+            let keep = smoothstep(2.5, 7.0, 6.2831853 / (freq * fp));
+            if (keep <= 0.0) {
+                break;
+            }
+            let d = vec2<f32>(sin(angle), cos(angle));
+            let x = dot(d, p) * freq - t * sqrt(9.8 * freq) * 0.5;
+            let dw = exp(sin(x) - 1.0) * cos(x);
+            s += d * (dw * freq * weight * keep * select(gust, swell, i < 6));
+            p -= d * (dw * weight * 2.0);
+            angle += 1.2324;
+            weight *= 0.79;
+            freq *= 1.34;
+        }
         n = normalize(vec3<f32>(-s.x, 1.0, -s.y));
     }
     let cos_v = clamp(dot(n, v), 0.0, 1.0);
@@ -376,7 +384,12 @@ fn water_shade(world: vec3<f32>, face: u32, light: vec3<f32>) -> vec4<f32> {
     // The sky in the reflection (a little blurred: the surface is never quite flat).
     let sky = sky_radiance(r, 1.5);
     // Deep navy, a touch greener where the surface faces the viewer (light from inside).
-    let body = mix(vec3<f32>(0.004, 0.016, 0.040), vec3<f32>(0.010, 0.040, 0.070), cos_v * 0.6) * light;
+    // Up close the reflection hardly changes (looking down, water reflects little), so the
+    // ripples show in the body instead: facets tilted toward the sun's side of the sky are
+    // lit a little more, those tilted away a little less (the same colour on average).
+    let sun_side = normalize(vec2<f32>(g.sun.x, g.sun.z) + vec2<f32>(1e-4, 0.0));
+    let facet = clamp(1.0 + 4.0 * dot(n.xz, sun_side), 0.55, 1.6);
+    let body = mix(vec3<f32>(0.004, 0.016, 0.040), vec3<f32>(0.010, 0.040, 0.070), cos_v * 0.6) * light * facet;
     // Sun and moon glints.
     let glint = pow(max(dot(n, normalize(g.sun.xyz + v)), 0.0), 300.0) * 2.2 * g.sun.w * g.sun_color.rgb
         + pow(max(dot(n, normalize(g.moon.xyz + v)), 0.0), 400.0) * 0.5 * g.moon.w * vec3<f32>(0.80, 0.85, 0.95);
