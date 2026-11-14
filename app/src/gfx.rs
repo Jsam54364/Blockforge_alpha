@@ -30,6 +30,7 @@ use blockforge::mesh::quad_indices;
 use blockforge::registry::BlockRegistry;
 
 use crate::clouds::{self, Clouds};
+use crate::hyrig::rig;
 use crate::sky::{self, Sky};
 use crate::texgen;
 use crate::textures;
@@ -387,6 +388,127 @@ fn screen_pipeline(
     })
 }
 
+/// The character's texture, with its bind group (group 1 of `pipe_char`): drawn unfiltered,
+/// like the blocks.
+fn character_texture(device: &wgpu::Device, queue: &wgpu::Queue) -> (wgpu::BindGroupLayout, wgpu::BindGroup) {
+    let (w, h, pixels) = decode_rgba(rig::TEXTURE_PNG).unwrap_or_else(|e| {
+        eprintln!("blockforge: hyrig.png: {e}; the character is drawn plain");
+        (2, 2, vec![200; 16])
+    });
+    let size = wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 };
+    let tex = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("character"),
+        size,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    queue.write_texture(
+        wgpu::ImageCopyTexture { texture: &tex, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+        &pixels,
+        wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(4 * w), rows_per_image: Some(h) },
+        size,
+    );
+    let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+    let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("character sampler"),
+        address_mode_u: wgpu::AddressMode::Repeat,
+        address_mode_v: wgpu::AddressMode::Repeat,
+        ..Default::default()
+    });
+    let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("character texture"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 3,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 4,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+        ],
+    });
+    let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("character texture"),
+        layout: &layout,
+        entries: &[
+            wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&view) },
+            wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&sampler) },
+        ],
+    });
+    (layout, bind)
+}
+
+/// An 8-bit RGBA PNG as (width, height, bytes).
+fn decode_rgba(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
+    let mut dec = png::Decoder::new(bytes);
+    dec.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
+    let mut reader = dec.read_info().map_err(|e| e.to_string())?;
+    let mut buf = vec![0; reader.output_buffer_size()];
+    let info = reader.next_frame(&mut buf).map_err(|e| e.to_string())?;
+    if info.color_type != png::ColorType::Rgba {
+        return Err(format!("{:?}, not RGBA", info.color_type));
+    }
+    buf.truncate(info.buffer_size());
+    Ok((info.width, info.height, buf))
+}
+
+/// The character: triangles posed on the CPU (`rig::Vertex`), a cut-out texture, both sides.
+fn character_pipeline(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    shader: &wgpu::ShaderModule,
+    format: wgpu::TextureFormat,
+) -> wgpu::RenderPipeline {
+    const ATTRS: [wgpu::VertexAttribute; 3] = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2];
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("character"),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: "vs_char",
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            buffers: &[wgpu::VertexBufferLayout {
+                array_stride: std::mem::size_of::<rig::Vertex>() as u64,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &ATTRS,
+            }],
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: shader,
+            entry_point: "fs_char",
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            targets: &[Some(wgpu::ColorTargetState { format, blend: None, write_mask: wgpu::ColorWrites::ALL })],
+        }),
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: DEPTH_FORMAT,
+            depth_write_enabled: true,
+            depth_compare: wgpu::CompareFunction::Greater,
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+        multisample: wgpu::MultisampleState::default(),
+        multiview: None,
+        cache: None,
+    })
+}
+
+/// The most character vertices drawn in a frame (the model has 768).
+const MAX_CHARACTER_VERTS: usize = 4096;
+
 /// Clouds: the terrain's vertex layout without instances, blended, both sides drawn.
 fn cloud_pipeline(
     device: &wgpu::Device,
@@ -473,6 +595,11 @@ pub struct Gfx {
     pipe_cloud: wgpu::RenderPipeline,
     pipe_mask: wgpu::RenderPipeline,
     pipe_rays: wgpu::RenderPipeline,
+    /// The character: pipeline, texture, and this frame's triangles (see `set_character`).
+    pipe_char: wgpu::RenderPipeline,
+    bind_char: wgpu::BindGroup,
+    char_buf: wgpu::Buffer,
+    char_verts: u32,
     /// Clouds around the camera, and the mesh on the GPU (buffer, quads).
     clouds: Clouds,
     cloud_mesh: Option<(wgpu::Buffer, u32)>,
@@ -703,6 +830,23 @@ impl Gfx {
             voxel_pipeline(&device, &layout, &shader, "vs_lod", format, None, true, Some(wgpu::Face::Back), "lod");
         let pipe_sky = sky_pipeline(&device, &layout, &shader, format);
         let pipe_cloud = cloud_pipeline(&device, &layout, &shader, format);
+        let (char_layout, bind_char) = character_texture(&device, &queue);
+        let pipe_char = character_pipeline(
+            &device,
+            &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("character"),
+                bind_group_layouts: &[&bgl, &char_layout],
+                push_constant_ranges: &[],
+            }),
+            &shader,
+            format,
+        );
+        let char_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("character vertices"),
+            size: (MAX_CHARACTER_VERTS * std::mem::size_of::<rig::Vertex>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         let with_group1 = |group1: &wgpu::BindGroupLayout| {
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("god rays"),
@@ -776,6 +920,10 @@ impl Gfx {
             pipe_cloud,
             pipe_mask,
             pipe_rays,
+            pipe_char,
+            bind_char,
+            char_buf,
+            char_verts: 0,
             clouds: Clouds::new(0xC10D),
             cloud_mesh: None,
             pipe_solid,
@@ -809,6 +957,15 @@ impl Gfx {
     }
 
     /// Starts the biome tint map once the world's generator is known.
+    /// The character's triangles for the next frame, in world space (none = not drawn).
+    pub fn set_character(&mut self, verts: &[rig::Vertex]) {
+        let n = (verts.len().min(MAX_CHARACTER_VERTS) / 3) * 3;
+        if n > 0 {
+            self.queue.write_buffer(&self.char_buf, 0, as_bytes(&verts[..n]));
+        }
+        self.char_verts = n as u32;
+    }
+
     pub fn set_generator(&mut self, gen: Arc<WorldGen>) {
         if self.tint.is_none() {
             self.tint = Some(TintMap::new(gen));
@@ -1178,6 +1335,14 @@ impl Gfx {
             }
             self.last_lod_drawn = lod_vis.len();
             self.last_lod_quads = lod_quads;
+
+            // The character.
+            if self.char_verts > 0 {
+                pass.set_pipeline(&self.pipe_char);
+                pass.set_bind_group(1, &self.bind_char, &[]);
+                pass.set_vertex_buffer(0, self.char_buf.slice(..));
+                pass.draw(0..self.char_verts, 0..1);
+            }
 
             // The sky, wherever no terrain was drawn (water, drawn next, blends over it).
             pass.set_pipeline(&self.pipe_sky);

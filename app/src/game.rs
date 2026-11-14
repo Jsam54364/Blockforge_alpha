@@ -1,8 +1,12 @@
-//! Player-facing state: the integrated server + client, a fly camera and touch controls.
+//! Player-facing state: the integrated server + client, the character (or a fly camera) and
+//! touch controls.
 //!
 //! Controls (landscape):
-//!   left 40% of the screen   drag = virtual stick (fly in the direction you are looking)
+//!   left 40% of the screen   drag = virtual stick: walk, jog or sprint by how far it is
+//!                            pushed (or fly in the direction you are looking, in FLY mode)
 //!   right side               drag = look around
+//!   bottom right             JUMP and ROLL (hold to repeat), CROUCH, CRAWL; ACT opens the
+//!                            rest of what the character can do
 //!                            quick tap = break the block under the crosshair
 //!                            press-and-hold (no drag) = place stone on the face you look at
 //!   top-right button         settings menu (render distance, LOD distance, fog, stats)
@@ -23,12 +27,16 @@ use blockforge::server::{self, ServerConfig, ServerHandle};
 use blockforge::worldgen::{GroundInfo, WorldGen, WORLDGEN_VERSION};
 use winit::event::TouchPhase;
 
+use crate::hyrig::View;
+use crate::player::Player;
 use crate::sky::Clock;
 use crate::ui::{Action, Ui, LOD_DISTANCES, LOD_QUALITY};
 
 const LOOK_SENS: f32 = 0.0045;
 const FLY_SPEED: f32 = 14.0;
 const REACH: f32 = 8.0;
+/// Walking, the camera's pitch stays inside the character controller's limits.
+const WALK_PITCH: (f32, f32) = (-1.4, 1.35);
 const TAP_MAX: Duration = Duration::from_millis(300);
 const DRAG_PIXELS: f32 = 14.0;
 /// Settings and the camera, kept between launches next to the world save.
@@ -99,6 +107,13 @@ fn saved_generator(text: &str) -> u32 {
     text.lines().find_map(|l| l.trim().strip_prefix("gen=")?.parse().ok()).unwrap_or(1)
 }
 
+/// The character's saved position (`player=x,y,z`), if it is there and sane.
+fn saved_player(text: &str) -> Option<[f64; 3]> {
+    let line = text.lines().find_map(|l| l.trim().strip_prefix("player="))?;
+    let v: Vec<f64> = line.split(',').filter_map(|p| p.trim().parse().ok()).collect();
+    (v.len() == 3 && v.iter().all(|x| x.is_finite() && x.abs() < MAX_SAVED_COORD as f64)).then(|| [v[0], v[1], v[2]])
+}
+
 struct TouchInfo {
     start: (f32, f32),
     last: (f32, f32),
@@ -125,6 +140,12 @@ pub struct Game {
     ui_touches: HashSet<u64>,
     touches: HashMap<u64, TouchInfo>,
     stone: BlockState,
+    /// The character (he stands where he was left while the camera flies).
+    pub player: Player,
+    /// Whether the last frame was in walk mode (to notice the switch).
+    walking: bool,
+    /// Touches holding JUMP or ROLL down.
+    held: HashMap<u64, &'static str>,
     last_update: Instant,
     last_pos_sent: Instant,
 }
@@ -150,6 +171,15 @@ impl Game {
             CameraView { pos: [x, y + 24.0, z], yaw: 0.0, pitch: -0.35 }
         });
 
+        // The character starts where he was left, or at the spawn (a little above the ground:
+        // he drops onto it once it has loaded).
+        let view = if ui.settings.third_person { View::Follow } else { View::First };
+        let player_at = saved_player(&saved).filter(|_| same_world).unwrap_or_else(|| {
+            let [x, y, z] = gen.find_spawn();
+            [x as f64 + 0.5, y as f64 + 1.5, z as f64 + 0.5]
+        });
+        let player = Player::new(player_at, view);
+
         let cfg = ServerConfig {
             seed: SEED,
             worker_threads: 2,
@@ -165,6 +195,7 @@ impl Game {
         client.set_position(cam.pos);
 
         let now = Instant::now();
+        let ui_walk = ui.settings.walk;
         Game {
             client,
             server,
@@ -178,6 +209,9 @@ impl Game {
             ui_touches: HashSet::new(),
             touches: HashMap::new(),
             stone,
+            player,
+            walking: ui_walk,
+            held: HashMap::new(),
             last_update: now,
             last_pos_sent: now,
         }
@@ -196,11 +230,15 @@ impl Game {
 
     fn save_state(&self) {
         let Some(path) = &self.state_path else { return };
+        let p = self.player.position();
         let text = format!(
-            "{}{}{}gen={WORLDGEN_VERSION}\n",
+            "{}{}{}player={},{},{}\ngen={WORLDGEN_VERSION}\n",
             self.ui.settings.to_text(),
             self.cam.to_text(),
-            self.clock.to_text()
+            self.clock.to_text(),
+            p[0],
+            p[1],
+            p[2]
         );
         let tmp = path.with_extension("tmp");
         if std::fs::write(&tmp, text).is_ok() {
@@ -277,10 +315,34 @@ impl Game {
         self.ui.hours = self.clock.hours();
 
         let (strafe, forward) = self.stick();
-        let f = self.cam.forward();
-        let r = self.cam.right();
-        for i in 0..3 {
-            self.cam.pos[i] += (f[i] * forward + r[i] * strafe) * FLY_SPEED * dt;
+        let walk = self.ui.settings.walk;
+        if walk && !self.walking {
+            // Back from flying: he is put down where the camera is and drops to the ground.
+            let c = self.cam.pos;
+            self.player.place([c[0] as f64, c[1] as f64 - 1.6, c[2] as f64]);
+        }
+        self.walking = walk;
+        let view = if self.ui.settings.third_person { View::Follow } else { View::First };
+        if self.player.ctl.view != view {
+            self.player.ctl.set_view(view);
+        }
+        if walk {
+            self.cam.pitch = self.cam.pitch.clamp(WALK_PITCH.0, WALK_PITCH.1);
+        } else {
+            let f = self.cam.forward();
+            let r = self.cam.right();
+            for i in 0..3 {
+                self.cam.pos[i] += (f[i] * forward + r[i] * strafe) * FLY_SPEED * dt;
+            }
+        }
+        // The controller's yaw 0 faces +Z; the camera's faces -Z.
+        let look = (self.cam.yaw as f64 + std::f64::consts::PI, self.cam.pitch as f64);
+        let aspect = self.size.0 as f64 / self.size.1 as f64;
+        self.player.jump = self.held.values().any(|b| *b == "jump");
+        self.player.roll = self.held.values().any(|b| *b == "roll");
+        let eye = self.player.update(&self.client, dt as f64, (strafe, forward), look, aspect, walk);
+        if walk {
+            self.cam.pos = eye;
         }
 
         if now.duration_since(self.last_pos_sent) > Duration::from_millis(250) {
@@ -299,6 +361,13 @@ impl Game {
             TouchPhase::Started => {
                 if let Some(action) = self.ui.hit(x, y) {
                     self.ui_touches.insert(id);
+                    match action {
+                        Action::Hold(button) => {
+                            self.held.insert(id, button);
+                        }
+                        Action::Press(name) => self.player.press(name),
+                        _ => {}
+                    }
                     let greedy_before = self.ui.settings.greedy;
                     let menu_was_open = self.ui.menu_open;
                     if let Action::Time(h) = action {
@@ -322,6 +391,7 @@ impl Game {
                 if self.ui_touches.contains(&id) {
                     if matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled) {
                         self.ui_touches.remove(&id);
+                        self.held.remove(&id);
                     }
                     return;
                 }
@@ -371,21 +441,29 @@ impl Game {
     }
 
     fn target(&self) -> Option<RayHit> {
-        raycast(self.cam.pos, self.cam.forward(), REACH, |p| self.client.is_solid(p))
+        // Behind the character, the camera is further from what he can reach.
+        let behind = if self.ui.settings.walk && self.ui.settings.third_person { 4.0 } else { 0.0 };
+        raycast(self.cam.pos, self.cam.forward(), REACH + behind, |p| self.client.is_solid(p))
     }
 
     fn break_target(&mut self) {
         if let Some(hit) = self.target() {
             self.client.break_block(hit.pos);
+            if self.ui.settings.walk {
+                self.player.press("punch");
+            }
         }
     }
 
     fn place_target(&mut self) {
         if let Some(hit) = self.target() {
             let cell = hit.pos.neighbor(hit.face);
-            // Don't entomb the camera.
-            if cell != BlockPos::from_f32(self.cam.pos) {
+            // Don't entomb the camera or the character.
+            if cell != BlockPos::from_f32(self.cam.pos) && !self.player.occupies(cell) {
                 self.client.place_block(cell, self.stone);
+                if self.ui.settings.walk {
+                    self.player.press("interact");
+                }
             }
         }
     }

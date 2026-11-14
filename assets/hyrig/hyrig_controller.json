@@ -1,0 +1,734 @@
+{
+ "meta": {
+  "name": "HyRig character controller",
+  "version": "1.0",
+  "units": "metres, seconds, radians",
+  "axes": "right-handed, Y up. Yaw 0 faces +Z; yaw increases turning toward +X (same sense as three.js / glTF / Godot rotation.y). Pitch is positive looking up.",
+  "model": {
+   "file": "hyrig.glb",
+   "texture": "hyrig.png",
+   "authoredFacing": "-Z",
+   "yawOffset": 3.141593,
+   "height": 1.83,
+   "note": "Rotate the model by yawOffset about Y inside the character root, so that root yaw 0 faces +Z.",
+   "credit": "HyRig model by Powerbyte7",
+   "license": "CC BY-NC 4.0 (credit required, non-commercial)"
+  }
+ },
+ "clips": {
+  "idle": {
+   "duration": 4.0,
+   "loop": true,
+   "use": "standing idle"
+  },
+  "idle_fidget": {
+   "duration": 3.2,
+   "loop": false,
+   "use": "occasional look-around while idle"
+  },
+  "walk": {
+   "duration": 1.05,
+   "loop": true,
+   "use": "stick 15-50%"
+  },
+  "jog": {
+   "duration": 0.74,
+   "loop": true,
+   "use": "stick 50-88%"
+  },
+  "run": {
+   "duration": 0.6,
+   "loop": true,
+   "use": "spare (older, slower run)"
+  },
+  "sprint": {
+   "duration": 0.46,
+   "loop": true,
+   "use": "stick above 88%"
+  },
+  "walk_back": {
+   "duration": 1.15,
+   "loop": true,
+   "use": "stick back, gentle"
+  },
+  "run_back": {
+   "duration": 0.54,
+   "loop": true,
+   "use": "stick back, above 80%"
+  },
+  "strafe_left": {
+   "duration": 0.9,
+   "loop": true,
+   "use": "spare (side-step)"
+  },
+  "strafe_right": {
+   "duration": 0.9,
+   "loop": true,
+   "use": "spare (side-step)"
+  },
+  "crouch_idle": {
+   "duration": 3.0,
+   "loop": true,
+   "use": "crouched, still (kneeling)"
+  },
+  "crouch_walk": {
+   "duration": 0.57,
+   "loop": true,
+   "use": "crouched, moving forward or sideways"
+  },
+  "crouch_walk_back": {
+   "duration": 0.6,
+   "loop": true,
+   "use": "crouched, moving back"
+  },
+  "jump": {
+   "duration": 1.08,
+   "loop": false,
+   "use": "standing jump"
+  },
+  "jump_run": {
+   "duration": 1.06,
+   "loop": false,
+   "use": "jump from jog or sprint, left-foot takeoff"
+  },
+  "jump_run_r": {
+   "duration": 1.06,
+   "loop": false,
+   "use": "jump from jog or sprint, right-foot takeoff"
+  },
+  "jump_walk": {
+   "duration": 1.08,
+   "loop": false,
+   "use": "jump from a walk, left-foot takeoff"
+  },
+  "jump_walk_r": {
+   "duration": 1.08,
+   "loop": false,
+   "use": "jump from a walk, right-foot takeoff"
+  },
+  "fall": {
+   "duration": 0.8,
+   "loop": true,
+   "use": "airborne after walking off a ledge"
+  },
+  "land": {
+   "duration": 0.55,
+   "loop": false,
+   "use": "landing after a fall"
+  },
+  "roll": {
+   "duration": 0.75,
+   "loop": false,
+   "use": "dodge roll forward/left/right"
+  },
+  "roll_back": {
+   "duration": 0.8,
+   "loop": false,
+   "use": "dodge roll backward"
+  },
+  "jump_back": {
+   "duration": 1.06,
+   "loop": false,
+   "use": "jump while moving backward"
+  },
+  "jump_back_r": {
+   "duration": 1.06,
+   "loop": false,
+   "use": "jump while moving backward, other foot"
+  },
+  "climb": {
+   "duration": 1.08,
+   "loop": false,
+   "use": "mantle onto a 1.5-2.5 m ledge"
+  },
+  "punch": {
+   "duration": 0.8,
+   "loop": false,
+   "use": "attack (upper body; legs carry on)"
+  },
+  "swing": {
+   "duration": 0.7,
+   "loop": false,
+   "use": "attack (upper body; legs carry on)"
+  },
+  "chop": {
+   "duration": 0.9,
+   "loop": false,
+   "use": "tool use (upper body; legs carry on)"
+  },
+  "interact": {
+   "duration": 0.6,
+   "loop": false,
+   "use": "use / pick up (upper body; legs carry on)"
+  },
+  "eat": {
+   "duration": 1.8,
+   "loop": false,
+   "use": "eat (upper body; legs carry on)"
+  },
+  "hit_take": {
+   "duration": 0.45,
+   "loop": false,
+   "use": "hit reaction (upper body; legs carry on)"
+  },
+  "death": {
+   "duration": 1.5,
+   "loop": false,
+   "use": "death"
+  },
+  "wave": {
+   "duration": 1.8,
+   "loop": false,
+   "use": "emote (upper body; legs carry on)"
+  },
+  "sit": {
+   "duration": 4.0,
+   "loop": true,
+   "use": "sit loop (toggle)"
+  },
+  "interact_l": {
+   "duration": 0.6,
+   "loop": false,
+   "use": "use / pick up with the other hand (upper body; legs carry on)"
+  },
+  "hold_1h": {
+   "duration": 4.0,
+   "loop": true,
+   "use": "one-handed carry (arm layer over everything)"
+  },
+  "hold_1h_l": {
+   "duration": 4.0,
+   "loop": true,
+   "use": "one-handed carry, other hand (arm layer over everything)"
+  },
+  "prone_idle": {
+   "duration": 4.0,
+   "loop": true,
+   "use": "lying prone, still"
+  },
+  "crawl": {
+   "duration": 0.7,
+   "loop": true,
+   "use": "prone, forward"
+  },
+  "crawl_back": {
+   "duration": 0.85,
+   "loop": true,
+   "use": "prone, backward"
+  },
+  "crawl_right": {
+   "duration": 0.6,
+   "loop": true,
+   "use": "prone, toward the character's right"
+  },
+  "crawl_left": {
+   "duration": 0.6,
+   "loop": true,
+   "use": "prone, toward the character's left"
+  },
+  "hold_2h": {
+   "duration": 4.0,
+   "loop": true,
+   "use": "two-handed grip, fists stacked on one shaft (arm layers over everything)"
+  },
+  "swing_2h": {
+   "duration": 1.0,
+   "loop": false,
+   "use": "two-handed sideways swing (upper body; legs carry on)"
+  },
+  "chop_2h": {
+   "duration": 1.1,
+   "loop": false,
+   "use": "two-handed overhead chop (upper body; legs carry on)"
+  },
+  "swing_l": {
+   "duration": 0.7,
+   "loop": false,
+   "use": "one-handed swing, other hand (upper body; legs carry on)"
+  },
+  "chop_l": {
+   "duration": 0.9,
+   "loop": false,
+   "use": "one-handed chop, other hand (upper body; legs carry on)"
+  },
+  "hold_item": {
+   "duration": 4.0,
+   "loop": true,
+   "use": "carrying a chest or block in both hands (arm layers over everything)"
+  },
+  "prone_enter": {
+   "duration": 0.8,
+   "loop": false,
+   "use": "stand -> prone"
+  },
+  "prone_exit": {
+   "duration": 0.8,
+   "loop": false,
+   "use": "prone -> stand"
+  },
+  "blink": {
+   "duration": 0.18,
+   "loop": false,
+   "use": "eyelids only; optional, the face controller blinks procedurally"
+  }
+ },
+ "roles": {
+  "idle": "idle",
+  "fidget": "idle_fidget",
+  "walk": "walk",
+  "jog": "jog",
+  "sprint": "sprint",
+  "walkBack": "walk_back",
+  "runBack": "run_back",
+  "crouch": "crouch_idle",
+  "crouchWalk": "crouch_walk",
+  "crouchBack": "crouch_walk_back",
+  "jump": "jump",
+  "jumpWalk": "jump_walk",
+  "jumpRun": "jump_run",
+  "jumpBack": "jump_back",
+  "fall": "fall",
+  "land": "land",
+  "roll": "roll",
+  "rollBack": "roll_back",
+  "climb": "climb",
+  "punch": "punch",
+  "swing": "swing",
+  "hit": "hit_take",
+  "death": "death",
+  "chop": "chop",
+  "interact": "interact",
+  "interactLeft": "interact_l",
+  "eat": "eat",
+  "wave": "wave",
+  "sit": "sit",
+  "proneIdle": "prone_idle",
+  "crawl": "crawl",
+  "crawlBack": "crawl_back",
+  "crawlLeft": "crawl_left",
+  "crawlRight": "crawl_right",
+  "proneIn": "prone_enter",
+  "proneOut": "prone_exit"
+ },
+ "speeds": {
+  "walk": 1.25,
+  "jog": 2.34,
+  "sprint": 5.64,
+  "walkBack": 0.78,
+  "runBack": 3.04,
+  "crouch": 1.21,
+  "crouchBack": 0.9,
+  "crawl": 0.85,
+  "crawlBack": 0.7,
+  "crawlSide": 0.38,
+  "roll": 11.28,
+  "note": "Ground speeds that match each clip's stride (feet do not slide at these speeds). roll = 2 x sprint."
+ },
+ "body": {
+  "radius": 0.3,
+  "stepHeight": 0.3,
+  "proneProbes": [
+   0.85,
+   -0.75,
+   0.42,
+   -0.38
+  ],
+  "note": "radius: collision radius. stepHeight: ledges this low are walked over. proneProbes: extra collision points along the body while lying down (metres ahead of the root)."
+ },
+ "locomotion": {
+  "deadzone": 0.15,
+  "jogAt": 0.5,
+  "sprintAt": 0.88,
+  "backAt": -0.35,
+  "backRunAt": 0.8,
+  "bodyTurnLimit": 0.87,
+  "turnRate": 9,
+  "proneTurnRate": 4,
+  "accel": 9,
+  "airAccel": 1.6,
+  "note": "Stick magnitude picks the gait. Forward component below backAt means moving backward. The body turns up to bodyTurnLimit (50 deg) under the view toward the travel direction; standing still it follows only once the view passes that limit."
+ },
+ "jump": {
+  "height": 1.05,
+  "airTime": 0.6,
+  "bufferTime": 0.28,
+  "chainLead": 0.09,
+  "landKeep": 0.3,
+  "windows": {
+   "jump": [
+    0.22,
+    0.82
+   ],
+   "jump_walk": [
+    0.24,
+    0.82
+   ],
+   "jump_walk_r": [
+    0.24,
+    0.82
+   ],
+   "jump_run": [
+    0.2,
+    0.8
+   ],
+   "jump_run_r": [
+    0.2,
+    0.8
+   ],
+   "jump_back": [
+    0.2,
+    0.8
+   ],
+   "jump_back_r": [
+    0.2,
+    0.8
+   ]
+  },
+  "landPhase": {
+   "jump_run": 0.5,
+   "jump_walk": 0.5,
+   "jump_run_r": 0.0,
+   "jump_walk_r": 0.0
+  },
+  "landPhaseBack": {
+   "jump_back": 0.92,
+   "jump_back_r": 0.42
+  },
+  "note": "windows: [takeoff, touchdown] times inside each jump clip. Gravity = 8*height/airTime^2, takeoff speed = gravity*airTime/2. Landing early skips to touchdown; still airborne holds just before it. landPhase: stride phase the gait resumes at after landing."
+ },
+ "roll": {
+  "travel": [
+   0.08,
+   0.68
+  ],
+  "linkAt": {
+   "roll": 0.56,
+   "roll_back": 0.6
+  },
+  "linkStart": 0.07,
+  "turnRate": 16,
+  "note": "The body travels at speeds.roll between the travel times. From linkAt the roll can hand over to movement or link into another roll, which starts at linkStart."
+ },
+ "climb": {
+  "minHeight": 1.4,
+  "maxHeight": 2.55,
+  "rate": 1.25,
+  "duration": 1.08,
+  "hand": [
+   0.588,
+   1.261,
+   1.677,
+   1.776,
+   1.777,
+   1.786,
+   1.821,
+   1.828,
+   1.819,
+   1.825,
+   1.804,
+   1.748,
+   1.661,
+   1.556,
+   1.455,
+   1.375,
+   1.338,
+   1.341,
+   1.313,
+   1.224,
+   1.094,
+   0.998,
+   0.94,
+   0.839,
+   0.678,
+   0.563,
+   0.525,
+   0.52,
+   0.514,
+   0.497,
+   0.465,
+   0.422,
+   0.389,
+   0.39,
+   0.424,
+   0.475,
+   0.527,
+   0.565,
+   0.584,
+   0.588,
+   0.588
+  ],
+  "grabUntil": 0.68,
+  "topAt": 0.92,
+  "moveIn": [
+   0.8,
+   1.06
+  ],
+  "reach": 0.5,
+  "facing": 0.55,
+  "standIn": 0.42,
+  "hangOut": 0.5,
+  "airGrabMaxRise": 3.0,
+  "note": "hand: fingertip height above the feet through the climb clip (41 samples). The body is raised so the fingertips stay on the ledge until grabUntil, eases onto the top by topAt, and moves in over moveIn. Low ledges start part-way through the clip, where the hand height matches."
+ },
+ "fades": {
+  "default": 0.25,
+  "gait": 0.3,
+  "jumpStart": 0.14,
+  "jumpToGait": 0.2,
+  "rollStart": 0.16,
+  "rollToLoop": 0.28,
+  "rollToAction": 0.16,
+  "action": 0.1,
+  "actionToLoop": 0.22,
+  "upperIn": 0.1,
+  "upperOut": 0.2,
+  "note": "Cross-fade times in seconds. gait: between walk/jog/sprint (kept in step, same stride phase). upperIn/upperOut: upper-body action layer."
+ },
+ "layers": {
+  "upper": [
+   "chest",
+   "head",
+   "left_arm_lower",
+   "left_arm_upper",
+   "left_hand",
+   "neck",
+   "right_arm_lower",
+   "right_arm_upper",
+   "right_hand",
+   "waist"
+  ],
+  "lower": [
+   "left_foot",
+   "left_leg_lower",
+   "left_leg_upper",
+   "pelvis",
+   "right_foot",
+   "right_leg_lower",
+   "right_leg_upper"
+  ],
+  "face": [
+   "left_brow",
+   "left_lid",
+   "left_pupil",
+   "mouth",
+   "right_brow",
+   "right_lid",
+   "right_pupil"
+  ],
+  "note": "Upper-body actions replace the upper bones only; the lower bones keep playing the movement clip."
+ },
+ "upperBodyActions": [
+  "punch",
+  "swing",
+  "hit_take",
+  "chop",
+  "interact",
+  "interact_l",
+  "eat",
+  "wave",
+  "swing_2h",
+  "chop_2h",
+  "swing_l",
+  "chop_l"
+ ],
+ "attackClips": [
+  "punch",
+  "swing",
+  "chop",
+  "swing_2h",
+  "chop_2h",
+  "swing_l",
+  "chop_l"
+ ],
+ "hold": {
+  "fade": 0.18,
+  "states": {
+   "one_handed": {
+    "clip": "hold_1h",
+    "bones": [
+     "right_arm_upper",
+     "right_arm_lower",
+     "right_hand"
+    ],
+    "keepDuring": [
+     "interact_l",
+     "wave",
+     "hit_take"
+    ],
+    "actions": {},
+    "block": []
+   },
+   "one_handed_left": {
+    "clip": "hold_1h_l",
+    "bones": [
+     "left_arm_upper",
+     "left_arm_lower",
+     "left_hand"
+    ],
+    "keepDuring": [
+     "interact",
+     "eat",
+     "hit_take"
+    ],
+    "actions": {
+     "swing": "swing_l",
+     "chop": "chop_l"
+    },
+    "block": []
+   },
+   "two_handed": {
+    "clip": "hold_2h",
+    "bones": [
+     "right_arm_upper",
+     "right_arm_lower",
+     "right_hand",
+     "left_arm_upper",
+     "left_arm_lower",
+     "left_hand"
+    ],
+    "keepDuring": [
+     "hit_take"
+    ],
+    "actions": {
+     "swing": "swing_2h",
+     "chop": "chop_2h"
+    },
+    "block": []
+   },
+   "two_handed_item": {
+    "clip": "hold_item",
+    "bones": [
+     "right_arm_upper",
+     "right_arm_lower",
+     "right_hand",
+     "left_arm_upper",
+     "left_arm_lower",
+     "left_hand"
+    ],
+    "keepDuring": [
+     "hit_take"
+    ],
+    "actions": {},
+    "block": [
+     "punch",
+     "swing",
+     "chop",
+     "interact",
+     "interactLeft",
+     "eat",
+     "wave"
+    ]
+   }
+  },
+  "suspend": [
+   "climb",
+   "prone",
+   "dead"
+  ],
+  "note": "Carry poses layered over every other animation, on the listed arm bones only. keepDuring: upper-body actions the pose stays up through (they use the other hand); any other action takes the arms for its length. actions: which clip a role plays while this pose is on (two-handed swing and chop, mirrored ones for the other hand). block: roles ignored while it is on (hands full). suspend: situations where the hands are needed and the pose lets go."
+ },
+ "interruptible": [
+  "idle_fidget"
+ ],
+ "idleFidget": {
+  "min": 9,
+  "max": 18
+ },
+ "reviveOnMove": false,
+ "face": {
+  "limits": {
+   "pupilX": 0.017,
+   "pupilUp": 0.015,
+   "pupilDown": 0.02,
+   "browLift": 0.012
+  },
+  "blink": {
+   "every": [
+    2.0,
+    5.5
+   ],
+   "doubleChance": 0.18,
+   "close": 0.06,
+   "hold": 0.03,
+   "open": 0.08
+  },
+  "gazeRange": [
+   0.6,
+   0.45
+  ],
+  "browTilt": 0.26,
+  "mouthFrames": {
+   "closed": [
+    0,
+    0
+   ],
+   "closed_alt": [
+    0.07421875,
+    0
+   ],
+   "small": [
+    0.07421875,
+    -0.03125
+   ],
+   "grin": [
+    0,
+    -0.0390625
+   ],
+   "wide": [
+    0,
+    -0.0703125
+   ]
+  },
+  "nodes": {
+   "pupils": [
+    "left_pupil",
+    "right_pupil"
+   ],
+   "lids": [
+    "left_lid",
+    "right_lid"
+   ],
+   "brows": [
+    "left_brow",
+    "right_brow"
+   ],
+   "mouth": "mouth"
+  },
+  "note": "pupils: move by pupil.x/pupil.y (metres, head-local). lids: scale.y = max(0.001, lid). brows: move up by browLift, rotate about local Z by +browTilt on the side whose rest x is positive and -browTilt on the other. mouth: add mouthUV to the mouth mesh UVs (or set the material UV offset)."
+ },
+ "camera": {
+  "first": {
+   "bone": "head",
+   "forward": 0.13,
+   "up": 0.17,
+   "smoothing": 22,
+   "fovPortrait": 86,
+   "fovLandscape": 72,
+   "near": 0.04,
+   "hide": [
+    "head",
+    "neck"
+   ],
+   "note": "Eye = head bone world position + forward along the look direction + up. Hide the head and neck meshes (the head's face children go with it)."
+  },
+  "follow": {
+   "distance": 3.74,
+   "minDistance": 1.3,
+   "maxDistance": 10.0,
+   "shoulder": 0.38,
+   "height": 1.52,
+   "targetHeight": 1.1,
+   "lookAhead": 2.0,
+   "fov": 58,
+   "near": 0.15,
+   "minAboveGround": 0.2,
+   "headTurnLimit": 1.0,
+   "headPitchShare": 0.55,
+   "note": "Camera sits behind the look direction, over the right shoulder. The head bone is turned toward the look direction after animation (headLook)."
+  },
+  "pitchLimits": [
+   -1.4,
+   1.35
+  ]
+ }
+}

@@ -89,6 +89,10 @@ pub struct Settings {
     pub show_stats: bool,
     pub clouds: bool,
     pub god_rays: bool,
+    /// Walking as the character (true) or the free-flying camera.
+    pub walk: bool,
+    /// The camera behind the character (true) or in his head.
+    pub third_person: bool,
 }
 
 impl Default for Settings {
@@ -104,6 +108,8 @@ impl Default for Settings {
             show_stats: true,
             clouds: true,
             god_rays: true,
+            walk: true,
+            third_person: true,
         }
     }
 }
@@ -112,7 +118,7 @@ impl Settings {
     /// `key=value` lines, one per setting, for the settings file kept between launches.
     pub fn to_text(&self) -> String {
         format!(
-            "render_chunks={}\nlod_level={}\nlod_quality={}\nfog={}\ncull={}\nvsync={}\ngreedy={}\nshow_stats={}\nclouds={}\ngod_rays={}\n",
+            "render_chunks={}\nlod_level={}\nlod_quality={}\nfog={}\ncull={}\nvsync={}\ngreedy={}\nshow_stats={}\nclouds={}\ngod_rays={}\nwalk={}\nthird_person={}\n",
             self.render_chunks,
             self.lod_level,
             self.lod_quality,
@@ -122,7 +128,9 @@ impl Settings {
             self.greedy,
             self.show_stats,
             self.clouds,
-            self.god_rays
+            self.god_rays,
+            self.walk,
+            self.third_person
         )
     }
 
@@ -153,11 +161,13 @@ impl Settings {
                         self.cull = m;
                     }
                 }
-                "fog" | "vsync" | "greedy" | "show_stats" | "clouds" | "god_rays" => {
+                "fog" | "vsync" | "greedy" | "show_stats" | "clouds" | "god_rays" | "walk" | "third_person" => {
                     let Ok(v) = value.parse::<bool>() else { continue };
                     match key {
                         "fog" => self.fog = v,
                         "clouds" => self.clouds = v,
+                        "walk" => self.walk = v,
+                        "third_person" => self.third_person = v,
                         "god_rays" => self.god_rays = v,
                         "vsync" => self.vsync = v,
                         "greedy" => self.greedy = v,
@@ -185,6 +195,16 @@ pub enum Action {
     ToggleStats,
     ToggleClouds,
     ToggleRays,
+    /// Walk as the character, or fly the camera.
+    ToggleWalk,
+    /// Third person or first person.
+    ToggleView,
+    /// Opens and closes the grid of character actions.
+    ToggleActs,
+    /// A character button that works while held: "jump" or "roll" (the game handles it).
+    Hold(&'static str),
+    /// A character action, by the controller's name for it (the game handles it).
+    Press(&'static str),
     /// Moves the time of day by this many hours (the game owns the clock and does it).
     Time(i8),
 }
@@ -200,6 +220,8 @@ struct Button {
 pub struct Ui {
     pub settings: Settings,
     pub menu_open: bool,
+    /// Whether the grid of character actions is showing.
+    pub acts_open: bool,
     /// False when the surface offers no uncapped present mode (the toggle then shows N/A).
     pub vsync_supported: bool,
     /// The time of day shown in the menu (the game keeps it up to date).
@@ -317,6 +339,7 @@ impl Ui {
         Ui {
             settings: Settings::default(),
             menu_open: false,
+            acts_open: false,
             vsync_supported: true,
             hours: crate::sky::START_HOUR,
             size: (1.0, 1.0),
@@ -389,7 +412,19 @@ impl Ui {
                 self.settings.god_rays = !self.settings.god_rays;
                 false
             }
-            Action::Time(_) => false,
+            Action::ToggleWalk => {
+                self.settings.walk = !self.settings.walk;
+                false
+            }
+            Action::ToggleView => {
+                self.settings.third_person = !self.settings.third_person;
+                false
+            }
+            Action::ToggleActs => {
+                self.acts_open = !self.acts_open;
+                false
+            }
+            Action::Time(_) | Action::Hold(_) | Action::Press(_) => false,
         }
     }
 
@@ -426,6 +461,8 @@ impl Ui {
         if self.menu_open {
             // Beside the menu button (not under it) so six rows still fit a 360dp-tall screen.
             self.draw_menu(out, bx - 4.0 * dp, by);
+        } else if self.settings.walk {
+            self.draw_character_buttons(out, bx, by, bs);
         }
 
         if out.len() > MAX_HUD_VERTS {
@@ -453,15 +490,69 @@ impl Ui {
         self.buttons.push(Button { x, y, w, h, action });
     }
 
+    /// The character's controls while walking: jump, roll, crouch and crawl at the bottom
+    /// right (under the right thumb), and an ACT button beside the menu button that opens a
+    /// grid of everything else he can do.
+    fn draw_character_buttons(&mut self, out: &mut Vec<HudVertex>, menu_x: f32, menu_y: f32, bs: f32) {
+        let dp = self.dp;
+        let (w, h) = self.size;
+        let px = (2.0 * dp).round().max(2.0);
+        let gap = 6.0 * dp;
+        let right = menu_x + bs;
+        // Bottom right: two rows of two.
+        let (cw, ch) = (76.0 * dp, 52.0 * dp);
+        let bottom = h - 10.0 * dp;
+        let pad: [[(&str, Action); 2]; 2] = [
+            [("CROUCH", Action::Press("crouch")), ("CRAWL", Action::Press("crawl"))],
+            [("ROLL", Action::Hold("roll")), ("JUMP", Action::Hold("jump"))],
+        ];
+        for (r, row) in pad.iter().enumerate() {
+            for (c, (label, action)) in row.iter().enumerate() {
+                let x = right - (2 - c) as f32 * cw - (1 - c) as f32 * gap;
+                let y = bottom - (2 - r) as f32 * ch - (1 - r) as f32 * gap;
+                self.button(out, x, y, cw, ch, label, px, *action);
+            }
+        }
+        // ACT, left of the menu button.
+        let ax = menu_x - gap - bs * 1.3;
+        self.button(out, ax, menu_y, bs * 1.3, bs, "ACT", px, Action::ToggleActs);
+        if !self.acts_open {
+            return;
+        }
+        // Four columns: attacks, using things, states, and what is carried.
+        let grid: [[(&str, Action); 4]; 4] = [
+            [("PUNCH", Action::Press("punch")), ("USE", Action::Press("interact")), ("SIT", Action::Press("sit")), ("1 HAND", Action::Press("one_handed"))],
+            [("SWING", Action::Press("swing")), ("USE L", Action::Press("interact_left")), ("WAVE", Action::Press("wave")), ("1 HAND L", Action::Press("one_handed_left"))],
+            [("CHOP", Action::Press("chop")), ("EAT", Action::Press("eat")), ("DIE", Action::Press("die")), ("2 HANDS", Action::Press("two_handed"))],
+            [("HIT", Action::Press("hit")), ("VIEW", Action::ToggleView), ("REVIVE", Action::Press("revive")), ("CARRY", Action::Press("two_handed_item"))],
+        ];
+        let top = menu_y + bs + gap;
+        let space = (bottom - 2.0 * ch - 2.0 * gap) - top;
+        let gh = (44.0 * dp).min((space - 3.0 * gap) / 4.0).max(30.0 * dp);
+        let gw = (84.0 * dp).min((w - 16.0 * dp - 3.0 * gap) / 4.0);
+        let left = right - 4.0 * gw - 3.0 * gap;
+        rect(out, left - gap, top - gap, 4.0 * gw + 5.0 * gap, 4.0 * gh + 5.0 * gap, PANEL);
+        self.buttons.push(Button { x: left - gap, y: top - gap, w: 4.0 * gw + 5.0 * gap, h: 4.0 * gh + 5.0 * gap, action: Action::Nothing });
+        for (r, row) in grid.iter().enumerate() {
+            for (c, (label, action)) in row.iter().enumerate() {
+                let mut tpx = px;
+                while tpx > 2.0 && text_width(tpx, label) > gw * 0.94 {
+                    tpx -= 1.0;
+                }
+                self.button(out, left + c as f32 * (gw + gap), top + r as f32 * (gh + gap), gw, gh, label, tpx, *action);
+            }
+        }
+    }
+
     fn draw_menu(&mut self, out: &mut Vec<HudVertex>, right: f32, top: f32) {
         let dp = self.dp;
         let px = (2.5 * dp).round().max(2.0);
         // Never wider than the space left of the right edge (matters on narrow screens).
-        let panel_w = (360.0 * dp).min((right - 8.0 * dp).max(0.0));
+        let panel_w = (376.0 * dp).min((right - 8.0 * dp).max(0.0));
         let pad = 8.0 * dp;
         let bw = 48.0 * dp;
         let gap = 6.0 * dp;
-        let rows = 7usize; // three stepper rows + four rows of two toggle buttons
+        let rows = 7usize; // three stepper rows + four rows of three toggle buttons
         // Rows shrink on short screens so the panel stays visible (buttons with them, a little
         // below finger size on the very shortest).
         let avail = self.size.1 - top - 8.0 * dp;
@@ -503,10 +594,10 @@ impl Ui {
             }
         }
 
-        // Rows 3-5: toggles in two columns; each button carries its own label.
+        // Rows 3-6: toggles in three columns; each button carries its own label.
         let on_off = |b: bool| if b { "ON" } else { "OFF" };
         let vsync_label = if !self.vsync_supported { "N/A" } else { on_off(s.vsync) };
-        let toggles: [(Action, String); 8] = [
+        let toggles: [(Action, String); 10] = [
             (Action::ToggleFog, format!("FOG {}", on_off(s.fog))),
             (Action::CycleCull, format!("CULL {}", s.cull.label())),
             (Action::ToggleVsync, format!("VSYNC {}", vsync_label)),
@@ -515,11 +606,13 @@ impl Ui {
             (Action::CycleLodQuality, format!("LODQ {}", LOD_QUALITY[s.lod_quality as usize % LOD_QUALITY.len()].0)),
             (Action::ToggleClouds, format!("CLOUDS {}", on_off(s.clouds))),
             (Action::ToggleRays, format!("RAYS {}", on_off(s.god_rays))),
+            (Action::ToggleWalk, format!("MODE {}", if s.walk { "WALK" } else { "FLY" })),
+            (Action::ToggleView, format!("VIEW {}", if s.third_person { "3RD" } else { "1ST" })),
         ];
-        let cell_w = (panel_w - pad * 3.0) / 2.0;
+        let cell_w = (panel_w - pad * 4.0) / 3.0;
         for (i, (action, label)) in toggles.iter().enumerate() {
-            let row = 3 + i / 2;
-            let col = i % 2;
+            let row = 3 + i / 3;
+            let col = i % 3;
             let x = x0 + pad + col as f32 * (cell_w + pad);
             let ry = top + pad + row_h * row as f32;
             let by = ry + (row_h - bh) * 0.5;
@@ -567,6 +660,8 @@ mod tests {
             show_stats: false,
             clouds: false,
             god_rays: false,
+            walk: false,
+            third_person: false,
         };
         let mut back = Settings::default();
         back.apply_text(&s.to_text());
@@ -617,6 +712,8 @@ mod tests {
             Action::CycleLodQuality,
             Action::ToggleClouds,
             Action::ToggleRays,
+            Action::ToggleWalk,
+            Action::ToggleView,
         ] {
             let (x, y) = center_of(&u, a);
             assert_eq!(u.hit(x, y), Some(a), "{a:?}");
@@ -758,11 +855,11 @@ mod tests {
         u.settings.cull = CullMode::Frustum;
         u.settings.greedy = true;
         build(&mut u);
-        let panel_w = 360.0 * 2.75;
-        let cell_w = (panel_w - 8.0 * 2.75 * 3.0) / 2.0;
+        let panel_w = 376.0 * 2.75;
+        let cell_w = (panel_w - 8.0 * 2.75 * 4.0) / 3.0;
         let px = (2.5f32 * 2.75).round();
         let mut tpx = px;
-        while tpx > 2.0 && text_width(tpx, "MESH GREEDY") > cell_w * 0.94 {
+        while tpx > 2.0 && text_width(tpx, "CULL FRUSTUM") > cell_w * 0.94 {
             tpx -= 1.0;
         }
         assert!(tpx >= 4.0, "label would shrink to {tpx}px");

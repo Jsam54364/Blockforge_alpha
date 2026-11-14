@@ -11,8 +11,10 @@ mod game;
 mod gfx;
 mod glyphs;
 mod gpu_timer;
+pub mod hyrig;
 mod math;
 mod perf;
+mod player;
 mod sky;
 mod texgen;
 mod textures;
@@ -137,6 +139,7 @@ impl ApplicationHandler for App {
                         clouds: settings.clouds,
                         god_rays: settings.god_rays,
                     };
+                    g.set_character(self.game.player.triangles());
                     match g.render(&mut self.game.client, &self.game.cam, view_blocks, &opts, &self.hud) {
                         Ok(display_wait) => {
                             self.perf.end_frame(frame_start.elapsed().saturating_sub(display_wait));

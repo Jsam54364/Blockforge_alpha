@@ -321,6 +321,18 @@ impl Client {
         }
     }
 
+    /// For collision: `None` if the chunk at `pos` is not loaded; otherwise the solid part of
+    /// the cell, if any, as (bottom, top) heights inside it (a half slab is (0.0, 0.5)).
+    pub fn solid_span(&self, pos: BlockPos) -> Option<Option<(f32, f32)>> {
+        let state = self.store.block(pos)?;
+        let reg = self.registry.as_ref()?;
+        if !reg.get(state).solid {
+            return Some(None);
+        }
+        let (lo, hi) = state.shape().y_range_q();
+        Some(Some((lo as f32 / 4.0, hi as f32 / 4.0)))
+    }
+
     /// (chunks that have geometry, total quads)
     pub fn mesh_totals(&self) -> (usize, usize) {
         (self.meshes.len(), self.meshes.values().map(|m| m.quad_count()).sum())

@@ -7,7 +7,7 @@ A mobile-first voxel engine in Rust, in two crates:
   architecture lives here and is tested without a GPU.
 * the **app** (`app/`): the Android front-end. winit + wgpu renderer, touch controls and HUD.
 
-> **Status:** 103 unit + 9 end-to-end tests in the core and 68 in the app (plus WGSL
+> **Status:** 103 unit + 9 end-to-end tests in the core and 77 in the app (plus WGSL
 > validation) pass. The APK builds on GitHub Actions and has been run and measured on a phone
 > (see the numbers further down).
 
@@ -105,7 +105,7 @@ public GPU-usage percentage, hence the derived figure.
 
 Top-right menu button: render distance (2-12 chunks, applied to the server stream too),
 LOD distance (OFF, 1K ... 32K blocks) and LOD quality (LODQ: LOW/MED/HIGH, the width of the
-first LOD ring), time of day (TIME: an hour back or forward), fog, clouds and god rays on/off,
+first LOD ring), time of day (TIME: an hour back or forward), fog, clouds and god rays on/off, walk or fly, first or third person,
 stats on/off. The overlay's LOD line shows the sections and quads drawn. The HUD is drawn by a tiny immediate-mode layer (`ui.rs`) with its own 5x7 bitmap
 font (`font.rs`, `glyphs.rs`), so there are no UI dependencies.
 
@@ -355,6 +355,34 @@ Next: trees and plants per biome, rivers, rain shadows behind mountains.
   `python3 tools/bake_sky.py sky.hdr` (day) or `python3 tools/bake_sky.py --night night.exr`
   (night; it needs its moon in it), rebuild. Clear or lightly clouded day skies work best:
   clouds stay where they are, lit from where the photo's sun was.
+
+## The character (`app/src/hyrig`, `app/src/player.rs`, `assets/hyrig`)
+
+* **Walk mode** (the default; MODE in the menu switches to the flying camera and back): you are
+  the HyRig character, in third person (VIEW, or ACT > VIEW, switches to first person). The
+  left stick walks, jogs or sprints by how far it is pushed; JUMP and ROLL repeat while held;
+  CROUCH and CRAWL toggle; ACT opens everything else: punch, swing, chop, hit, use with either
+  hand, eat, wave, sit, die and revive, and the four carry states. Breaking a block punches,
+  placing one reaches out.
+* **Block rules** (Minecraft's, where the kit has none): half slabs are walked up and down
+  (a step is 0.6); a full block needs a jump (1.05 high); the body is 0.6 wide and 1.8 tall, so
+  a two-block-high opening is walked through; a two-block wall is climbed by jumping at it
+  (the kit's ledge climb, 1.4 to 2.55 blocks). Water is walked through: there is no swimming
+  yet. The follow camera stops short of walls and ground.
+* **The state machine** is the kit's controller ported to Rust function for function
+  (`hyrig/controller.rs`): gaits blended in step, jumps from either foot chained on touchdown,
+  falls and landings, linked rolls, ledge climbs, crouch, prone, upper-body actions over any
+  movement, carry poses over everything, sitting, death, idle fidgets, blinking and glancing
+  eyes and expressions. `tests/hyrig_parity.rs` replays the kit's recorded reference run
+  (7 194 frames covering every state) and the port matches it on every frame.
+* **The model** is a tree of 25 rigid parts with 51 clips. `tools/convert_hyrig.py` turns the
+  kit's glTF into `assets/hyrig/hyrig.bin` (nodes, triangles, key frames; 0.8 MB), so the game
+  needs no glTF reader. Each frame `hyrig/rig.rs` blends the clips the controller asks for
+  into a pose (legs from the body clips, upper body faded against the action, carry pose on
+  its arm bones, head turn, face) and hands the renderer 768 world-space vertices; the shader
+  lights them with the terrain's per-direction light.
+* The model is by Powerbyte7, **CC BY-NC 4.0: credit required, no commercial use**
+  (`assets/hyrig/CREDITS.md`).
 
 ## Clouds and god rays (`app/src/clouds.rs`, the shader)
 

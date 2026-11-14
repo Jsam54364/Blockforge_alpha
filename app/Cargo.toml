@@ -18,6 +18,8 @@ winit = "0.30"
 pollster = "0.3"
 # Decodes the block textures in assets/textures (pure Rust).
 png = "0.17"
+# Reads the character controller's settings (assets/hyrig/hyrig_controller.json).
+serde_json = "1"
 
 [target.'cfg(target_os = "android")'.dependencies]
 winit = { version = "0.30", features = ["android-native-activity"] }

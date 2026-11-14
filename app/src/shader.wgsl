@@ -533,6 +533,48 @@ fn fs_rays(f: SkyOut) -> @location(0) vec4<f32> {
     return vec4<f32>(tint * (sum * g.rays.z / f32(RAY_STEPS)), 1.0);
 }
 
+// ---- The character (see app/src/hyrig): posed on the CPU, drawn as plain triangles ----
+@group(1) @binding(3) var char_tex: texture_2d<f32>;
+@group(1) @binding(4) var char_sampler: sampler;
+
+struct CharOut {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+    @location(1) light: vec3<f32>,
+    @location(2) world: vec3<f32>,
+};
+
+@vertex
+fn vs_char(@location(0) pos: vec3<f32>, @location(1) normal: vec3<f32>, @location(2) uv: vec2<f32>) -> CharOut {
+    // The terrain's light, for a surface facing any way: each axis's face light, by how much
+    // the normal points along it.
+    let n2 = normal * normal;
+    let lx = g.face_light[select(1, 0, normal.x > 0.0)].rgb;
+    let ly = g.face_light[select(3, 2, normal.y > 0.0)].rgb;
+    let lz = g.face_light[select(5, 4, normal.z > 0.0)].rgb;
+    var o: CharOut;
+    o.clip = g.view_proj * vec4<f32>(pos, 1.0);
+    o.uv = uv;
+    o.light = lx * n2.x + ly * n2.y + lz * n2.z;
+    o.world = pos;
+    return o;
+}
+
+@fragment
+fn fs_char(f: CharOut) -> @location(0) vec4<f32> {
+    let t = textureSample(char_tex, char_sampler, f.uv);
+    if (t.a < 0.64) { // the model's cut-out threshold (rig::ALPHA_CUTOFF)
+        discard;
+    }
+    var col = t.rgb * f.light;
+    let d = distance(f.world, g.cam_pos.xyz);
+    let fog = clamp((d - g.fog_params.x) / (g.fog_params.y - g.fog_params.x), 0.0, 1.0) * g.flags.x;
+    if (fog > 0.0) {
+        col = mix(col, sky_radiance((f.world - g.cam_pos.xyz) / max(d, 1e-3), 2.0), fog);
+    }
+    return vec4<f32>(display(col), 1.0);
+}
+
 // ---- HUD: coloured triangles in pixel coordinates (origin top-left) ----
 struct HudIn {
     @location(0) pos: vec2<f32>,
