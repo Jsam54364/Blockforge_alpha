@@ -613,6 +613,10 @@ pub struct Gfx {
     pipe_lod: wgpu::RenderPipeline,
     pipe_sky: wgpu::RenderPipeline,
     pipe_hud: wgpu::RenderPipeline,
+    /// The title screen's turning panorama (`title.rs`, `title.wgsl`).
+    pipe_title: wgpu::RenderPipeline,
+    bind_title: wgpu::BindGroup,
+    title_uniform: wgpu::Buffer,
     hud_buf: wgpu::Buffer,
     timer: Option<GpuTimer>,
     globals_solid: wgpu::Buffer,
@@ -888,6 +892,7 @@ impl Gfx {
             true,
         );
         let pipe_hud = hud_pipeline(&device, &layout, &shader, format);
+        let (pipe_title, bind_title, title_uniform) = title_pipeline(&device, &queue, format);
 
         let index_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("shared quad indices"),
@@ -939,6 +944,9 @@ impl Gfx {
             pipe_lod,
             pipe_sky,
             pipe_hud,
+            pipe_title,
+            bind_title,
+            title_uniform,
             hud_buf,
             timer,
             globals_solid,
@@ -1434,6 +1442,55 @@ impl Gfx {
         }
         Ok(acquire_wait + present_wait)
     }
+
+    /// Draws the title screen: the turning panorama (camera yaw `yaw`) and the HUD (its
+    /// buttons). The world is not drawn. Returns the display wait, as `render` does.
+    pub fn render_title(&mut self, yaw: f32, hud: &[HudVertex]) -> Result<Duration, wgpu::SurfaceError> {
+        let (w, h) = (self.config.width as f32, self.config.height as f32);
+        let view = [yaw, (crate::title::FOVY * 0.5).tan(), w / h.max(1.0), 1.0];
+        self.queue.write_buffer(&self.title_uniform, 0, as_bytes(&view));
+        // The HUD needs only the screen size from the globals.
+        self.queue.write_buffer(&self.globals_solid, std::mem::offset_of!(Globals, screen) as u64, as_bytes(&[w, h, 0.0, 0.0]));
+        let hud_verts = hud.len().min(MAX_HUD_VERTS);
+        if hud_verts > 0 {
+            self.queue.write_buffer(&self.hud_buf, 0, as_bytes(&hud[..hud_verts]));
+        }
+        let acquire_start = Instant::now();
+        let frame = self.surface.get_current_texture()?;
+        let acquire_wait = acquire_start.elapsed();
+        let target = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("title") });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("title pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &target,
+                    resolve_target: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.post.depth_view,
+                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(math::DEPTH_CLEAR), store: wgpu::StoreOp::Discard }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&self.pipe_title);
+            pass.set_bind_group(0, &self.bind_title, &[]);
+            pass.draw(0..3, 0..1);
+            if hud_verts > 0 {
+                pass.set_pipeline(&self.pipe_hud);
+                pass.set_bind_group(0, &self.bind_solid, &[]);
+                pass.set_vertex_buffer(0, self.hud_buf.slice(0..(hud_verts * std::mem::size_of::<HudVertex>()) as u64));
+                pass.draw(0..hud_verts as u32, 0..1);
+            }
+        }
+        self.queue.submit(std::iter::once(encoder.finish()));
+        let present_start = Instant::now();
+        frame.present();
+        Ok(acquire_wait + present_start.elapsed())
+    }
 }
 
 fn voxel_pipeline(
@@ -1564,6 +1621,121 @@ fn sky_pipeline(
         multiview: None,
         cache: None,
     })
+}
+
+/// The title screen's background: pipeline, bind group (panorama and its uniform) and the
+/// uniform buffer.
+fn title_pipeline(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::TextureFormat) -> (wgpu::RenderPipeline, wgpu::BindGroup, wgpu::Buffer) {
+    let max = device.limits().max_texture_dimension_2d.min(4096);
+    let (px, w, h) = crate::title::panorama(max).unwrap_or_else(|e| {
+        eprintln!("blockforge: {e}");
+        (vec![40, 50, 80, 255], 1, 1)
+    });
+    let tex = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("title panorama"),
+        size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    queue.write_texture(
+        wgpu::ImageCopyTexture { texture: &tex, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+        &px,
+        wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(4 * w), rows_per_image: Some(h) },
+        wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+    );
+    let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+    let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("title panorama"),
+        address_mode_u: wgpu::AddressMode::Repeat,
+        address_mode_v: wgpu::AddressMode::ClampToEdge,
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        ..Default::default()
+    });
+    let uniform = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("title uniform"),
+        size: 16,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("title layout"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+        ],
+    });
+    let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("title"),
+        layout: &bgl,
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: uniform.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&view) },
+            wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&sampler) },
+        ],
+    });
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("title"),
+        bind_group_layouts: &[&bgl],
+        push_constant_ranges: &[],
+    });
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("title shader"),
+        source: wgpu::ShaderSource::Wgsl(include_str!("title.wgsl").into()),
+    });
+    let pipe = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("title"),
+        layout: Some(&layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: "vs_title",
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            buffers: &[],
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: "fs_title",
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            targets: &[Some(wgpu::ColorTargetState { format, blend: None, write_mask: wgpu::ColorWrites::ALL })],
+        }),
+        primitive: wgpu::PrimitiveState::default(),
+        // Drawn in a pass with the depth buffer (the HUD pipeline needs one).
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: DEPTH_FORMAT,
+            depth_write_enabled: false,
+            depth_compare: wgpu::CompareFunction::Always,
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+        multisample: wgpu::MultisampleState::default(),
+        multiview: None,
+        cache: None,
+    });
+    (pipe, bind, uniform)
 }
 
 fn hud_pipeline(

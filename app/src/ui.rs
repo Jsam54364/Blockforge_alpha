@@ -240,6 +240,8 @@ impl Settings {
 pub enum Action {
     /// A region that swallows touches (the menu panel) without doing anything.
     Nothing,
+    /// Goes to a screen: the title screen and the pages it opens, or the game itself.
+    Open(Screen),
     ToggleMenu,
     RenderDist(i8),
     LodDist(i8),
@@ -265,6 +267,18 @@ pub enum Action {
     Time(i8),
 }
 
+/// Where the player is: the title screen (Minecraft-style main menu over a turning
+/// panorama), one of the pages it opens, or the game.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Screen {
+    Title,
+    Settings,
+    Multiplayer,
+    Mods,
+    Cosmetics,
+    Playing,
+}
+
 struct Button {
     x: f32,
     y: f32,
@@ -275,6 +289,12 @@ struct Button {
 
 pub struct Ui {
     pub settings: Settings,
+    /// Which screen shows. The app starts on the title screen.
+    pub screen: Screen,
+    /// Seconds since the app started (animates the title screen's splash line).
+    pub seconds: f32,
+    /// Which of `title::SPLASHES` the title screen shows.
+    pub splash: usize,
     pub menu_open: bool,
     /// Whether the grid of character actions is showing.
     pub acts_open: bool,
@@ -398,6 +418,9 @@ impl Ui {
     pub fn new() -> Ui {
         Ui {
             settings: Settings::default(),
+            screen: Screen::Title,
+            seconds: 0.0,
+            splash: 0,
             menu_open: false,
             acts_open: false,
             vsync_supported: true,
@@ -438,6 +461,12 @@ impl Ui {
     pub fn apply(&mut self, a: Action) -> bool {
         match a {
             Action::Nothing => false,
+            Action::Open(s) => {
+                self.screen = s;
+                self.menu_open = false;
+                self.acts_open = false;
+                false
+            }
             Action::ToggleMenu => {
                 self.menu_open = !self.menu_open;
                 false
@@ -503,6 +532,11 @@ impl Ui {
     pub fn build(&mut self, perf: &Perf, out: &mut Vec<HudVertex>) {
         out.clear();
         self.buttons.clear();
+        if self.screen != Screen::Playing {
+            self.draw_screen(out);
+            out.truncate(MAX_HUD_VERTS);
+            return;
+        }
         let (w, h) = self.size;
         let dp = self.dp;
 
@@ -555,6 +589,12 @@ impl Ui {
 
     #[allow(clippy::too_many_arguments)]
     fn button(&mut self, out: &mut Vec<HudVertex>, x: f32, y: f32, w: f32, h: f32, label: &str, px: f32, action: Action) {
+        if self.screen != Screen::Playing {
+            // The settings page off the title screen: its menu's style, a little apart.
+            let m = 2.0 * self.dp;
+            self.stone_button(out, x + m, y + m, w - 2.0 * m, h - 2.0 * m, label, px, action);
+            return;
+        }
         rect(out, x, y, w, h, BTN);
         text_centered(out, x + w * 0.5, y + h * 0.5, px, label, WHITE);
         self.buttons.push(Button { x, y, w, h, action });
@@ -667,7 +707,7 @@ impl Ui {
         // Rows 3-6: toggles in three columns; each button carries its own label.
         let on_off = |b: bool| if b { "ON" } else { "OFF" };
         let vsync_label = if !self.vsync_supported { "N/A" } else { on_off(s.vsync) };
-        let toggles: [(Action, String); 10] = [
+        let toggles: [(Action, String); 11] = [
             (Action::ToggleFog, format!("FOG {}", on_off(s.fog))),
             (Action::CycleCull, format!("CULL {}", s.cull.label())),
             (Action::ToggleVsync, format!("VSYNC {}", vsync_label)),
@@ -678,9 +718,18 @@ impl Ui {
             (Action::ToggleRays, format!("RAYS {}", on_off(s.god_rays))),
             (Action::ToggleWalk, format!("MODE {}", if s.walk { "WALK" } else { "FLY" })),
             (Action::ToggleView, format!("VIEW {}", s.view.label())),
+            // In the game it leads back to the title screen; there it would lead nowhere.
+            if self.screen == Screen::Playing {
+                (Action::Open(Screen::Title), "MAIN MENU".to_string())
+            } else {
+                (Action::Nothing, String::new())
+            },
         ];
         let cell_w = (panel_w - pad * 4.0) / 3.0;
         for (i, (action, label)) in toggles.iter().enumerate() {
+            if label.is_empty() {
+                continue;
+            }
             let row = 3 + i / 3;
             let col = i % 3;
             let x = x0 + pad + col as f32 * (cell_w + pad);
@@ -696,14 +745,292 @@ impl Ui {
     }
 }
 
+// ---- The title screen and its pages ---------------------------------------------------
+
+const STONE_FACE: [u8; 4] = [111, 111, 111, 245];
+const STONE_LIGHT: [u8; 4] = [168, 168, 168, 245];
+const STONE_DARK: [u8; 4] = [62, 62, 62, 245];
+const OUTLINE: [u8; 4] = [0, 0, 0, 255];
+const TEXT_LIGHT: [u8; 4] = [236, 236, 236, 255];
+const TEXT_SHADOW: [u8; 4] = [56, 56, 56, 255];
+const SPLASH_YELLOW: [u8; 4] = [255, 255, 0, 255];
+const SPLASH_SHADOW: [u8; 4] = [63, 63, 0, 255];
+
+/// Text with a shadow one font pixel down and right, centred on (cx, cy).
+fn shadow_text_centered(out: &mut Vec<HudVertex>, cx: f32, cy: f32, px: f32, s: &str, c: [u8; 4], shadow: [u8; 4]) {
+    text_centered(out, cx + px, cy + px, px, s, shadow);
+    text_centered(out, cx, cy, px, s, c);
+}
+
+/// The largest whole font pixel (at most `px`, at least 2) at which `s` fits in `width`.
+fn fit_px(px: f32, s: &str, width: f32) -> f32 {
+    let mut p = px.round().max(2.0);
+    while p > 2.0 && text_width(p, s) > width {
+        p -= 1.0;
+    }
+    p
+}
+
+/// The heading and lines of the title screen's information pages.
+fn page_text(s: Screen) -> (&'static str, &'static [&'static str]) {
+    match s {
+        Screen::Multiplayer => (
+            "MULTIPLAYER",
+            &["NO SERVERS YET.", "THE GAME ALREADY RUNS AS A CLIENT AND A SERVER,", "EVEN ON ITS OWN. PLAYING TOGETHER OVER", "WI-FI IS STILL TO COME."],
+        ),
+        Screen::Mods => (
+            "MODS",
+            &["NO MODS INSTALLED.", "BLOCKS COME FROM ASSETS/BLOCKS.TOML FOR NOW.", "MODS WILL ADD THEIR OWN BLOCKS, ITEMS", "AND BEHAVIOURS."],
+        ),
+        Screen::Cosmetics => ("COSMETICS", &["SKINS AND OUTFITS FOR YOUR CHARACTER.", "COMING SOON."]),
+        _ => ("", &[]),
+    }
+}
+
+impl Ui {
+    /// A button in the style of Minecraft's menus: black outline, grey face with a light top
+    /// edge and a dark bottom edge, light text with a shadow.
+    #[allow(clippy::too_many_arguments)]
+    fn stone_button(&mut self, out: &mut Vec<HudVertex>, x: f32, y: f32, w: f32, h: f32, label: &str, px: f32, action: Action) {
+        let b = self.dp.round().max(2.0);
+        rect(out, x, y, w, h, OUTLINE);
+        rect(out, x + b, y + b, w - 2.0 * b, h - 2.0 * b, STONE_FACE);
+        rect(out, x + b, y + b, w - 2.0 * b, b, STONE_LIGHT);
+        rect(out, x + b, y + h - 3.0 * b, w - 2.0 * b, 2.0 * b, STONE_DARK);
+        let px = fit_px(px, label, w * 0.9);
+        shadow_text_centered(out, x + w * 0.5, y + h * 0.5 - b * 0.5, px, label, TEXT_LIGHT, TEXT_SHADOW);
+        self.buttons.push(Button { x, y, w, h, action });
+    }
+
+    fn draw_screen(&mut self, out: &mut Vec<HudVertex>) {
+        match self.screen {
+            Screen::Title => self.draw_title(out),
+            Screen::Settings => self.draw_settings_page(out),
+            Screen::Playing => {}
+            s => {
+                let (heading, lines) = page_text(s);
+                self.draw_page(out, heading, lines);
+            }
+        }
+    }
+
+    /// The main menu: logo, a pulsing yellow splash line, and the buttons, over the
+    /// panorama the renderer draws behind it.
+    fn draw_title(&mut self, out: &mut Vec<HudVertex>) {
+        let (w, h) = self.size;
+        let dp = self.dp;
+        let [sl, st, sr, sb] = self.margins();
+        let (x0, x1) = (sl, w - sr);
+        let cx = (x0 + x1) * 0.5;
+
+        // Logo, with a dark extrusion under it.
+        let logo = "BLOCKFORGE";
+        let lpx = ((x1 - x0) * 0.62 / text_width(1.0, logo)).min(9.0 * dp).max(2.0).floor();
+        let ly = st + 14.0 * dp;
+        let depth = (lpx * 0.45).max(1.0);
+        for k in (1..=3).rev() {
+            text_centered(out, cx, ly + 3.5 * lpx + k as f32 * depth, lpx, logo, [40, 40, 40, 255]);
+        }
+        text_centered(out, cx, ly + 3.5 * lpx, lpx, logo, TEXT_LIGHT);
+        let logo_bottom = ly + 7.0 * lpx + 3.0 * depth;
+
+        // Buttons: three full width, then two side by side.
+        let footer = 7.0 * (1.5 * dp).round().max(2.0) + 12.0 * dp;
+        let gap = 6.0 * dp;
+        let (top, bottom) = (logo_bottom + 18.0 * dp, h - sb - footer);
+        let bh = ((bottom - top - 3.0 * gap) / 4.0).clamp(36.0 * dp, 48.0 * dp);
+        let total = 4.0 * bh + 3.0 * gap;
+        let by = top + ((bottom - top - total) * 0.5).max(0.0);
+        let bw = (300.0 * dp).min((x1 - x0) * 0.8);
+        let bx = cx - bw * 0.5;
+        let px = (2.5 * dp).round().max(2.0);
+        let rows: [(&str, Screen); 3] = [("SINGLEPLAYER", Screen::Playing), ("MULTIPLAYER", Screen::Multiplayer), ("MODS", Screen::Mods)];
+        for (i, (label, screen)) in rows.iter().enumerate() {
+            self.stone_button(out, bx, by + i as f32 * (bh + gap), bw, bh, label, px, Action::Open(*screen));
+        }
+        let half_w = (bw - gap) * 0.5;
+        let y3 = by + 3.0 * (bh + gap);
+        self.stone_button(out, bx, y3, half_w, bh, "SETTINGS", px, Action::Open(Screen::Settings));
+        self.stone_button(out, bx + half_w + gap, y3, half_w, bh, "COSMETICS", px, Action::Open(Screen::Cosmetics));
+
+        // Splash: tilted and pulsing over the logo's lower right corner, as in Minecraft
+        // (drawn last, on top; kept on screen and clear of the buttons).
+        let splash = crate::title::SPLASHES[self.splash % crate::title::SPLASHES.len()];
+        let spx = (lpx * 0.3).max(2.0);
+        let pulse = 1.0 + 0.08 * (self.seconds * std::f32::consts::TAU).sin().abs();
+        let (sin_a, cos_a) = (-0.35f32).sin_cos();
+        let half = text_width(spx, splash) * 0.5 * pulse;
+        let logo_right = cx + text_width(lpx, logo) * 0.5;
+        let ax = (logo_right - 0.04 * text_width(lpx, logo)).min(x1 - half * cos_a - 6.0 * dp).max(bx + bw + half * cos_a * 0.0);
+        let ay = ly + 6.0 * lpx;
+        let mut tmp = Vec::new();
+        text_centered(&mut tmp, spx, spx, spx, splash, SPLASH_SHADOW);
+        text_centered(&mut tmp, 0.0, 0.0, spx, splash, SPLASH_YELLOW);
+        for v in tmp {
+            let (x, y) = (v.pos[0] * pulse, v.pos[1] * pulse);
+            out.push(HudVertex { pos: [ax + x * cos_a - y * sin_a, ay + x * sin_a + y * cos_a], color: v.color });
+        }
+
+        // Footer.
+        let fpx = (1.5 * dp).round().max(2.0);
+        let version = format!("BLOCKFORGE ALPHA {}", env!("CARGO_PKG_VERSION"));
+        text(out, x0 + 6.0 * dp + fpx, h - sb - 6.0 * dp - 7.0 * fpx + fpx, fpx, &version, TEXT_SHADOW);
+        text(out, x0 + 6.0 * dp, h - sb - 6.0 * dp - 7.0 * fpx, fpx, &version, WHITE);
+    }
+
+    /// A page with a heading, a few lines in a dark panel, and DONE back to the title.
+    fn draw_page(&mut self, out: &mut Vec<HudVertex>, heading: &str, lines: &[&str]) {
+        let (w, h) = self.size;
+        let dp = self.dp;
+        let [sl, st, sr, sb] = self.margins();
+        let (x0, x1) = (sl, w - sr);
+        let cx = (x0 + x1) * 0.5;
+        let hpx = fit_px(3.5 * dp, heading, (x1 - x0) * 0.9);
+        let hy = st + 12.0 * dp;
+        shadow_text_centered(out, cx, hy + 3.5 * hpx, hpx, heading, TEXT_LIGHT, TEXT_SHADOW);
+
+        let bh = 48.0 * dp;
+        let done_y = h - sb - 12.0 * dp - bh;
+        let pw = (560.0 * dp).min((x1 - x0) * 0.92);
+        let (py0, py1) = (hy + 7.0 * hpx + 12.0 * dp, done_y - 12.0 * dp);
+        rect(out, cx - pw * 0.5, py0, pw, (py1 - py0).max(0.0), [0, 0, 0, 150]);
+        let widest = lines.iter().copied().max_by(|a, b| text_width(1.0, a).total_cmp(&text_width(1.0, b))).unwrap_or("");
+        let px = fit_px(2.5 * dp, widest, pw - 32.0 * dp);
+        let line_h = 11.0 * px;
+        let ty = (py0 + py1) * 0.5 - line_h * lines.len() as f32 * 0.5 + 2.0 * px;
+        for (i, l) in lines.iter().enumerate() {
+            text_centered(out, cx, ty + line_h * i as f32 + 3.5 * px, px, l, if i == 0 { TEXT_LIGHT } else { [200, 200, 200, 255] });
+        }
+
+        let bw = (200.0 * dp).min((x1 - x0) * 0.6);
+        self.stone_button(out, cx - bw * 0.5, done_y, bw, bh, "DONE", (2.5 * dp).round(), Action::Open(Screen::Title));
+    }
+
+    /// The settings page: the game's settings panel, with a heading and DONE beside it.
+    fn draw_settings_page(&mut self, out: &mut Vec<HudVertex>) {
+        let (w, h) = self.size;
+        let dp = self.dp;
+        let [sl, st, sr, sb] = self.margins();
+        let (x0, x1) = (sl + 8.0 * dp, w - sr - 8.0 * dp);
+        let side = 180.0 * dp;
+        let gap = 16.0 * dp;
+        let panel = (376.0 * dp).min(x1 - x0 - side - gap);
+        let left = (((x0 + x1) - (side + gap + panel)) * 0.5).max(x0);
+        let hpx = fit_px(3.5 * dp, "SETTINGS", side);
+        let hy = st + 12.0 * dp;
+        shadow_text_centered(out, left + side * 0.5, hy + 3.5 * hpx, hpx, "SETTINGS", TEXT_LIGHT, TEXT_SHADOW);
+        let bh = 48.0 * dp;
+        self.stone_button(out, left, h - sb - 12.0 * dp - bh, side, bh, "DONE", (2.5 * dp).round(), Action::Open(Screen::Title));
+        self.draw_menu(out, left + side + gap + panel, st + 8.0 * dp);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// In the game (the HUD tests); `title()` for the title screen.
     fn ui() -> Ui {
         let mut u = Ui::new();
         u.set_surface(2400, 1080, 2.75);
+        u.screen = Screen::Playing;
         u
+    }
+
+    fn title() -> Ui {
+        let mut u = Ui::new();
+        u.set_surface(2400, 1080, 2.75);
+        assert_eq!(u.screen, Screen::Title, "the app opens on the title screen");
+        u
+    }
+
+    fn find(u: &Ui, a: Action) -> &Button {
+        u.buttons.iter().find(|b| b.action == a).unwrap_or_else(|| panic!("no {a:?} button"))
+    }
+
+    #[test]
+    fn the_title_screen_has_its_five_buttons_and_each_page_leads_back() {
+        for (w, h) in [(2400, 1080), (1920, 1080), (2800, 1260), (1080, 2400)] {
+            let mut u = title();
+            u.set_surface(w, h, 2.75);
+            for splash in 0..crate::title::SPLASHES.len() {
+                u.splash = splash;
+                u.seconds = splash as f32 * 0.37;
+                let out = build(&mut u);
+                // Everything drawn is on screen (the logo and the turning splash too).
+                for v in &out {
+                    assert!(v.pos[0] >= -0.5 && v.pos[0] <= w as f32 + 0.5 && v.pos[1] >= -0.5 && v.pos[1] <= h as f32 + 0.5, "{:?} off a {w}x{h} screen", v.pos);
+                }
+            }
+            let targets = [Screen::Playing, Screen::Multiplayer, Screen::Mods, Screen::Settings, Screen::Cosmetics];
+            for s in targets {
+                let b = find(&u, Action::Open(s));
+                assert!(b.h >= 36.0 * 2.75 - 0.5 && b.w >= 100.0 * 2.75, "{s:?}: {}x{}", b.w, b.h);
+            }
+            // No two buttons overlap.
+            for (i, a) in u.buttons.iter().enumerate() {
+                for b in &u.buttons[i + 1..] {
+                    assert!(a.x + a.w <= b.x || b.x + b.w <= a.x || a.y + a.h <= b.y || b.y + b.h <= a.y);
+                }
+            }
+            for s in targets {
+                let mut p = title();
+                p.set_surface(w, h, 2.75);
+                build(&mut p);
+                let b = find(&p, Action::Open(s));
+                let (x, y) = (b.x + b.w * 0.5, b.y + b.h * 0.5);
+                let a = p.hit(x, y).unwrap();
+                p.apply(a);
+                assert_eq!(p.screen, s);
+                if s == Screen::Playing {
+                    continue;
+                }
+                build(&mut p);
+                let done = find(&p, Action::Open(Screen::Title));
+                assert!(done.y + done.h <= h as f32 && done.x >= 0.0 && done.x + done.w <= w as f32);
+                p.apply(Action::Open(Screen::Title));
+                assert_eq!(p.screen, Screen::Title);
+            }
+        }
+    }
+
+    #[test]
+    fn the_settings_page_is_the_games_settings_panel() {
+        let mut u = title();
+        u.apply(Action::Open(Screen::Settings));
+        build(&mut u);
+        for a in [Action::ToggleFog, Action::RenderDist(1), Action::Time(1), Action::ToggleView] {
+            let b = find(&u, a);
+            assert!(b.x >= 0.0 && b.x + b.w <= 2400.0 && b.y + b.h <= 1080.0, "{a:?}");
+        }
+        assert!(u.apply(Action::RenderDist(1)) || u.settings.render_chunks == RENDER_MAX);
+        // No way back to the title from inside its own page except DONE.
+        assert_eq!(u.buttons.iter().filter(|b| b.action == Action::Open(Screen::Title)).count(), 1);
+    }
+
+    #[test]
+    fn the_game_menu_leads_back_to_the_title_screen() {
+        let mut u = ui();
+        u.menu_open = true;
+        build(&mut u);
+        let b = find(&u, Action::Open(Screen::Title));
+        let a = u.hit(b.x + 1.0, b.y + 1.0).unwrap();
+        u.apply(a);
+        assert_eq!(u.screen, Screen::Title);
+        assert!(!u.menu_open, "the menu closes with it");
+    }
+
+    #[test]
+    fn every_title_screen_text_can_be_drawn() {
+        for s in [Screen::Multiplayer, Screen::Mods, Screen::Cosmetics] {
+            let (heading, lines) = page_text(s);
+            for t in std::iter::once(&heading).chain(lines.iter()) {
+                assert!(t.chars().all(font::has_art), "{t}");
+            }
+        }
+        for t in ["BLOCKFORGE", "SINGLEPLAYER", "MULTIPLAYER", "MODS", "SETTINGS", "COSMETICS", "DONE", "MAIN MENU", "BLOCKFORGE ALPHA 0.1.0"] {
+            assert!(t.chars().all(font::has_art), "{t}");
+        }
     }
 
     fn build(u: &mut Ui) -> Vec<HudVertex> {

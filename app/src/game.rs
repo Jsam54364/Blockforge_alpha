@@ -30,7 +30,7 @@ use winit::event::TouchPhase;
 use crate::hyrig::View;
 use crate::player::Player;
 use crate::sky::Clock;
-use crate::ui::{Action, CamView, Ui, LOD_DISTANCES, LOD_QUALITY};
+use crate::ui::{Action, CamView, Screen, Ui, LOD_DISTANCES, LOD_QUALITY};
 
 const LOOK_SENS: f32 = 0.0045;
 const FLY_SPEED: f32 = 14.0;
@@ -159,6 +159,8 @@ impl Game {
         let state_path = save_dir.as_ref().map(|d| d.join(STATE_FILE));
         let saved = state_path.as_ref().and_then(|p| std::fs::read_to_string(p).ok()).unwrap_or_default();
         let mut ui = Ui::new();
+        // A different splash line each launch.
+        ui.splash = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.subsec_nanos() as usize);
         ui.settings.apply_text(&saved);
         let clock = Clock::from_text(&saved);
         ui.hours = clock.hours();
@@ -356,35 +358,60 @@ impl Game {
         self.client.update();
     }
 
+    /// Does what a HUD button asks (`id` is the touch that pressed it).
+    fn ui_action(&mut self, id: u64, action: Action) {
+        match action {
+            Action::Hold(button) => {
+                self.held.insert(id, button);
+            }
+            Action::Press(name) => self.player.press(name),
+            _ => {}
+        }
+        let greedy_before = self.ui.settings.greedy;
+        let menu_was_open = self.ui.menu_open;
+        let screen_before = self.ui.screen;
+        if let Action::Time(h) = action {
+            self.clock.shift(h as f64);
+            self.ui.hours = self.clock.hours();
+        }
+        if self.ui.apply(action) {
+            self.client.set_view_distance(self.ui.settings.render_chunks);
+        }
+        if self.ui.settings.greedy != greedy_before {
+            let kind = if self.ui.settings.greedy { Mesher::Greedy } else { Mesher::Simple };
+            self.client.set_mesher(kind);
+        }
+        if self.ui.screen != screen_before {
+            // Fingers on the old screen don't carry over (no stick left pushed, no button held).
+            self.touches.clear();
+            self.held.clear();
+            if screen_before == Screen::Playing {
+                self.persist(); // back to the title screen: as safe as quitting
+            } else if screen_before == Screen::Settings {
+                self.save_state();
+            }
+        }
+        if menu_was_open && !self.ui.menu_open {
+            self.save_state(); // closing the menu keeps what was chosen in it
+        }
+    }
+
     pub fn touch(&mut self, id: u64, phase: TouchPhase, x: f32, y: f32) {
+        // Off the game (title screen and its pages), touches only press buttons.
+        if self.ui.screen != Screen::Playing {
+            if phase == TouchPhase::Started {
+                if let Some(action) = self.ui.hit(x, y) {
+                    self.ui_action(id, action);
+                }
+            }
+            return;
+        }
         // HUD first: a touch that starts on a button belongs to the HUD until it ends.
         match phase {
             TouchPhase::Started => {
                 if let Some(action) = self.ui.hit(x, y) {
                     self.ui_touches.insert(id);
-                    match action {
-                        Action::Hold(button) => {
-                            self.held.insert(id, button);
-                        }
-                        Action::Press(name) => self.player.press(name),
-                        _ => {}
-                    }
-                    let greedy_before = self.ui.settings.greedy;
-                    let menu_was_open = self.ui.menu_open;
-                    if let Action::Time(h) = action {
-                        self.clock.shift(h as f64);
-                        self.ui.hours = self.clock.hours();
-                    }
-                    if self.ui.apply(action) {
-                        self.client.set_view_distance(self.ui.settings.render_chunks);
-                    }
-                    if self.ui.settings.greedy != greedy_before {
-                        let kind = if self.ui.settings.greedy { Mesher::Greedy } else { Mesher::Simple };
-                        self.client.set_mesher(kind);
-                    }
-                    if menu_was_open && !self.ui.menu_open {
-                        self.save_state(); // closing the menu keeps what was chosen in it
-                    }
+                    self.ui_action(id, action);
                     return;
                 }
             }

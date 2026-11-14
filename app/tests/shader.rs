@@ -19,3 +19,14 @@ fn shader_has_all_entry_points() {
         assert!(names.iter().any(|n| n == want), "missing entry point {want}");
     }
 }
+
+#[test]
+fn title_shader_parses_and_validates() {
+    const TITLE: &str = include_str!("../src/title.wgsl");
+    let module = naga::front::wgsl::parse_str(TITLE).unwrap_or_else(|e| panic!("{}", e.emit_to_string(TITLE)));
+    naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all())
+        .validate(&module)
+        .expect("title WGSL validation failed");
+    let names: Vec<String> = module.entry_points.iter().map(|e| e.name.clone()).collect();
+    assert!(names.contains(&"vs_title".to_string()) && names.contains(&"fs_title".to_string()));
+}

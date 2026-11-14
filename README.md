@@ -7,7 +7,7 @@ A mobile-first voxel engine in Rust, in two crates:
   architecture lives here and is tested without a GPU.
 * the **app** (`app/`): the Android front-end. winit + wgpu renderer, touch controls and HUD.
 
-> **Status:** 114 unit + 9 end-to-end tests in the core and 82 in the app (plus WGSL
+> **Status:** 114 unit + 9 end-to-end tests in the core and 89 in the app (plus WGSL
 > validation) pass. The APK builds on GitHub Actions and has been run and measured on a phone
 > (see the numbers further down).
 
@@ -97,6 +97,22 @@ CI flow (GitHub Actions, all from a phone):
 2. When `CI` succeeds, `Android APK` runs: host type-check + WGSL validation, then `cargo apk build`.
 3. The APK is published to the repo's **Releases** page as `blockforge-debug.apk`.
 
+### Title screen (`app/src/title.rs`, `app/src/title.wgsl`, `assets/title`)
+
+The app opens on a main menu in the style of Minecraft's: the BLOCKFORGE logo with a tilted,
+pulsing yellow splash line (a different one each launch), and SINGLEPLAYER, MULTIPLAYER, MODS,
+SETTINGS and COSMETICS in grey stone buttons. Behind it a panorama of a sunset over the sea turns
+once every three minutes. The panorama was photographed in the game itself: twelve views 30
+degrees apart from one spot off a west-facing coast (seed 1337, near x -1848, z 40, at 18:18),
+rendered with the god rays off so they match, and stitched into one cylindrical picture
+(`tools/stitch_panorama.py`: 4096 x 683, 30 degrees above and below the horizon, 425 KB as JPEG).
+The title shader turns each screen pixel into a compass direction and elevation and samples it.
+
+SINGLEPLAYER enters the world (it keeps loading behind the title screen, so this is immediate).
+SETTINGS opens the game's settings panel with DONE beside it. MULTIPLAYER, MODS and COSMETICS
+open pages that say what is and is not there yet (no network play, mods or skins so far). The
+in-game menu's MAIN MENU button saves and goes back to the title screen.
+
 ### HUD and settings
 
 Top-left overlay (toggle in the menu): FPS and frame time, this app's CPU use (from
@@ -108,7 +124,7 @@ public GPU-usage percentage, hence the derived figure.
 Top-right menu button: render distance (2-12 chunks, applied to the server stream too),
 LOD distance (OFF, 1K ... 32K blocks) and LOD quality (LODQ: LOW/MED/HIGH, the width of the
 first LOD ring), time of day (TIME: an hour back or forward), fog, clouds and god rays on/off, walk or fly, the view (1ST, 3RD behind, FRONT looking back),
-stats on/off. The overlay's LOD line shows the sections and quads drawn. The HUD is drawn by a tiny immediate-mode layer (`ui.rs`) with its own 5x7 bitmap
+stats on/off, and MAIN MENU (back to the title screen). The overlay's LOD line shows the sections and quads drawn. The HUD is drawn by a tiny immediate-mode layer (`ui.rs`) with its own 5x7 bitmap
 font (`font.rs`, `glyphs.rs`), so there are no UI dependencies.
 
 Back-face culling is on for solid terrain (water stays double-sided so the surface is visible

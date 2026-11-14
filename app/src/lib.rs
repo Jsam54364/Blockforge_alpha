@@ -20,6 +20,7 @@ mod player;
 mod pool;
 mod sky;
 mod texgen;
+mod title;
 mod textures;
 mod tint;
 mod ui;
@@ -40,6 +41,8 @@ pub struct App {
     perf: perf::Perf,
     hud: Vec<ui::HudVertex>,
     frames: u64,
+    /// When the app started: the title screen's panorama turns with it.
+    started: Instant,
     #[cfg(target_os = "android")]
     android_app: Option<winit::platform::android::activity::AndroidApp>,
 }
@@ -53,6 +56,7 @@ impl App {
             perf: perf::Perf::new(),
             hud: Vec::new(),
             frames: 0,
+            started: Instant::now(),
             #[cfg(target_os = "android")]
             android_app: None,
         }
@@ -149,7 +153,22 @@ impl ApplicationHandler for App {
                     self.perf.lod_pending = self.game.client.lod.stats.pending;
                     self.perf.present_mode = g.present_mode_name();
                     self.perf.place = self.game.place();
+                    self.game.ui.seconds = self.started.elapsed().as_secs_f32();
                     self.game.ui.build(&self.perf, &mut self.hud);
+                    if self.game.ui.screen != ui::Screen::Playing {
+                        // The title screen and its pages: the panorama behind the buttons. The
+                        // world keeps loading meanwhile, so SINGLEPLAYER starts at once.
+                        match g.render_title(title::yaw(self.game.ui.seconds), &self.hud) {
+                            Ok(display_wait) => self.perf.end_frame(frame_start.elapsed().saturating_sub(display_wait)),
+                            Err(wgpu::SurfaceError::Lost) | Err(wgpu::SurfaceError::Outdated) => {
+                                let (w, h) = g.size();
+                                g.resize(w, h);
+                            }
+                            Err(wgpu::SurfaceError::OutOfMemory) => event_loop.exit(),
+                            Err(_) => {}
+                        }
+                        return;
+                    }
                     let settings = self.game.ui.settings;
                     let (fog_start, fog_end) = self.game.fog_range();
                     let opts = gfx::RenderOptions {
