@@ -20,24 +20,37 @@ mod player;
 mod pool;
 mod sky;
 mod texgen;
-mod title;
 mod textures;
 mod tint;
+mod title;
 mod ui;
+mod worlds;
 
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
+use blockforge::registry::BlockRegistry;
 use winit::application::ApplicationHandler;
-use winit::event::WindowEvent;
+use winit::event::{ElementState, TouchPhase, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
+use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
 
 pub struct App {
     window: Option<Arc<Window>>,
     gfx: Option<gfx::Gfx>,
-    game: game::Game,
+    /// Where worlds and settings are kept (`worlds.rs`); `None` keeps everything in memory.
+    save_dir: Option<PathBuf>,
+    registry: Arc<BlockRegistry>,
+    /// The menus while no world is open. An opened world takes it over (`Game::new`) and
+    /// hands it back when it closes (`Game::close`).
+    ui: ui::Ui,
+    game: Option<game::Game>,
+    /// When the open world started loading.
+    opened: Instant,
+    /// The window's size and scale, for a world opened later.
+    surface: (u32, u32, f64),
     perf: perf::Perf,
     hud: Vec<ui::HudVertex>,
     frames: u64,
@@ -49,16 +62,144 @@ pub struct App {
 
 impl App {
     pub fn new(save_dir: Option<PathBuf>) -> App {
-        App {
+        // Older versions kept one world straight in the save folder: it becomes the first
+        // world of the list.
+        if let Some(d) = &save_dir {
+            if let Err(e) = worlds::migrate(d) {
+                eprintln!("blockforge: could not move the old world into the list: {e}");
+            }
+        }
+        let mut ui = ui::Ui::new();
+        // A different splash line each launch.
+        ui.splash = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.subsec_nanos() as usize);
+        if let Some(text) = save_dir.as_ref().and_then(|d| std::fs::read_to_string(d.join(worlds::SETTINGS_FILE)).ok()) {
+            ui.settings.apply_text(&text);
+        }
+        let mut app = App {
             window: None,
             gfx: None,
-            game: game::Game::new(save_dir),
+            save_dir,
+            registry: Arc::new(BlockRegistry::builtin()),
+            ui,
+            game: None,
+            opened: Instant::now(),
+            surface: (1, 1, 1.0),
             perf: perf::Perf::new(),
             hud: Vec::new(),
             frames: 0,
             started: Instant::now(),
             #[cfg(target_os = "android")]
             android_app: None,
+        };
+        app.refresh_worlds();
+        app
+    }
+
+    /// The UI in charge: the open world's, or the menus'.
+    fn ui(&mut self) -> &mut ui::Ui {
+        match &mut self.game {
+            Some(g) => &mut g.ui,
+            None => &mut self.ui,
+        }
+    }
+
+    fn refresh_worlds(&mut self) {
+        let Some(d) = &self.save_dir else { return };
+        let entries = worlds::list(d)
+            .into_iter()
+            .map(|w| ui::WorldEntry {
+                detail: format!("{}   SEED {}", worlds::date_label(w.last_played), w.seed as i64),
+                seed: (w.seed as i64).to_string(),
+                folder: w.folder,
+                name: w.name,
+            })
+            .collect();
+        self.ui().set_worlds(entries);
+    }
+
+    fn save_settings(&self) {
+        if let Some(d) = &self.save_dir {
+            game::write_atomically(&d.join(worlds::SETTINGS_FILE), &self.ui.settings.to_text());
+        }
+    }
+
+    /// Does what the world screens asked for: play, create, rename or delete a world.
+    fn handle_requests(&mut self) {
+        while let Some(r) = self.ui().take_request() {
+            match r {
+                ui::Request::Play(folder) => self.open_world(&folder),
+                ui::Request::Create { name, seed } => {
+                    let seed = worlds::seed_from_text(&seed);
+                    match self.save_dir.clone() {
+                        Some(d) => match worlds::create(&d, &name, seed) {
+                            Ok(w) => self.open_world(&w.folder),
+                            Err(e) => eprintln!("blockforge: could not create the world: {e}"),
+                        },
+                        None => self.open(game::WorldSpec { dir: None, seed, settings_path: None }),
+                    }
+                }
+                ui::Request::Rename { folder, name } => {
+                    if let Some(d) = &self.save_dir {
+                        if let Err(e) = worlds::rename(d, &folder, &name) {
+                            eprintln!("blockforge: could not rename the world: {e}");
+                        }
+                    }
+                    self.refresh_worlds();
+                }
+                ui::Request::Delete(folder) => {
+                    if let Some(d) = &self.save_dir {
+                        if let Err(e) = worlds::delete(d, &folder) {
+                            eprintln!("blockforge: could not delete the world: {e}");
+                        }
+                    }
+                    self.refresh_worlds();
+                }
+            }
+        }
+    }
+
+    fn open_world(&mut self, folder: &str) {
+        let Some(d) = self.save_dir.clone() else { return };
+        match worlds::touch(&d, folder) {
+            Ok(w) => self.open(game::WorldSpec {
+                dir: Some(worlds::dir(&d, folder)),
+                seed: w.seed,
+                settings_path: Some(d.join(worlds::SETTINGS_FILE)),
+            }),
+            Err(e) => {
+                eprintln!("blockforge: could not open the world: {e}");
+                self.refresh_worlds();
+            }
+        }
+    }
+
+    fn open(&mut self, spec: game::WorldSpec) {
+        self.save_settings();
+        let mut ui = std::mem::take(&mut self.ui);
+        ui.screen = ui::Screen::Loading;
+        ui.loading_chunks = 0;
+        let mut game = game::Game::new(spec, ui, self.registry.clone());
+        let (w, h, scale) = self.surface;
+        game.set_surface(w, h, scale);
+        if let Some(g) = self.gfx.as_mut() {
+            g.clear_world();
+            g.set_generator(game.generator());
+        }
+        self.opened = Instant::now();
+        self.game = Some(game);
+    }
+
+    /// Saves and closes the open world, back to the title screen.
+    fn close_world(&mut self) {
+        if let Some(game) = self.game.take() {
+            let mut ui = game.close();
+            ui.screen = ui::Screen::Title;
+            ui.loading_chunks = 0;
+            self.ui = ui;
+            if let Some(g) = self.gfx.as_mut() {
+                g.clear_world();
+            }
+            self.refresh_worlds();
         }
     }
 
@@ -68,8 +209,83 @@ impl App {
         #[cfg(target_os = "android")]
         if self.frames % 30 == 1 {
             if let Some(a) = &self.android_app {
-                self.game.ui.set_safe_area(android::safe_insets(a.vm_as_ptr(), a.activity_as_ptr()));
+                let safe = android::safe_insets(a.vm_as_ptr(), a.activity_as_ptr());
+                self.ui().set_safe_area(safe);
             }
+        }
+    }
+
+    /// A touch while no world is open: only the menus' buttons.
+    fn menu_touch(&mut self, phase: TouchPhase, x: f32, y: f32) {
+        if phase != TouchPhase::Started {
+            return;
+        }
+        if let Some(action) = self.ui.hit(x, y) {
+            let before = self.ui.screen;
+            self.ui.apply(action);
+            if before == ui::Screen::Settings && self.ui.screen != before {
+                self.save_settings();
+            }
+        }
+    }
+
+    fn render(&mut self, event_loop: &ActiveEventLoop, frame_start: Instant) {
+        let Some(g) = self.gfx.as_mut() else { return };
+        if let Some(ms) = g.take_gpu_ms() {
+            self.perf.add_gpu_sample(ms);
+        }
+        self.perf.drawn = g.drawn_chunks();
+        self.perf.hidden = g.hidden_chunks();
+        self.perf.pool = g.pool_usage();
+        self.perf.quads = g.drawn_quads();
+        (self.perf.lod_drawn, self.perf.lod_quads) = g.drawn_lod();
+        self.perf.present_mode = g.present_mode_name();
+        let seconds = self.started.elapsed().as_secs_f32();
+        let ui = match &mut self.game {
+            Some(game) => {
+                self.perf.chunks = game.client.store.len();
+                self.perf.meshes = game.client.meshes.len();
+                self.perf.lod_pending = game.client.lod.stats.pending;
+                self.perf.place = game.place();
+                &mut game.ui
+            }
+            None => &mut self.ui,
+        };
+        ui.seconds = seconds;
+        ui.build(&self.perf, &mut self.hud);
+        let playing = ui.screen == ui::Screen::Playing;
+        let result = match (&mut self.game, playing) {
+            (Some(game), true) => {
+                let settings = game.ui.settings;
+                let (fog_start, fog_end) = game.fog_range();
+                let opts = gfx::RenderOptions {
+                    fog: settings.fog,
+                    frustum_cull: settings.cull.frustum(),
+                    backface_cull: settings.cull.backface(),
+                    occlusion_cull: settings.cull.occlusion(),
+                    vsync: settings.vsync,
+                    fog_start,
+                    fog_end,
+                    time_of_day: game.clock.hours(),
+                    clouds: settings.clouds,
+                    god_rays: settings.god_rays,
+                };
+                g.set_character(game.player.triangles());
+                let render_cam = game.render_cam();
+                let view_blocks = game.view_blocks();
+                g.render(&mut game.client, &render_cam, view_blocks, &opts, &self.hud)
+            }
+            // The title screen, its pages and the loading screen: the panorama behind them.
+            _ => g.render_title(title::yaw(seconds), &self.hud),
+        };
+        match result {
+            Ok(display_wait) => self.perf.end_frame(frame_start.elapsed().saturating_sub(display_wait)),
+            Err(wgpu::SurfaceError::Lost) | Err(wgpu::SurfaceError::Outdated) => {
+                let (w, h) = g.size();
+                g.resize(w, h);
+            }
+            Err(wgpu::SurfaceError::OutOfMemory) => event_loop.exit(),
+            Err(_) => {}
         }
     }
 }
@@ -89,15 +305,20 @@ impl ApplicationHandler for App {
             }
         };
         let size = window.inner_size();
-        match pollster::block_on(gfx::Gfx::new(window.clone(), self.game.registry())) {
+        match pollster::block_on(gfx::Gfx::new(window.clone(), &self.registry)) {
             Ok(mut g) => {
-                g.set_generator(self.game.generator());
-                self.game.set_surface(size.width, size.height, window.scale_factor());
-                self.game.ui.vsync_supported = g.vsync_supported();
-                // A new Gfx has no chunk buffers. After a trip to the background the client
-                // still holds every mesh, so hand them all to the renderer again; without
-                // this the world stays invisible until chunks happen to change.
-                self.game.client.requeue_all_meshes();
+                self.surface = (size.width, size.height, window.scale_factor());
+                self.ui.set_surface(size.width, size.height, window.scale_factor());
+                self.ui.vsync_supported = g.vsync_supported();
+                if let Some(game) = self.game.as_mut() {
+                    g.set_generator(game.generator());
+                    game.set_surface(size.width, size.height, window.scale_factor());
+                    game.ui.vsync_supported = g.vsync_supported();
+                    // A new Gfx has no chunk buffers. After a trip to the background the
+                    // client still holds every mesh, so hand them all to the renderer again;
+                    // without this the world stays invisible until chunks happen to change.
+                    game.client.requeue_all_meshes();
+                }
                 self.gfx = Some(g);
                 self.window = Some(window);
             }
@@ -112,7 +333,10 @@ impl ApplicationHandler for App {
     // the surface must be dropped here and recreated in `resumed`.
     fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
         // Android may kill a backgrounded app without another callback: save now.
-        self.game.persist();
+        match &self.game {
+            Some(game) => game.persist(),
+            None => self.save_settings(),
+        }
         self.gfx = None;
         self.window = None;
     }
@@ -120,83 +344,64 @@ impl ApplicationHandler for App {
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => {
-                self.game.persist();
+                self.close_world();
+                self.save_settings();
                 event_loop.exit();
             }
             WindowEvent::Resized(size) => {
                 let scale = self.window.as_ref().map_or(1.0, |w| w.scale_factor());
-                self.game.set_surface(size.width, size.height, scale);
+                self.surface = (size.width, size.height, scale);
+                match self.game.as_mut() {
+                    Some(game) => game.set_surface(size.width, size.height, scale),
+                    None => self.ui.set_surface(size.width, size.height, scale),
+                }
                 if let Some(g) = self.gfx.as_mut() {
                     g.resize(size.width, size.height);
                 }
             }
             WindowEvent::Touch(t) => {
-                self.game.touch(t.id, t.phase, t.location.x as f32, t.location.y as f32);
+                let (x, y) = (t.location.x as f32, t.location.y as f32);
+                match self.game.as_mut() {
+                    Some(game) => game.touch(t.id, t.phase, x, y),
+                    None => self.menu_touch(t.phase, x, y),
+                }
+                self.handle_requests();
+            }
+            WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
+                // A hardware keyboard can type into the world screens' fields too.
+                match &event.logical_key {
+                    Key::Named(NamedKey::Backspace) => {
+                        self.ui().apply(ui::Action::Backspace);
+                    }
+                    Key::Named(NamedKey::Enter) => {
+                        self.ui().apply(ui::Action::KeysDone);
+                    }
+                    _ => {
+                        if let Some(text) = &event.text {
+                            let printable: String = text.chars().filter(|c| !c.is_control()).collect();
+                            self.ui().type_text(&printable);
+                        }
+                    }
+                }
             }
             WindowEvent::RedrawRequested => {
                 let frame_start = Instant::now();
                 self.frames += 1;
                 self.update_safe_area();
-                self.game.update();
-                let view_blocks = self.game.view_blocks();
-                self.perf.chunks = self.game.client.store.len();
-                self.perf.meshes = self.game.client.meshes.len();
-                if let Some(g) = self.gfx.as_mut() {
-                    if let Some(ms) = g.take_gpu_ms() {
-                        self.perf.add_gpu_sample(ms);
-                    }
-                    self.perf.drawn = g.drawn_chunks();
-                    self.perf.hidden = g.hidden_chunks();
-                    self.perf.pool = g.pool_usage();
-                    self.perf.quads = g.drawn_quads();
-                    (self.perf.lod_drawn, self.perf.lod_quads) = g.drawn_lod();
-                    self.perf.lod_pending = self.game.client.lod.stats.pending;
-                    self.perf.present_mode = g.present_mode_name();
-                    self.perf.place = self.game.place();
-                    self.game.ui.seconds = self.started.elapsed().as_secs_f32();
-                    self.game.ui.build(&self.perf, &mut self.hud);
-                    if self.game.ui.screen != ui::Screen::Playing {
-                        // The title screen and its pages: the panorama behind the buttons. The
-                        // world keeps loading meanwhile, so SINGLEPLAYER starts at once.
-                        match g.render_title(title::yaw(self.game.ui.seconds), &self.hud) {
-                            Ok(display_wait) => self.perf.end_frame(frame_start.elapsed().saturating_sub(display_wait)),
-                            Err(wgpu::SurfaceError::Lost) | Err(wgpu::SurfaceError::Outdated) => {
-                                let (w, h) = g.size();
-                                g.resize(w, h);
-                            }
-                            Err(wgpu::SurfaceError::OutOfMemory) => event_loop.exit(),
-                            Err(_) => {}
+                if let Some(game) = self.game.as_mut() {
+                    game.update();
+                    if game.ui.screen == ui::Screen::Loading {
+                        game.ui.loading_chunks = game.client.meshes.len();
+                        if game.ready(self.opened.elapsed()) {
+                            game.ui.screen = ui::Screen::Playing;
                         }
-                        return;
-                    }
-                    let settings = self.game.ui.settings;
-                    let (fog_start, fog_end) = self.game.fog_range();
-                    let opts = gfx::RenderOptions {
-                        fog: settings.fog,
-                        frustum_cull: settings.cull.frustum(),
-                        backface_cull: settings.cull.backface(),
-                        occlusion_cull: settings.cull.occlusion(),
-                        vsync: settings.vsync,
-                        fog_start,
-                        fog_end,
-                        time_of_day: self.game.clock.hours(),
-                        clouds: settings.clouds,
-                        god_rays: settings.god_rays,
-                    };
-                    g.set_character(self.game.player.triangles());
-                    let render_cam = self.game.render_cam();
-                    match g.render(&mut self.game.client, &render_cam, view_blocks, &opts, &self.hud) {
-                        Ok(display_wait) => {
-                            self.perf.end_frame(frame_start.elapsed().saturating_sub(display_wait));
-                        }
-                        Err(wgpu::SurfaceError::Lost) | Err(wgpu::SurfaceError::Outdated) => {
-                            let (w, h) = g.size();
-                            g.resize(w, h);
-                        }
-                        Err(wgpu::SurfaceError::OutOfMemory) => event_loop.exit(),
-                        Err(_) => {}
                     }
                 }
+                // MAIN MENU in the game's menu: save and close the world.
+                if self.game.as_ref().is_some_and(|g| !matches!(g.ui.screen, ui::Screen::Playing | ui::Screen::Loading)) {
+                    self.close_world();
+                }
+                self.render(event_loop, frame_start);
             }
             _ => {}
         }

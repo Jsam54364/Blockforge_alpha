@@ -983,10 +983,21 @@ impl Gfx {
         self.char_verts = n as u32;
     }
 
+    /// The open world's generator (biome colours come from it).
     pub fn set_generator(&mut self, gen: Arc<WorldGen>) {
-        if self.tint.is_none() {
-            self.tint = Some(TintMap::new(gen));
+        self.tint = Some(TintMap::new(gen));
+    }
+
+    /// Forgets the open world's meshes (it was closed, or another is opening).
+    pub fn clear_world(&mut self) {
+        for (_, c) in std::mem::take(&mut self.chunks) {
+            self.release(c.solid);
+            self.release(c.water);
         }
+        for (_, l) in std::mem::take(&mut self.lods) {
+            self.release(l.layer);
+        }
+        self.set_character(&[]);
     }
 
     pub fn size(&self) -> (u32, u32) {

@@ -7,7 +7,7 @@ A mobile-first voxel engine in Rust, in two crates:
   architecture lives here and is tested without a GPU.
 * the **app** (`app/`): the Android front-end. winit + wgpu renderer, touch controls and HUD.
 
-> **Status:** 114 unit + 9 end-to-end tests in the core and 89 in the app (plus WGSL
+> **Status:** 114 unit + 9 end-to-end tests in the core and 97 in the app (plus WGSL
 > validation) pass. The APK builds on GitHub Actions and has been run and measured on a phone
 > (see the numbers further down).
 
@@ -108,10 +108,30 @@ rendered with the god rays off so they match, and stitched into one cylindrical 
 (`tools/stitch_panorama.py`: 4096 x 683, 30 degrees above and below the horizon, 425 KB as JPEG).
 The title shader turns each screen pixel into a compass direction and elevation and samples it.
 
-SINGLEPLAYER enters the world (it keeps loading behind the title screen, so this is immediate).
-SETTINGS opens the game's settings panel with DONE beside it. MULTIPLAYER, MODS and COSMETICS
-open pages that say what is and is not there yet (no network play, mods or skins so far). The
-in-game menu's MAIN MENU button saves and goes back to the title screen.
+SETTINGS opens the game's settings panel with DONE beside it (no TIME there: the time of day
+belongs to each world). MULTIPLAYER, MODS and COSMETICS open pages that say what is and is not
+there yet (no network play, mods or skins so far). The in-game menu's MAIN MENU button saves the
+world, closes it and goes back to the title screen.
+
+### Worlds (`app/src/worlds.rs`)
+
+SINGLEPLAYER opens the world list, as in Minecraft: every saved world with its name, when it was
+last played and its seed, the most recent first (UP/DOWN scroll a long list). Tap a world to pick
+it and again to play it, or use PLAY SELECTED WORLD. CREATE NEW WORLD asks for a name and an
+optional seed (a number is used as it is, a word is hashed so it always gives the same world,
+blank is random). EDIT renames the picked world, RE-CREATE opens the create page filled in with
+its name and seed (a fresh copy of the same terrain), DELETE asks first and then removes its
+folder for good. Names and seeds are typed on an on-screen keyboard (capitals, digits, space and
+`-`; Android's own keyboard does not reach a NativeActivity reliably); a hardware keyboard works
+too. Opening a world shows LOADING TERRAIN over the panorama until the player has ground under
+him (or 25 seconds have passed).
+
+Each world lives in its own folder, `worlds/<FOLDER>/`: `level.txt` (name, seed, created, last
+played), `state.txt` (player, camera, time of day) and the server's edit journal. The folder
+name comes from the world's name (`NEW_WORLD`, `NEW_WORLD-2`, ...), so two worlds may share a
+name. Settings are the app's (`settings.txt` beside `worlds/`), not a world's. The single world
+of earlier versions moves into the list as MY WORLD (seed 1337) the first time the app starts,
+edits and all.
 
 ### HUD and settings
 

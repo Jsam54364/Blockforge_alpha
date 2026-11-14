@@ -242,6 +242,26 @@ pub enum Action {
     Nothing,
     /// Goes to a screen: the title screen and the pages it opens, or the game itself.
     Open(Screen),
+    /// World list: picks a world (tapping the picked one again plays it).
+    SelectWorld(usize),
+    /// World list: scrolls by this many rows.
+    ScrollWorlds(i8),
+    PlayWorld,
+    /// Opens the create page empty (`NewWorld`) or filled in from the picked world.
+    NewWorld,
+    RecreateWorld,
+    EditWorld,
+    AskDelete,
+    ConfirmDelete,
+    /// Create page: make the world and play it.
+    CreateWorld,
+    /// Edit page: keep the new name.
+    SaveWorld,
+    /// Text fields and the on-screen keyboard.
+    Focus(u8),
+    Key(char),
+    Backspace,
+    KeysDone,
     ToggleMenu,
     RenderDist(i8),
     LodDist(i8),
@@ -276,7 +296,34 @@ pub enum Screen {
     Multiplayer,
     Mods,
     Cosmetics,
+    /// SINGLEPLAYER: the saved worlds.
+    WorldList,
+    CreateWorld,
+    EditWorld,
+    DeleteWorld,
+    /// A world is opening (its terrain loading).
+    Loading,
     Playing,
+}
+
+/// One saved world as the world list shows it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorldEntry {
+    pub folder: String,
+    pub name: String,
+    /// The second line: when it was last played, and its seed.
+    pub detail: String,
+    /// The seed as typed back into the create page by RE-CREATE.
+    pub seed: String,
+}
+
+/// What the app has to do for the world screens (they only draw and collect input).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Request {
+    Play(String),
+    Create { name: String, seed: String },
+    Rename { folder: String, name: String },
+    Delete(String),
 }
 
 struct Button {
@@ -308,6 +355,16 @@ pub struct Ui {
     /// in pixels, as the system reports it; `None` = unknown (fixed margins, `SAFE_*_DP`).
     safe: Option<[f32; 4]>,
     buttons: Vec<Button>,
+    /// The saved worlds (most recently played first), the picked one, and the list's scroll.
+    pub worlds: Vec<WorldEntry>,
+    pub selected: Option<usize>,
+    scroll: usize,
+    /// The world screens' text fields (name, seed) and which one the keyboard types into.
+    pub fields: [String; 2],
+    pub focus: Option<usize>,
+    /// While a world loads: chunks with geometry so far.
+    pub loading_chunks: usize,
+    requests: Vec<Request>,
 }
 
 const WHITE: [u8; 4] = [255, 255, 255, 255];
@@ -429,7 +486,49 @@ impl Ui {
             dp: 1.0,
             safe: None,
             buttons: Vec::new(),
+            worlds: Vec::new(),
+            selected: None,
+            scroll: 0,
+            fields: [String::new(), String::new()],
+            focus: None,
+            loading_chunks: 0,
+            requests: Vec::new(),
         }
+    }
+
+    /// The next thing the app has to do for the world screens.
+    pub fn take_request(&mut self) -> Option<Request> {
+        (!self.requests.is_empty()).then(|| self.requests.remove(0))
+    }
+
+    /// Replaces the world list (after a world was made, renamed or deleted); keeps the
+    /// pick on the same world if it is still there.
+    pub fn set_worlds(&mut self, worlds: Vec<WorldEntry>) {
+        let picked = self.selected.and_then(|i| self.worlds.get(i)).map(|w| w.folder.clone());
+        self.worlds = worlds;
+        self.selected = picked.and_then(|f| self.worlds.iter().position(|w| w.folder == f));
+        self.scroll = self.scroll.min(self.worlds.len().saturating_sub(1));
+    }
+
+    /// Typing from a hardware keyboard: letters (as capitals), digits, space and `-`.
+    pub fn type_text(&mut self, s: &str) {
+        for c in s.chars() {
+            match c {
+                '\u{8}' | '\u{7f}' => {
+                    self.apply(Action::Backspace);
+                }
+                '\r' | '\n' => {
+                    self.apply(Action::KeysDone);
+                }
+                c => {
+                    self.apply(Action::Key(c));
+                }
+            }
+        }
+    }
+
+    fn picked(&self) -> Option<&WorldEntry> {
+        self.selected.and_then(|i| self.worlds.get(i))
     }
 
     /// The safe area from the system (see `safe`), or `None` to keep the fixed margins.
@@ -465,6 +564,96 @@ impl Ui {
                 self.screen = s;
                 self.menu_open = false;
                 self.acts_open = false;
+                self.focus = None;
+                false
+            }
+            Action::SelectWorld(i) => {
+                if i < self.worlds.len() {
+                    if self.selected == Some(i) {
+                        self.apply(Action::PlayWorld);
+                    } else {
+                        self.selected = Some(i);
+                    }
+                }
+                false
+            }
+            Action::ScrollWorlds(d) => {
+                let max = self.worlds.len().saturating_sub(1);
+                self.scroll = (self.scroll as i64 + d as i64).clamp(0, max as i64) as usize;
+                false
+            }
+            Action::PlayWorld => {
+                if let Some(w) = self.picked() {
+                    self.requests.push(Request::Play(w.folder.clone()));
+                }
+                false
+            }
+            Action::NewWorld | Action::RecreateWorld => {
+                self.fields = match (a, self.picked()) {
+                    (Action::RecreateWorld, Some(w)) => [w.name.clone(), w.seed.clone()],
+                    _ => ["NEW WORLD".to_string(), String::new()],
+                };
+                self.focus = None;
+                self.screen = Screen::CreateWorld;
+                false
+            }
+            Action::EditWorld => {
+                if let Some(w) = self.picked() {
+                    self.fields[0] = w.name.clone();
+                    self.focus = None;
+                    self.screen = Screen::EditWorld;
+                }
+                false
+            }
+            Action::AskDelete => {
+                if self.picked().is_some() {
+                    self.screen = Screen::DeleteWorld;
+                }
+                false
+            }
+            Action::ConfirmDelete => {
+                if let Some(w) = self.picked() {
+                    self.requests.push(Request::Delete(w.folder.clone()));
+                }
+                self.selected = None;
+                self.screen = Screen::WorldList;
+                false
+            }
+            Action::CreateWorld => {
+                self.requests.push(Request::Create { name: self.fields[0].trim().to_string(), seed: self.fields[1].trim().to_string() });
+                self.focus = None;
+                false
+            }
+            Action::SaveWorld => {
+                if let Some(w) = self.picked() {
+                    self.requests.push(Request::Rename { folder: w.folder.clone(), name: self.fields[0].trim().to_string() });
+                }
+                self.focus = None;
+                self.screen = Screen::WorldList;
+                false
+            }
+            Action::Focus(i) => {
+                self.focus = Some(i as usize % 2);
+                false
+            }
+            Action::Key(c) => {
+                if let Some(f) = self.focus {
+                    let c = c.to_ascii_uppercase();
+                    let max = if f == 0 { crate::worlds::MAX_NAME } else { crate::worlds::MAX_SEED };
+                    if (c.is_ascii_alphanumeric() || c == ' ' || c == '-') && self.fields[f].chars().count() < max {
+                        self.fields[f].push(c);
+                    }
+                }
+                false
+            }
+            Action::Backspace => {
+                if let Some(f) = self.focus {
+                    self.fields[f].pop();
+                }
+                false
+            }
+            Action::KeysDone => {
+                self.focus = None;
                 false
             }
             Action::ToggleMenu => {
@@ -696,11 +885,15 @@ impl Ui {
                 text(out, value_x, ty, px, &lod_label(s.lod_level), WHITE);
                 self.button(out, minus_x, by, bw, bh, "-", px, Action::LodDist(-1));
                 self.button(out, plus_x, by, bw, bh, "+", px, Action::LodDist(1));
-            } else {
+            } else if self.screen == Screen::Playing {
                 text(out, label_x, ty, px, "TIME", WHITE);
                 text(out, value_x, ty, px, &crate::sky::time_label(self.hours), WHITE);
                 self.button(out, minus_x, by, bw, bh, "-", px, Action::Time(-1));
                 self.button(out, plus_x, by, bw, bh, "+", px, Action::Time(1));
+            } else {
+                // Off the game: the time of day belongs to each world.
+                text(out, label_x, ty, px, "TIME", WHITE);
+                text(out, value_x, ty, px, "IN EACH WORLD", [190, 190, 190, 255]);
             }
         }
 
@@ -806,6 +999,11 @@ impl Ui {
         match self.screen {
             Screen::Title => self.draw_title(out),
             Screen::Settings => self.draw_settings_page(out),
+            Screen::WorldList => self.draw_world_list(out),
+            Screen::CreateWorld => self.draw_world_form(out, true),
+            Screen::EditWorld => self.draw_world_form(out, false),
+            Screen::DeleteWorld => self.draw_delete(out),
+            Screen::Loading => self.draw_loading(out),
             Screen::Playing => {}
             s => {
                 let (heading, lines) = page_text(s);
@@ -844,7 +1042,7 @@ impl Ui {
         let bw = (300.0 * dp).min((x1 - x0) * 0.8);
         let bx = cx - bw * 0.5;
         let px = (2.5 * dp).round().max(2.0);
-        let rows: [(&str, Screen); 3] = [("SINGLEPLAYER", Screen::Playing), ("MULTIPLAYER", Screen::Multiplayer), ("MODS", Screen::Mods)];
+        let rows: [(&str, Screen); 3] = [("SINGLEPLAYER", Screen::WorldList), ("MULTIPLAYER", Screen::Multiplayer), ("MODS", Screen::Mods)];
         for (i, (label, screen)) in rows.iter().enumerate() {
             self.stone_button(out, bx, by + i as f32 * (bh + gap), bw, bh, label, px, Action::Open(*screen));
         }
@@ -906,6 +1104,282 @@ impl Ui {
         self.stone_button(out, cx - bw * 0.5, done_y, bw, bh, "DONE", (2.5 * dp).round(), Action::Open(Screen::Title));
     }
 
+    /// A centred heading with a shadow; returns where the space under it starts.
+    fn heading(&self, out: &mut Vec<HudVertex>, s: &str) -> f32 {
+        let dp = self.dp;
+        let [sl, st, sr, _] = self.margins();
+        let cx = (sl + self.size.0 - sr) * 0.5;
+        let px = fit_px(3.5 * dp, s, (self.size.0 - sl - sr) * 0.9);
+        let y = st + 10.0 * dp;
+        shadow_text_centered(out, cx, y + 3.5 * px, px, s, TEXT_LIGHT, TEXT_SHADOW);
+        y + 7.0 * px + 10.0 * dp
+    }
+
+    /// A stone button that does nothing and looks it (no world picked yet).
+    #[allow(clippy::too_many_arguments)]
+    fn stone_button_if(&mut self, out: &mut Vec<HudVertex>, on: bool, x: f32, y: f32, w: f32, h: f32, label: &str, px: f32, action: Action) {
+        if on {
+            self.stone_button(out, x, y, w, h, label, px, action);
+            return;
+        }
+        let b = self.dp.round().max(2.0);
+        rect(out, x, y, w, h, OUTLINE);
+        rect(out, x + b, y + b, w - 2.0 * b, h - 2.0 * b, [44, 44, 44, 235]);
+        let px = fit_px(px, label, w * 0.9);
+        text_centered(out, x + w * 0.5, y + h * 0.5 - b * 0.5, px, label, [140, 140, 140, 255]);
+        self.buttons.push(Button { x, y, w, h, action: Action::Nothing });
+    }
+
+    /// A row of stone buttons sharing `width` (all on, or as `on` says).
+    #[allow(clippy::too_many_arguments)]
+    fn button_row(&mut self, out: &mut Vec<HudVertex>, cx: f32, y: f32, width: f32, h: f32, items: &[(&str, Action, bool)]) {
+        let gap = 6.0 * self.dp;
+        let n = items.len() as f32;
+        let w = (width - gap * (n - 1.0)) / n;
+        let px = (2.5 * self.dp).round().max(2.0);
+        let x0 = cx - width * 0.5;
+        for (i, (label, action, on)) in items.iter().enumerate() {
+            self.stone_button_if(out, *on, x0 + i as f32 * (w + gap), y, w, h, label, px, *action);
+        }
+    }
+
+    /// SINGLEPLAYER: the saved worlds, newest played first, and what to do with them.
+    fn draw_world_list(&mut self, out: &mut Vec<HudVertex>) {
+        let (w, h) = self.size;
+        let dp = self.dp;
+        let [sl, _, sr, sb] = self.margins();
+        let cx = (sl + w - sr) * 0.5;
+        let top = self.heading(out, "SELECT WORLD");
+
+        let bh = 44.0 * dp;
+        let gap = 6.0 * dp;
+        let row2 = h - sb - 8.0 * dp - bh;
+        let row1 = row2 - gap - bh;
+        let lw = (600.0 * dp).min((w - sl - sr) * 0.86);
+        let (lx, ly, lh) = (cx - lw * 0.5, top, (row1 - 10.0 * dp - top).max(0.0));
+        rect(out, lx, ly, lw, lh, [0, 0, 0, 150]);
+        self.buttons.push(Button { x: lx, y: ly, w: lw, h: lh, action: Action::Nothing });
+
+        let row_h = 54.0 * dp;
+        let fits = ((lh - 8.0 * dp) / row_h).floor().max(1.0) as usize;
+        let n = self.worlds.len();
+        self.scroll = self.scroll.min(n.saturating_sub(fits));
+        if n == 0 {
+            let px = fit_px(2.5 * dp, "NO WORLDS YET. CREATE ONE!", lw * 0.9);
+            text_centered(out, cx, ly + lh * 0.5, px, "NO WORLDS YET. CREATE ONE!", [200, 200, 200, 255]);
+        }
+        let npx = (2.5 * dp).round().max(2.0);
+        let dpx = (1.6 * dp).round().max(2.0);
+        let scrollbar = n > fits;
+        let row_w = lw - 8.0 * dp - if scrollbar { 52.0 * dp } else { 0.0 };
+        for (k, i) in (self.scroll..n.min(self.scroll + fits)).enumerate() {
+            let (rx, ry) = (lx + 4.0 * dp, ly + 4.0 * dp + k as f32 * row_h);
+            let picked = self.selected == Some(i);
+            if picked {
+                let b = self.dp.round().max(2.0);
+                rect(out, rx, ry, row_w, row_h - 4.0 * dp, [160, 160, 160, 255]);
+                rect(out, rx + b, ry + b, row_w - 2.0 * b, row_h - 4.0 * dp - 2.0 * b, [12, 12, 12, 255]);
+            }
+            let e = &self.worlds[i];
+            let name = e.name.clone();
+            let detail = e.detail.clone();
+            text(out, rx + 10.0 * dp, ry + 8.0 * dp, npx, &name, WHITE);
+            text(out, rx + 10.0 * dp, ry + 8.0 * dp + 7.0 * npx + 6.0 * dp, dpx, &detail, [150, 150, 150, 255]);
+            self.buttons.push(Button { x: rx, y: ry, w: row_w, h: row_h - 4.0 * dp, action: Action::SelectWorld(i) });
+        }
+        if scrollbar {
+            let (sx, sw) = (lx + lw - 52.0 * dp, 48.0 * dp);
+            let sh = ((lh - 12.0 * dp) * 0.5).min(48.0 * dp);
+            let up_on = self.scroll > 0;
+            let down_on = self.scroll + fits < n;
+            self.stone_button_if(out, up_on, sx, ly + 4.0 * dp, sw, sh, "UP", (2.0 * dp).round(), Action::ScrollWorlds(-1));
+            self.stone_button_if(out, down_on, sx, ly + lh - 4.0 * dp - sh, sw, sh, "DOWN", (2.0 * dp).round(), Action::ScrollWorlds(1));
+        }
+
+        let some = self.picked().is_some();
+        let bw = (620.0 * dp).min((w - sl - sr) * 0.95);
+        self.button_row(out, cx, row1, bw, bh, &[("PLAY SELECTED WORLD", Action::PlayWorld, some), ("CREATE NEW WORLD", Action::NewWorld, true)]);
+        self.button_row(
+            out,
+            cx,
+            row2,
+            bw,
+            bh,
+            &[
+                ("EDIT", Action::EditWorld, some),
+                ("DELETE", Action::AskDelete, some),
+                ("RE-CREATE", Action::RecreateWorld, some),
+                ("CANCEL", Action::Open(Screen::Title), true),
+            ],
+        );
+    }
+
+    /// A text field: dark box, light outline (white while typing into it), its text with a
+    /// cursor while focused, or a grey hint while empty.
+    #[allow(clippy::too_many_arguments)]
+    fn text_field(&mut self, out: &mut Vec<HudVertex>, x: f32, y: f32, w: f32, h: f32, field: usize, hint: &str) {
+        let b = self.dp.round().max(2.0);
+        let focused = self.focus == Some(field);
+        rect(out, x, y, w, h, if focused { [255, 255, 255, 255] } else { [160, 160, 160, 255] });
+        rect(out, x + b, y + b, w - 2.0 * b, h - 2.0 * b, [0, 0, 0, 255]);
+        let px = (2.5 * self.dp).round().max(2.0);
+        let ty = y + (h - 7.0 * px) * 0.5;
+        let value = self.fields[field].clone();
+        if value.is_empty() && !focused {
+            let hp = fit_px(px, hint, w - 16.0 * self.dp);
+            text(out, x + 8.0 * self.dp, y + (h - 7.0 * hp) * 0.5, hp, hint, [110, 110, 110, 255]);
+        } else {
+            let blink = focused && (self.seconds * 2.0).fract() < 0.5;
+            let shown = if blink { format!("{value}_") } else { value };
+            let fp = fit_px(px, &format!("{}_", self.fields[field]), w - 16.0 * self.dp);
+            text(out, x + 8.0 * self.dp, y + (h - 7.0 * fp) * 0.5, fp, &shown, TEXT_LIGHT);
+            let _ = ty;
+        }
+        self.buttons.push(Button { x, y, w, h, action: Action::Focus(field as u8) });
+    }
+
+    /// The create page (`create`) or the edit page: name (and seed) fields, and the keyboard
+    /// while one of them is being typed into.
+    fn draw_world_form(&mut self, out: &mut Vec<HudVertex>, create: bool) {
+        let (w, h) = self.size;
+        let dp = self.dp;
+        let [sl, _, sr, sb] = self.margins();
+        let cx = (sl + w - sr) * 0.5;
+        let typing = self.focus.is_some();
+        let top = self.heading(out, if create { "CREATE NEW WORLD" } else { "EDIT WORLD" });
+        let fw = (420.0 * dp).min((w - sl - sr) * 0.9);
+        let fx = cx - fw * 0.5;
+        let lpx = (1.75 * dp).round().max(2.0);
+        let fh = 38.0 * dp;
+        let label_gap = 7.0 * lpx + 5.0 * dp;
+        // With the keyboard up, the fields sit side by side above it if they don't fit stacked.
+        let kb_top = h - sb - self.keyboard_height();
+        let stacked = 2.0 * (label_gap + fh) + 8.0 * dp;
+        let side_by_side = create && typing && top + stacked > kb_top - 4.0 * dp;
+        let bh = 44.0 * dp;
+        let by = h - sb - 10.0 * dp - bh;
+        // Without the keyboard, the fields sit in the middle of the space above the buttons.
+        let room = by - 10.0 * dp - top;
+        let used = if create { stacked } else { stacked * 0.5 + 12.0 * dp };
+        let mut y = if typing { top } else { top + ((room - used) * 0.5).max(0.0) };
+        let fields: &[(&str, &str)] = if create {
+            &[("WORLD NAME", "NEW WORLD"), ("SEED FOR THE WORLD GENERATOR", "LEAVE BLANK FOR A RANDOM SEED")]
+        } else {
+            &[("WORLD NAME", "NEW WORLD")]
+        };
+        let n = fields.len() as f32;
+        let total = (fw * 2.0).min((w - sl - sr) * 0.95);
+        let each = if side_by_side { (total - 12.0 * dp * (n - 1.0)) / n } else { fw };
+        let x_start = if side_by_side { cx - total * 0.5 } else { fx };
+        for (i, (label, hint)) in fields.iter().enumerate() {
+            let (x, yy) = if side_by_side { (x_start + i as f32 * (each + 12.0 * dp), y) } else { (fx, y) };
+            text(out, x, yy, lpx, label, [190, 190, 190, 255]);
+            self.text_field(out, x, yy + label_gap, each, fh, i, hint);
+            if !side_by_side {
+                y += label_gap + fh + 8.0 * dp;
+            }
+        }
+        if !create {
+            if let Some(e) = self.picked() {
+                let seed = format!("SEED {}", e.seed);
+                text(out, fx, y + 2.0 * dp, lpx, &seed, [150, 150, 150, 255]);
+            }
+        }
+        if typing {
+            self.draw_keyboard(out);
+            return;
+        }
+        let bw = (520.0 * dp).min((w - sl - sr) * 0.95);
+        let named = !self.fields[0].trim().is_empty();
+        if create {
+            self.button_row(out, cx, by, bw, bh, &[("CREATE NEW WORLD", Action::CreateWorld, named), ("CANCEL", Action::Open(Screen::WorldList), true)]);
+        } else {
+            self.button_row(out, cx, by, bw, bh, &[("SAVE", Action::SaveWorld, named), ("CANCEL", Action::Open(Screen::WorldList), true)]);
+        }
+    }
+
+    fn keyboard_height(&self) -> f32 {
+        let dp = self.dp;
+        5.0 * self.key_h() + 4.0 * 5.0 * dp + 12.0 * dp
+    }
+
+    fn key_h(&self) -> f32 {
+        // Shorter keys on short screens, so the fields above still show.
+        (36.0 * self.dp).min(self.size.1 * 0.085).max(28.0 * self.dp)
+    }
+
+    /// The on-screen keyboard: digits, letters, a dash, space, delete and done. (The system's
+    /// keyboard doesn't reach a NativeActivity reliably, and the font has capitals only.)
+    fn draw_keyboard(&mut self, out: &mut Vec<HudVertex>) {
+        let (w, h) = self.size;
+        let dp = self.dp;
+        let [sl, _, sr, sb] = self.margins();
+        let cx = (sl + w - sr) * 0.5;
+        let kh = self.key_h();
+        let gap = 5.0 * dp;
+        let total_h = self.keyboard_height();
+        let y0 = h - sb - total_h;
+        let kw = ((w - sl - sr - 24.0 * dp - 9.0 * gap) / 10.0).min(64.0 * dp);
+        let width = 10.0 * kw + 9.0 * gap;
+        rect(out, cx - width * 0.5 - 6.0 * dp, y0, width + 12.0 * dp, total_h, [0, 0, 0, 170]);
+        self.buttons.push(Button { x: cx - width * 0.5 - 6.0 * dp, y: y0, w: width + 12.0 * dp, h: total_h, action: Action::Nothing });
+        let px = (2.25 * dp).round().max(2.0);
+        let rows = ["1234567890", "QWERTYUIOP", "ASDFGHJKL", "ZXCVBNM-"];
+        for (r, keys) in rows.iter().enumerate() {
+            let n = keys.chars().count() as f32;
+            let rw = n * kw + (n - 1.0) * gap;
+            let ry = y0 + 6.0 * dp + r as f32 * (kh + gap);
+            for (i, c) in keys.chars().enumerate() {
+                let x = cx - rw * 0.5 + i as f32 * (kw + gap);
+                self.stone_button(out, x, ry, kw, kh, &c.to_string(), px, Action::Key(c));
+            }
+        }
+        let ry = y0 + 6.0 * dp + 4.0 * (kh + gap);
+        let x0 = cx - width * 0.5;
+        let unit = kw + gap;
+        self.stone_button(out, x0, ry, 2.0 * unit - gap, kh, "DEL", px, Action::Backspace);
+        self.stone_button(out, x0 + 2.0 * unit, ry, 6.0 * unit - gap, kh, "SPACE", px, Action::Key(' '));
+        self.stone_button(out, x0 + 8.0 * unit, ry, 2.0 * unit - gap, kh, "DONE", px, Action::KeysDone);
+    }
+
+    fn draw_delete(&mut self, out: &mut Vec<HudVertex>) {
+        let (w, h) = self.size;
+        let dp = self.dp;
+        let [sl, _, sr, sb] = self.margins();
+        let cx = (sl + w - sr) * 0.5;
+        rect(out, 0.0, 0.0, w, h, [60, 0, 0, 130]);
+        let top = self.heading(out, "DELETE WORLD?");
+        let name = self.picked().map(|e| e.name.clone()).unwrap_or_default();
+        let lines = ["ARE YOU SURE YOU WANT TO DELETE THIS WORLD?".to_string(), format!("'{name}' WILL BE LOST FOREVER!"), "(A LONG TIME!)".to_string()];
+        let px = fit_px(2.5 * dp, &lines[0], (w - sl - sr) * 0.9);
+        for (i, l) in lines.iter().enumerate() {
+            text_centered(out, cx, top + 20.0 * dp + i as f32 * 11.0 * px, px, l, if i == 1 { TEXT_LIGHT } else { [210, 210, 210, 255] });
+        }
+        let bh = 44.0 * dp;
+        let bw = (420.0 * dp).min((w - sl - sr) * 0.95);
+        self.button_row(out, cx, h - sb - 10.0 * dp - bh, bw, bh, &[("DELETE", Action::ConfirmDelete, true), ("CANCEL", Action::Open(Screen::WorldList), true)]);
+    }
+
+    fn draw_loading(&mut self, out: &mut Vec<HudVertex>) {
+        let (w, h) = self.size;
+        let dp = self.dp;
+        let [sl, _, sr, _] = self.margins();
+        let cx = (sl + w - sr) * 0.5;
+        let px = (3.0 * dp).round().max(2.0);
+        shadow_text_centered(out, cx, h * 0.42, px, "LOADING TERRAIN", TEXT_LIGHT, TEXT_SHADOW);
+        // A bar that fills as the first chunks get their geometry (the world opens once the
+        // player has ground under him, usually before it is full).
+        let bw = (300.0 * dp).min((w - sl - sr) * 0.8);
+        let bh = 6.0 * dp;
+        let by = h * 0.42 + 7.0 * px + 4.0 * dp;
+        let f = (self.loading_chunks as f32 / 120.0).min(1.0);
+        rect(out, cx - bw * 0.5, by, bw, bh, [40, 40, 40, 220]);
+        rect(out, cx - bw * 0.5, by, bw * f, bh, [128, 255, 128, 255]);
+        let n = format!("{} CHUNKS", self.loading_chunks);
+        let spx = (1.75 * dp).round().max(2.0);
+        text_centered(out, cx, by + bh + 8.0 * dp + 3.5 * spx, spx, &n, [190, 190, 190, 255]);
+    }
+
     /// The settings page: the game's settings panel, with a heading and DONE beside it.
     fn draw_settings_page(&mut self, out: &mut Vec<HudVertex>) {
         let (w, h) = self.size;
@@ -962,7 +1436,7 @@ mod tests {
                     assert!(v.pos[0] >= -0.5 && v.pos[0] <= w as f32 + 0.5 && v.pos[1] >= -0.5 && v.pos[1] <= h as f32 + 0.5, "{:?} off a {w}x{h} screen", v.pos);
                 }
             }
-            let targets = [Screen::Playing, Screen::Multiplayer, Screen::Mods, Screen::Settings, Screen::Cosmetics];
+            let targets = [Screen::WorldList, Screen::Multiplayer, Screen::Mods, Screen::Settings, Screen::Cosmetics];
             for s in targets {
                 let b = find(&u, Action::Open(s));
                 assert!(b.h >= 36.0 * 2.75 - 0.5 && b.w >= 100.0 * 2.75, "{s:?}: {}x{}", b.w, b.h);
@@ -982,9 +1456,6 @@ mod tests {
                 let a = p.hit(x, y).unwrap();
                 p.apply(a);
                 assert_eq!(p.screen, s);
-                if s == Screen::Playing {
-                    continue;
-                }
                 build(&mut p);
                 let done = find(&p, Action::Open(Screen::Title));
                 assert!(done.y + done.h <= h as f32 && done.x >= 0.0 && done.x + done.w <= w as f32);
@@ -994,12 +1465,169 @@ mod tests {
         }
     }
 
+    fn worlds(n: usize) -> Vec<WorldEntry> {
+        (0..n)
+            .map(|i| WorldEntry { folder: format!("W{i}"), name: format!("WORLD {i}"), detail: format!("14 NOV 2026   SEED {i}"), seed: i.to_string() })
+            .collect()
+    }
+
+    /// Taps the middle of the first button doing `a`.
+    fn tap(u: &mut Ui, a: Action) {
+        let b = find(u, a);
+        let (x, y) = (b.x + b.w * 0.5, b.y + b.h * 0.5);
+        let hit = u.hit(x, y).unwrap();
+        assert_eq!(hit, a, "something else is on top of {a:?}");
+        u.apply(hit);
+        build(u);
+    }
+
+    /// Every real button on screen and none on top of another (the panels behind them
+    /// do nothing and are meant to be under them).
+    fn check_layout(u: &Ui, w: f32, h: f32) {
+        let real: Vec<&Button> = u.buttons.iter().filter(|b| b.action != Action::Nothing).collect();
+        for b in &real {
+            assert!(b.x >= -0.5 && b.y >= -0.5 && b.x + b.w <= w + 0.5 && b.y + b.h <= h + 0.5, "{:?} off screen on {:?}", b.action, u.screen);
+        }
+        for (i, a) in real.iter().enumerate() {
+            for b in &real[i + 1..] {
+                let apart = a.x + a.w <= b.x + 0.5 || b.x + b.w <= a.x + 0.5 || a.y + a.h <= b.y + 0.5 || b.y + b.h <= a.y + 0.5;
+                assert!(apart, "{:?} overlaps {:?} on {:?}", a.action, b.action, u.screen);
+            }
+        }
+    }
+
+    #[test]
+    fn picking_playing_editing_and_deleting_worlds() {
+        let mut u = title();
+        u.set_worlds(worlds(7));
+        build(&mut u);
+        tap(&mut u, Action::Open(Screen::WorldList));
+        check_layout(&u, 2400.0, 1080.0);
+        // Nothing picked: PLAY, EDIT, DELETE and RE-CREATE do nothing.
+        assert!(u.buttons.iter().all(|b| !matches!(b.action, Action::PlayWorld | Action::EditWorld | Action::AskDelete | Action::RecreateWorld)));
+        // Seven worlds don't all fit: the list scrolls.
+        assert!(u.buttons.iter().all(|b| b.action != Action::SelectWorld(6)));
+        let rows = u.buttons.iter().filter(|b| matches!(b.action, Action::SelectWorld(_))).count();
+        assert!(rows >= 3, "{rows} rows show");
+        for _ in 0..7 - rows {
+            tap(&mut u, Action::ScrollWorlds(1));
+        }
+        find(&u, Action::SelectWorld(6));
+        // At the end, DOWN does nothing more.
+        assert!(u.buttons.iter().all(|b| b.action != Action::ScrollWorlds(1)));
+        // Pick one, then tap it again to play it.
+        tap(&mut u, Action::SelectWorld(5));
+        assert_eq!(u.selected, Some(5));
+        assert_eq!(u.take_request(), None);
+        tap(&mut u, Action::SelectWorld(5));
+        assert_eq!(u.take_request(), Some(Request::Play("W5".into())));
+        tap(&mut u, Action::PlayWorld);
+        assert_eq!(u.take_request(), Some(Request::Play("W5".into())));
+        // Rename it with the on-screen keyboard.
+        tap(&mut u, Action::EditWorld);
+        assert_eq!((u.screen, u.fields[0].as_str()), (Screen::EditWorld, "WORLD 5"));
+        tap(&mut u, Action::Focus(0));
+        check_layout(&u, 2400.0, 1080.0);
+        for _ in 0..2 {
+            tap(&mut u, Action::Backspace);
+        }
+        for c in "ISLE 2".chars() {
+            tap(&mut u, Action::Key(c));
+        }
+        tap(&mut u, Action::KeysDone);
+        tap(&mut u, Action::SaveWorld);
+        assert_eq!(u.take_request(), Some(Request::Rename { folder: "W5".into(), name: "WORLDISLE 2".into() }));
+        assert_eq!(u.screen, Screen::WorldList);
+        // Delete it, after saying yes.
+        tap(&mut u, Action::AskDelete);
+        assert_eq!(u.screen, Screen::DeleteWorld);
+        check_layout(&u, 2400.0, 1080.0);
+        tap(&mut u, Action::Open(Screen::WorldList));
+        assert_eq!(u.take_request(), None, "cancel deletes nothing");
+        tap(&mut u, Action::AskDelete);
+        tap(&mut u, Action::ConfirmDelete);
+        assert_eq!(u.take_request(), Some(Request::Delete("W5".into())));
+        assert_eq!((u.screen, u.selected), (Screen::WorldList, None));
+        // The list comes back without it; nothing is picked.
+        let mut left = worlds(7);
+        left.remove(5);
+        u.set_worlds(left);
+        build(&mut u);
+        check_layout(&u, 2400.0, 1080.0);
+    }
+
+    #[test]
+    fn creating_a_world_with_a_name_and_a_seed() {
+        for (w, h) in [(2400, 1080), (1920, 1080), (2800, 1260), (1080, 2400), (2340, 1080)] {
+            let mut u = title();
+            u.set_surface(w, h, 2.75);
+            u.set_worlds(worlds(1));
+            build(&mut u);
+            tap(&mut u, Action::Open(Screen::WorldList));
+            tap(&mut u, Action::NewWorld);
+            assert_eq!((u.screen, u.fields[0].as_str(), u.fields[1].as_str()), (Screen::CreateWorld, "NEW WORLD", ""));
+            check_layout(&u, w as f32, h as f32);
+            // Typing into the name: the keyboard comes up, the field stays visible above it.
+            tap(&mut u, Action::Focus(0));
+            check_layout(&u, w as f32, h as f32);
+            let field = |u: &Ui, i: u8| u.buttons.iter().find(|b| b.action == Action::Focus(i)).map(|b| (b.y, b.h)).unwrap();
+            let q = find(&u, Action::Key('Q'));
+            let q = q.y;
+            assert!(field(&u, 0).0 + field(&u, 0).1 <= q, "{w}x{h}: the name field is under the keyboard");
+            assert!(field(&u, 1).0 + field(&u, 1).1 <= q, "{w}x{h}: the seed field is under the keyboard");
+            for _ in 0.."NEW WORLD".len() {
+                tap(&mut u, Action::Backspace);
+            }
+            tap(&mut u, Action::Backspace); // on an empty field: nothing
+            for c in "GLACIER".chars() {
+                tap(&mut u, Action::Key(c));
+            }
+            tap(&mut u, Action::Focus(1));
+            for c in "-42".chars() {
+                tap(&mut u, Action::Key(c));
+            }
+            tap(&mut u, Action::KeysDone);
+            assert!(u.buttons.iter().all(|b| !matches!(b.action, Action::Key(_))), "the keyboard went away");
+            tap(&mut u, Action::CreateWorld);
+            assert_eq!(u.take_request(), Some(Request::Create { name: "GLACIER".into(), seed: "-42".into() }));
+        }
+        // RE-CREATE starts from the picked world's name and seed; an empty name can't be made.
+        let mut u = title();
+        u.set_worlds(worlds(3));
+        u.apply(Action::Open(Screen::WorldList));
+        u.apply(Action::SelectWorld(2));
+        u.apply(Action::RecreateWorld);
+        assert_eq!((u.fields[0].as_str(), u.fields[1].as_str()), ("WORLD 2", "2"));
+        u.fields[0].clear();
+        build(&mut u);
+        assert!(u.buttons.iter().all(|b| b.action != Action::CreateWorld));
+        // Names and seeds have a length limit, and only letters, digits, space and '-'.
+        u.apply(Action::Focus(0));
+        for _ in 0..40 {
+            u.type_text("ab.");
+        }
+        assert_eq!(u.fields[0].len(), crate::worlds::MAX_NAME);
+        assert!(u.fields[0].chars().all(|c| c == 'A' || c == 'B'));
+    }
+
+    #[test]
+    fn the_loading_screen_shows_progress() {
+        let mut u = title();
+        u.screen = Screen::Loading;
+        u.loading_chunks = 60;
+        let out = build(&mut u);
+        assert!(!out.is_empty());
+        assert!(u.buttons.is_empty(), "nothing to press while a world loads");
+    }
+
     #[test]
     fn the_settings_page_is_the_games_settings_panel() {
         let mut u = title();
         u.apply(Action::Open(Screen::Settings));
         build(&mut u);
-        for a in [Action::ToggleFog, Action::RenderDist(1), Action::Time(1), Action::ToggleView] {
+        // (no TIME buttons: the time of day belongs to each world)
+        assert!(u.buttons.iter().all(|b| !matches!(b.action, Action::Time(_))));
+        for a in [Action::ToggleFog, Action::RenderDist(1), Action::ToggleView] {
             let b = find(&u, a);
             assert!(b.x >= 0.0 && b.x + b.w <= 2400.0 && b.y + b.h <= 1080.0, "{a:?}");
         }
@@ -1028,7 +1656,31 @@ mod tests {
                 assert!(t.chars().all(font::has_art), "{t}");
             }
         }
-        for t in ["BLOCKFORGE", "SINGLEPLAYER", "MULTIPLAYER", "MODS", "SETTINGS", "COSMETICS", "DONE", "MAIN MENU", "BLOCKFORGE ALPHA 0.1.0"] {
+        for t in [
+            "BLOCKFORGE",
+            "SINGLEPLAYER",
+            "MULTIPLAYER",
+            "MODS",
+            "SETTINGS",
+            "COSMETICS",
+            "DONE",
+            "MAIN MENU",
+            "BLOCKFORGE ALPHA 0.1.0",
+            "SELECT WORLD",
+            "PLAY SELECTED WORLD",
+            "CREATE NEW WORLD",
+            "EDIT WORLD",
+            "RE-CREATE",
+            "NO WORLDS YET. CREATE ONE!",
+            "SEED FOR THE WORLD GENERATOR",
+            "LEAVE BLANK FOR A RANDOM SEED",
+            "ARE YOU SURE YOU WANT TO DELETE THIS WORLD?",
+            "'X' WILL BE LOST FOREVER!",
+            "(A LONG TIME!)",
+            "LOADING TERRAIN",
+            "IN EACH WORLD",
+            "QWERTYUIOPASDFGHJKLZXCVBNM-1234567890 DEL SPACE",
+        ] {
             assert!(t.chars().all(font::has_art), "{t}");
         }
     }

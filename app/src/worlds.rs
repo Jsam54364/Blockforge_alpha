@@ -1,0 +1,301 @@
+//! Saved worlds, as Minecraft keeps them: each in its own folder under `worlds/`, with a
+//! name, a seed and when it was created and last played (`level.txt`), the player's place
+//! and the time of day (`state.txt`) and the edits (the server's journal). Settings are the
+//! app's, not a world's (`settings.txt` beside `worlds/`).
+//!
+//! Folder names come from world names (letters and digits, the rest `_`); two worlds may
+//! share a name, never a folder (`NEW_WORLD`, `NEW_WORLD-2`, ...).
+
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+pub const WORLDS_DIR: &str = "worlds";
+pub const LEVEL_FILE: &str = "level.txt";
+pub const SETTINGS_FILE: &str = "settings.txt";
+/// Where a world's player, camera and clock are kept (in its folder).
+pub const STATE_FILE: &str = "state.txt";
+/// The seed of the world everyone had before there were several.
+pub const FIRST_SEED: u64 = 1337;
+pub const MAX_NAME: usize = 24;
+pub const MAX_SEED: usize = 20;
+
+/// One saved world, as the world list shows it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorldInfo {
+    /// Its folder under `worlds/` (also how it is told apart).
+    pub folder: String,
+    pub name: String,
+    pub seed: u64,
+    /// Seconds since 1970.
+    pub created: u64,
+    pub last_played: u64,
+}
+
+impl WorldInfo {
+    fn to_text(&self) -> String {
+        format!("name={}\nseed={}\ncreated={}\nlast_played={}\n", self.name, self.seed, self.created, self.last_played)
+    }
+
+    fn from_text(folder: &str, text: &str) -> Option<WorldInfo> {
+        let get = |k: &str| text.lines().find_map(|l| l.trim_end().strip_prefix(k)?.strip_prefix('=').map(str::to_string));
+        Some(WorldInfo {
+            folder: folder.to_string(),
+            name: get("name").filter(|n| !n.trim().is_empty()).unwrap_or_else(|| folder.to_string()),
+            seed: get("seed")?.trim().parse().ok()?,
+            created: get("created").and_then(|v| v.trim().parse().ok()).unwrap_or(0),
+            last_played: get("last_played").and_then(|v| v.trim().parse().ok()).unwrap_or(0),
+        })
+    }
+}
+
+pub fn now() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
+}
+
+/// A world's folder.
+pub fn dir(save_dir: &Path, folder: &str) -> PathBuf {
+    save_dir.join(WORLDS_DIR).join(folder)
+}
+
+/// The seed a typed seed stands for: a number is itself, other text is hashed (so a word
+/// always gives the same world), nothing at all is random.
+pub fn seed_from_text(text: &str) -> u64 {
+    let t = text.trim();
+    if t.is_empty() {
+        let n = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos() as u64);
+        return splitmix(n);
+    }
+    if let Ok(n) = t.parse::<i64>() {
+        return n as u64;
+    }
+    // FNV-1a.
+    t.bytes().fold(0xcbf29ce484222325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100000001b3))
+}
+
+fn splitmix(mut x: u64) -> u64 {
+    x = x.wrapping_add(0x9e3779b97f4a7c15);
+    x = (x ^ (x >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+    x = (x ^ (x >> 27)).wrapping_mul(0x94d049bb133111eb);
+    x ^ (x >> 31)
+}
+
+/// A folder name for a world called `name` that no world in `save_dir` uses yet.
+pub fn free_folder(save_dir: &Path, name: &str) -> String {
+    let mut base: String = name.trim().chars().map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_uppercase() } else { '_' }).collect();
+    if base.trim_matches('_').is_empty() {
+        base = "WORLD".to_string();
+    }
+    base.truncate(MAX_NAME);
+    let taken = |f: &str| dir(save_dir, f).exists();
+    if !taken(&base) {
+        return base;
+    }
+    (2..).map(|n| format!("{base}-{n}")).find(|f| !taken(f)).expect("a free name")
+}
+
+/// The saved worlds, most recently played first.
+pub fn list(save_dir: &Path) -> Vec<WorldInfo> {
+    let Ok(entries) = fs::read_dir(save_dir.join(WORLDS_DIR)) else { return Vec::new() };
+    let mut out: Vec<WorldInfo> = entries
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().is_dir())
+        .filter_map(|e| {
+            let folder = e.file_name().to_string_lossy().to_string();
+            let text = fs::read_to_string(e.path().join(LEVEL_FILE)).ok()?;
+            WorldInfo::from_text(&folder, &text)
+        })
+        .collect();
+    out.sort_by(|a, b| b.last_played.cmp(&a.last_played).then_with(|| a.name.cmp(&b.name)));
+    out
+}
+
+/// Makes a new world (an empty folder with its `level.txt`): generated when first played.
+pub fn create(save_dir: &Path, name: &str, seed: u64) -> io::Result<WorldInfo> {
+    let name = clean_name(name);
+    let folder = free_folder(save_dir, &name);
+    fs::create_dir_all(dir(save_dir, &folder))?;
+    let t = now();
+    let w = WorldInfo { folder, name, seed, created: t, last_played: t };
+    write_level(save_dir, &w)?;
+    Ok(w)
+}
+
+/// Renames a world (its folder stays).
+pub fn rename(save_dir: &Path, folder: &str, name: &str) -> io::Result<WorldInfo> {
+    let mut w = read(save_dir, folder)?;
+    w.name = clean_name(name);
+    write_level(save_dir, &w)?;
+    Ok(w)
+}
+
+/// Notes that a world is being played now (it moves to the top of the list).
+pub fn touch(save_dir: &Path, folder: &str) -> io::Result<WorldInfo> {
+    let mut w = read(save_dir, folder)?;
+    w.last_played = now();
+    write_level(save_dir, &w)?;
+    Ok(w)
+}
+
+/// Deletes a world and everything in its folder, for good.
+pub fn delete(save_dir: &Path, folder: &str) -> io::Result<()> {
+    // Only ever a direct child of worlds/, never anything above it.
+    if folder.is_empty() || folder.contains(['/', '\\']) || folder == "." || folder == ".." {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "not a world folder"));
+    }
+    fs::remove_dir_all(dir(save_dir, folder))
+}
+
+pub fn read(save_dir: &Path, folder: &str) -> io::Result<WorldInfo> {
+    let text = fs::read_to_string(dir(save_dir, folder).join(LEVEL_FILE))?;
+    WorldInfo::from_text(folder, &text).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "bad level.txt"))
+}
+
+fn write_level(save_dir: &Path, w: &WorldInfo) -> io::Result<()> {
+    let path = dir(save_dir, &w.folder).join(LEVEL_FILE);
+    let tmp = path.with_extension("tmp");
+    fs::write(&tmp, w.to_text())?;
+    fs::rename(tmp, path)
+}
+
+fn clean_name(name: &str) -> String {
+    let n: String = name.trim().chars().take(MAX_NAME).collect();
+    if n.is_empty() {
+        "NEW WORLD".to_string()
+    } else {
+        n
+    }
+}
+
+/// Moves the one world of older versions (its journal and `state.txt`, straight in the
+/// save folder) into `worlds/MY_WORLD`, and copies its settings to `settings.txt`. Does
+/// nothing once `worlds/` exists. Returns the moved world, if any.
+pub fn migrate(save_dir: &Path) -> io::Result<Option<WorldInfo>> {
+    if save_dir.join(WORLDS_DIR).exists() {
+        return Ok(None);
+    }
+    let old: Vec<PathBuf> = fs::read_dir(save_dir)?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.is_file())
+        .filter(|p| {
+            let n = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            n == STATE_FILE || (n.starts_with("world") && n.contains(".bfwj"))
+        })
+        .collect();
+    fs::create_dir_all(save_dir.join(WORLDS_DIR))?;
+    if old.is_empty() {
+        return Ok(None);
+    }
+    let state = save_dir.join(STATE_FILE);
+    if state.exists() && !save_dir.join(SETTINGS_FILE).exists() {
+        // The old state file held the settings too; the settings parser skips the rest.
+        fs::copy(&state, save_dir.join(SETTINGS_FILE))?;
+    }
+    let mut w = create(save_dir, "MY WORLD", FIRST_SEED)?;
+    let into = dir(save_dir, &w.folder);
+    for p in old {
+        let name = p.file_name().expect("a file").to_owned();
+        fs::rename(&p, into.join(name))?;
+    }
+    w.created = 0;
+    write_level(save_dir, &w)?;
+    Ok(Some(w))
+}
+
+/// "14 NOV 2026" for seconds since 1970 (UTC).
+pub fn date_label(secs: u64) -> String {
+    const MONTHS: [&str; 12] = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
+    // Howard Hinnant's days-to-civil.
+    let z = (secs / 86400) as i64 + 719468;
+    let era = z.div_euclid(146097);
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + (m <= 2) as i64;
+    format!("{d} {} {y}", MONTHS[(m - 1) as usize])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("bf_worlds_{name}_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn worlds_are_created_listed_renamed_and_deleted() {
+        let d = temp("cycle");
+        assert!(list(&d).is_empty());
+        let a = create(&d, "New World", 42).unwrap();
+        let b = create(&d, "New World", 7).unwrap();
+        let c = create(&d, "  ", 9).unwrap();
+        assert_eq!(a.folder, "NEW_WORLD");
+        assert_eq!(b.folder, "NEW_WORLD-2", "same name, another folder");
+        assert_eq!((c.name.as_str(), c.folder.as_str()), ("NEW WORLD", "NEW_WORLD-3"));
+        assert_eq!(list(&d).len(), 3);
+        // Playing one moves it to the top.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        touch(&d, &a.folder).unwrap();
+        assert_eq!(list(&d)[0].folder, a.folder);
+        let r = rename(&d, &a.folder, "ISLAND").unwrap();
+        assert_eq!((r.name.as_str(), r.seed, r.folder.as_str()), ("ISLAND", 42, "NEW_WORLD"));
+        assert_eq!(read(&d, "NEW_WORLD").unwrap().name, "ISLAND");
+        // Deleting takes the whole folder, and nothing else.
+        fs::write(dir(&d, &b.folder).join("world_v4.bfwj"), b"x").unwrap();
+        delete(&d, &b.folder).unwrap();
+        assert!(!dir(&d, &b.folder).exists());
+        assert_eq!(list(&d).len(), 2);
+        assert!(delete(&d, "..").is_err() && delete(&d, "").is_err() && delete(&d, "a/b").is_err());
+        assert!(d.join(WORLDS_DIR).exists());
+        fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn the_old_single_world_moves_into_the_list() {
+        let d = temp("migrate");
+        fs::write(d.join(STATE_FILE), "fog=true\nplayer=1,2,3\ngen=4\n").unwrap();
+        fs::write(d.join("world_v4.bfwj"), b"journal").unwrap();
+        fs::write(d.join("world.bfwj"), b"older journal").unwrap();
+        let w = migrate(&d).unwrap().expect("moved");
+        assert_eq!((w.name.as_str(), w.seed), ("MY WORLD", FIRST_SEED));
+        let into = dir(&d, &w.folder);
+        assert_eq!(fs::read(into.join("world_v4.bfwj")).unwrap(), b"journal");
+        assert!(into.join("world.bfwj").exists() && into.join(STATE_FILE).exists());
+        assert!(!d.join("world_v4.bfwj").exists() && !d.join(STATE_FILE).exists());
+        assert!(fs::read_to_string(d.join(SETTINGS_FILE)).unwrap().contains("fog=true"));
+        assert_eq!(list(&d), vec![read(&d, &w.folder).unwrap()]);
+        // Only once.
+        assert_eq!(migrate(&d).unwrap(), None);
+        // A fresh install gets an empty list.
+        let e = temp("fresh");
+        assert_eq!(migrate(&e).unwrap(), None);
+        assert!(e.join(WORLDS_DIR).is_dir() && list(&e).is_empty());
+        fs::remove_dir_all(&d).unwrap();
+        fs::remove_dir_all(&e).unwrap();
+    }
+
+    #[test]
+    fn typed_seeds() {
+        assert_eq!(seed_from_text("1337"), 1337);
+        assert_eq!(seed_from_text(" -5 "), (-5i64) as u64);
+        assert_eq!(seed_from_text("GLACIER"), seed_from_text("GLACIER"));
+        assert_ne!(seed_from_text("GLACIER"), seed_from_text("GLACIERS"));
+        assert_ne!(seed_from_text(""), seed_from_text("GLACIER"));
+    }
+
+    #[test]
+    fn dates() {
+        assert_eq!(date_label(0), "1 JAN 1970");
+        assert_eq!(date_label(1_763_136_000), "14 NOV 2025");
+        assert_eq!(date_label(951_782_400), "29 FEB 2000");
+    }
+}

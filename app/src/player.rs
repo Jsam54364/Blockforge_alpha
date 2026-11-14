@@ -93,6 +93,11 @@ impl Player {
         self.presses.push(name.to_string());
     }
 
+    /// Whether he is still waiting for the ground under him to load.
+    pub fn is_waiting(&self) -> bool {
+        self.waiting.is_some()
+    }
+
     pub fn position(&self) -> [f64; 3] {
         self.waiting.unwrap_or(self.ctl.pos)
     }

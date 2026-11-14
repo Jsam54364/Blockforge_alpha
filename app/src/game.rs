@@ -40,9 +40,7 @@ const WALK_PITCH: (f32, f32) = (-1.4, 1.35);
 const TAP_MAX: Duration = Duration::from_millis(300);
 const DRAG_PIXELS: f32 = 14.0;
 /// Settings and the camera, kept between launches next to the world save.
-const STATE_FILE: &str = "state.txt";
-/// The world's seed (one world for now).
-const SEED: u64 = 1337;
+use crate::worlds::STATE_FILE;
 /// A saved camera further out than this is treated as corrupt (f32 loses block precision).
 const MAX_SAVED_COORD: f32 = 1.0e6;
 
@@ -94,6 +92,14 @@ pub fn place_lines(g: &GroundInfo) -> Vec<String> {
 
 /// The world save for the current generator: `world.bfwj` for the first one (so older
 /// saves keep working), `world_v2.bfwj` and so on after.
+/// Writes `text` to `path` through a temporary file, so a crash never leaves half a file.
+pub fn write_atomically(path: &std::path::Path, text: &str) {
+    let tmp = path.with_extension("tmp");
+    if std::fs::write(&tmp, text).is_ok() {
+        let _ = std::fs::rename(&tmp, path);
+    }
+}
+
 fn world_file() -> String {
     if WORLDGEN_VERSION <= 1 {
         "world.bfwj".to_string()
@@ -122,12 +128,24 @@ struct TouchInfo {
     moved: bool,
 }
 
+/// The world a game is opened on.
+pub struct WorldSpec {
+    /// Its folder (`worlds::dir`), or `None` for a world kept in memory only (tests, and
+    /// platforms without a data directory).
+    pub dir: Option<PathBuf>,
+    pub seed: u64,
+    /// Where the app's settings are saved (`worlds::SETTINGS_FILE`), if anywhere.
+    pub settings_path: Option<PathBuf>,
+}
+
 pub struct Game {
     // Field order matters: the client is dropped before the server it talks to.
     pub client: Client,
     server: ServerHandle,
-    /// Where `state.txt` lives (None on platforms without a data directory).
+    /// The world's `state.txt` (player, camera, time of day).
     state_path: Option<PathBuf>,
+    /// The app's settings file.
+    settings_path: Option<PathBuf>,
     registry: Arc<BlockRegistry>,
     /// The world's generator, for the stats overlay's biome lines.
     gen: Arc<WorldGen>,
@@ -151,23 +169,19 @@ pub struct Game {
 }
 
 impl Game {
-    pub fn new(save_dir: Option<PathBuf>) -> Game {
-        let registry = Arc::new(BlockRegistry::builtin());
+    /// Opens `world`, taking over the app's `ui` (with its settings) until `close`.
+    pub fn new(world: WorldSpec, mut ui: Ui, registry: Arc<BlockRegistry>) -> Game {
         let stone = registry.state("stone").expect("stone block");
 
-        // Pick up where the last session stopped: settings and camera from the state file.
-        let state_path = save_dir.as_ref().map(|d| d.join(STATE_FILE));
+        // Pick up where the last session in this world stopped: camera, player and time.
+        let state_path = world.dir.as_ref().map(|d| d.join(STATE_FILE));
         let saved = state_path.as_ref().and_then(|p| std::fs::read_to_string(p).ok()).unwrap_or_default();
-        let mut ui = Ui::new();
-        // A different splash line each launch.
-        ui.splash = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.subsec_nanos() as usize);
-        ui.settings.apply_text(&saved);
         let clock = Clock::from_text(&saved);
         ui.hours = clock.hours();
         // A camera saved in a world from an older generator would be over different ground:
         // start over at the spawn (that world's save is kept, under its own name).
         let same_world = saved_generator(&saved) == WORLDGEN_VERSION;
-        let gen = Arc::new(WorldGen::new(SEED, &registry));
+        let gen = Arc::new(WorldGen::new(world.seed, &registry));
         let cam = CameraView::from_text(&saved).filter(|_| same_world).unwrap_or_else(|| {
             let [x, y, z] = gen.find_spawn();
             CameraView { pos: [x, y + 24.0, z], yaw: 0.0, pitch: -0.35 }
@@ -183,9 +197,9 @@ impl Game {
         let player = Player::new(player_at, view);
 
         let cfg = ServerConfig {
-            seed: SEED,
+            seed: world.seed,
             worker_threads: 2,
-            save_path: save_dir.map(|d| d.join(world_file())),
+            save_path: world.dir.map(|d| d.join(world_file())),
             ..ServerConfig::default()
         };
         let server = server::spawn(cfg, registry.clone());
@@ -202,6 +216,7 @@ impl Game {
             client,
             server,
             state_path,
+            settings_path: world.settings_path,
             registry,
             gen,
             cam,
@@ -231,21 +246,26 @@ impl Game {
     }
 
     fn save_state(&self) {
+        if let Some(path) = &self.settings_path {
+            write_atomically(path, &self.ui.settings.to_text());
+        }
         let Some(path) = &self.state_path else { return };
         let p = self.player.position();
-        let text = format!(
-            "{}{}{}player={},{},{}\ngen={WORLDGEN_VERSION}\n",
-            self.ui.settings.to_text(),
-            self.cam.to_text(),
-            self.clock.to_text(),
-            p[0],
-            p[1],
-            p[2]
-        );
-        let tmp = path.with_extension("tmp");
-        if std::fs::write(&tmp, text).is_ok() {
-            let _ = std::fs::rename(&tmp, path);
-        }
+        let text =
+            format!("{}{}player={},{},{}\ngen={WORLDGEN_VERSION}\n", self.cam.to_text(), self.clock.to_text(), p[0], p[1], p[2]);
+        write_atomically(path, &text);
+    }
+
+    /// Saves everything and shuts the world down; hands back the app's `ui`.
+    pub fn close(mut self) -> Ui {
+        self.persist();
+        std::mem::take(&mut self.ui)
+    }
+
+    /// Whether the world around the player has loaded enough to start (he has landed on
+    /// it, or the camera has ground around it in fly mode, or it has taken long enough).
+    pub fn ready(&self, waited: Duration) -> bool {
+        (!self.player.is_waiting() && self.client.meshes.len() >= 24) || waited > Duration::from_secs(25)
     }
 
     /// Far edge of the streamed area, in blocks: real chunks are drawn up to here.
@@ -517,6 +537,60 @@ impl Game {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn worlds_open_on_their_own_seed_and_keep_their_player_and_the_settings() {
+        use crate::worlds;
+        let d = std::env::temp_dir().join(format!("bf_game_worlds_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        worlds::migrate(&d).unwrap();
+        let reg = Arc::new(BlockRegistry::builtin());
+        let a = worlds::create(&d, "A", 1337).unwrap();
+        let b = worlds::create(&d, "B", 4242).unwrap();
+        let spec = |w: &worlds::WorldInfo| WorldSpec {
+            dir: Some(worlds::dir(&d, &w.folder)),
+            seed: w.seed,
+            settings_path: Some(d.join(worlds::SETTINGS_FILE)),
+        };
+        let play = |g: &mut Game| {
+            g.set_surface(2400, 1080, 2.75);
+            let t = Instant::now();
+            while !g.ready(t.elapsed()) {
+                g.update();
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            assert!(!g.player.is_waiting(), "he landed (not just a timeout)");
+        };
+        let mut ui = Ui::new();
+        ui.settings.render_chunks = 2;
+        ui.settings.fog = false;
+        let mut g = Game::new(spec(&a), ui, reg.clone());
+        assert_eq!(g.generator().seed(), 1337);
+        play(&mut g);
+        let in_a = g.player.position();
+        let ui = g.close();
+        let state = std::fs::read_to_string(worlds::dir(&d, &a.folder).join(STATE_FILE)).unwrap();
+        assert!(state.contains("player=") && !state.contains("fog="), "{state}");
+        let settings = std::fs::read_to_string(d.join(worlds::SETTINGS_FILE)).unwrap();
+        assert!(settings.contains("fog=false"), "{settings}");
+
+        // Another world: another seed, its own spawn.
+        let mut g = Game::new(spec(&b), ui, reg.clone());
+        assert_eq!(g.generator().seed(), 4242);
+        play(&mut g);
+        let in_b = g.player.position();
+        assert!((in_a[0] - in_b[0]).abs() + (in_a[2] - in_b[2]).abs() > 1.0, "{in_a:?} {in_b:?}");
+        let ui = g.close();
+
+        // Back in the first: where he was left, with the settings as they were.
+        let g = Game::new(spec(&a), ui, reg);
+        let p = g.player.position();
+        assert!((0..3).all(|i| (p[i] - in_a[i]).abs() < 0.01), "{p:?} vs {in_a:?}");
+        assert!(!g.ui.settings.fog);
+        drop(g);
+        std::fs::remove_dir_all(&d).unwrap();
+    }
 
     #[test]
     fn forward_and_right_are_orthogonal_unit_vectors() {
