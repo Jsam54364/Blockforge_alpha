@@ -37,6 +37,8 @@ pub struct Perf {
     pub drawn: usize,
     /// Chunk meshes in range and in view skipped last frame as hidden behind terrain.
     pub hidden: usize,
+    /// Vertex pool: pages, MB reserved, MB holding meshes.
+    pub pool: (usize, f32, f32),
     /// Quads in the chunk meshes drawn last frame.
     pub quads: u64,
     /// LOD sections and quads drawn last frame, and sections still being built.
@@ -80,6 +82,7 @@ impl Perf {
             meshes: 0,
             drawn: 0,
             hidden: 0,
+            pool: (0, 0.0, 0.0),
             quads: 0,
             lod_drawn: 0,
             lod_quads: 0,

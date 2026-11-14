@@ -42,6 +42,7 @@ use winit::window::Window;
 use crate::game::CameraView;
 use crate::gpu_timer::GpuTimer;
 use crate::math;
+use crate::pool;
 use crate::ui::{HudVertex, MAX_HUD_VERTS};
 
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
@@ -569,8 +570,9 @@ fn make_depth(device: &wgpu::Device, w: u32, h: u32) -> wgpu::TextureView {
     tex.create_view(&wgpu::TextureViewDescriptor::default())
 }
 
+/// A mesh's vertices: a range in the vertex pool (`pool.rs`).
 struct GpuLayer {
-    buf: wgpu::Buffer,
+    slot: pool::Slot,
     quads: u32,
 }
 
@@ -622,6 +624,8 @@ pub struct Gfx {
     lod_instance_buf: wgpu::Buffer,
     chunks: HashMap<ChunkPos, GpuChunk>,
     lods: HashMap<SectionKey, GpuLod>,
+    /// Where the vertices of `chunks` and `lods` live.
+    pool: pool::VertexPool,
     last_drawn: usize,
     last_hidden: usize,
     last_quads: u64,
@@ -946,6 +950,7 @@ impl Gfx {
             lod_instance_buf,
             chunks: HashMap::new(),
             lods: HashMap::new(),
+            pool: pool::VertexPool::new(),
             last_drawn: 0,
             last_hidden: 0,
             last_quads: 0,
@@ -1041,52 +1046,50 @@ impl Gfx {
         self.post = post_targets(&self.device, &self.post_layouts, w, h);
     }
 
-    /// One vertex buffer holding `parts` back to back, written straight into GPU memory
-    /// (no temporary copy on the CPU side).
-    fn upload<V>(&self, parts: &[&[V]], label: &str) -> Option<GpuLayer> {
+    /// `parts` back to back in the vertex pool (8-byte vertices, 4 per quad).
+    fn upload<V>(&mut self, parts: &[&[V]]) -> Option<GpuLayer> {
         let verts: usize = parts.iter().map(|p| p.len()).sum();
-        if verts == 0 {
-            return None;
+        let bytes: Vec<&[u8]> = parts.iter().map(|p| as_bytes(p)).collect();
+        let slot = self.pool.upload(&self.device, &self.queue, &bytes)?;
+        Some(GpuLayer { slot, quads: (verts / 4) as u32 })
+    }
+
+    /// Gives a mesh's range back to the pool.
+    fn release(&mut self, layer: Option<GpuLayer>) {
+        if let Some(l) = layer {
+            self.pool.free(l.slot);
         }
-        // 8-byte vertices, so the size is always a multiple of wgpu's 4-byte alignment.
-        let buf = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some(label),
-            size: (verts * std::mem::size_of::<V>()) as u64,
-            usage: wgpu::BufferUsages::VERTEX,
-            mapped_at_creation: true,
-        });
-        {
-            let mut view = buf.slice(..).get_mapped_range_mut();
-            let mut at = 0;
-            for p in parts {
-                let bytes = as_bytes(p);
-                view[at..at + bytes.len()].copy_from_slice(bytes);
-                at += bytes.len();
-            }
-        }
-        buf.unmap();
-        Some(GpuLayer { buf, quads: (verts / 4) as u32 })
+    }
+
+    /// Vertex pool use: (pages, MB reserved, MB used).
+    pub fn pool_usage(&self) -> (usize, f32, f32) {
+        let (n, size, used) = self.pool.usage();
+        (n, size as f32 / 1048576.0, used as f32 / 1048576.0)
     }
 
     fn sync_meshes(&mut self, client: &mut Client) {
         for pos in client.take_mesh_changes(UPLOADS_PER_FRAME) {
-            match client.meshes.get(&pos) {
-                None => {
-                    self.chunks.remove(&pos);
-                }
-                Some(mesh) => {
-                    // Cutout (leaves) shares the opaque draw for now.
-                    let solid = self.upload(&[&mesh.opaque.vertices, &mesh.cutout.vertices], "chunk solid");
-                    let water = self.upload(&[&mesh.translucent.vertices], "chunk water");
-                    self.chunks.insert(pos, GpuChunk { solid, water });
-                }
+            if let Some(old) = self.chunks.remove(&pos) {
+                self.release(old.solid);
+                self.release(old.water);
+            }
+            if let Some(mesh) = client.meshes.get(&pos) {
+                // Cutout (leaves) shares the opaque draw for now.
+                let solid = self.upload(&[&mesh.opaque.vertices, &mesh.cutout.vertices]);
+                let water = self.upload(&[&mesh.translucent.vertices]);
+                self.chunks.insert(pos, GpuChunk { solid, water });
             }
         }
         for key in client.lod.take_evicted() {
-            self.lods.remove(&key);
+            if let Some(old) = self.lods.remove(&key) {
+                self.release(old.layer);
+            }
         }
         for mesh in client.lod.take_built(LOD_UPLOADS_PER_FRAME) {
-            let layer = self.upload(&[&mesh.vertices], "lod section");
+            if let Some(old) = self.lods.remove(&mesh.key) {
+                self.release(old.layer);
+            }
+            let layer = self.upload(&[&mesh.vertices]);
             self.lods.insert(mesh.key, GpuLod { layer, min_y: mesh.min_y, max_y: mesh.max_y });
         }
     }
@@ -1332,7 +1335,7 @@ impl Gfx {
             // way: near chunks fill the depth buffer first and hide most of what is behind them.
             for (i, (_, pos)) in vis.iter().enumerate().rev() {
                 if let Some(layer) = self.chunks.get(pos).and_then(|c| c.solid.as_ref()) {
-                    pass.set_vertex_buffer(0, layer.buf.slice(..));
+                    pass.set_vertex_buffer(0, self.pool.slice(&layer.slot));
                     pass.draw_indexed(0..layer.quads.min(MAX_QUADS) * 6, 0, i as u32..i as u32 + 1);
                     quads += layer.quads as u64;
                 }
@@ -1345,7 +1348,7 @@ impl Gfx {
                 pass.set_vertex_buffer(1, self.lod_instance_buf.slice(..));
                 for (i, (_, key)) in lod_vis.iter().enumerate() {
                     if let Some(layer) = self.lods.get(key).and_then(|g| g.layer.as_ref()) {
-                        pass.set_vertex_buffer(0, layer.buf.slice(..));
+                        pass.set_vertex_buffer(0, self.pool.slice(&layer.slot));
                         pass.draw_indexed(0..layer.quads.min(MAX_QUADS) * 6, 0, i as u32..i as u32 + 1);
                         lod_quads += layer.quads as u64;
                     }
@@ -1378,7 +1381,7 @@ impl Gfx {
             pass.set_bind_group(0, &self.bind_water, &[]);
             for (i, (_, pos)) in vis.iter().enumerate() {
                 if let Some(layer) = self.chunks.get(pos).and_then(|c| c.water.as_ref()) {
-                    pass.set_vertex_buffer(0, layer.buf.slice(..));
+                    pass.set_vertex_buffer(0, self.pool.slice(&layer.slot));
                     pass.draw_indexed(0..layer.quads.min(MAX_QUADS) * 6, 0, i as u32..i as u32 + 1);
                     quads += layer.quads as u64;
                 }

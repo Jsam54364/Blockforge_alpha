@@ -7,7 +7,7 @@ A mobile-first voxel engine in Rust, in two crates:
   architecture lives here and is tested without a GPU.
 * the **app** (`app/`): the Android front-end. winit + wgpu renderer, touch controls and HUD.
 
-> **Status:** 114 unit + 9 end-to-end tests in the core and 78 in the app (plus WGSL
+> **Status:** 114 unit + 9 end-to-end tests in the core and 81 in the app (plus WGSL
 > validation) pass. The APK builds on GitHub Actions and has been run and measured on a phone
 > (see the numbers further down).
 
@@ -45,13 +45,14 @@ cargo run --release --bin headless   # stream, mesh, edit; prints stats + an ASC
 
 ## Known gaps (deliberate, in rough priority order)
 
-1. **Renderer**: pooled vertex buffers; leaves are drawn opaque (no alpha-tested cutout pass
+1. **Renderer**: leaves are drawn opaque (no alpha-tested cutout pass
    yet); textures are generated at startup (no compressed ASTC/ETC2 yet).
 2. **Lighting**: sun, moon and sky light follow the day (see "Sky and day cycle"), but there
    are no shadows yet (a face turned to the sun is lit even under an overhang), and the
    per-vertex sky/block light fields are still placeholders.
 3. **Greedy meshing**: implemented as a hybrid (see below) but not the default mesher yet.
-4. **LOD terrain** shows the world as generated: edits only show in the real chunks (see below).
+4. **LOD terrain** shows edits by column top only (overhangs and caves under an edit are not
+   represented), and a small edit far away only shows once a cell is small enough to land on it.
 5. **Server**: no reach/anti-cheat checks, undo history is global not per-player, autosave
    blocks the tick, events outside sim distance are dropped instead of re-scanned.
 6. **Client**: a new chunk now waits (up to `Client::neighbor_wait`) for the neighbours the
@@ -163,6 +164,16 @@ past it).
 Solid terrain is drawn nearest chunk first so the depth test can reject hidden fragments
 before they are shaded (water still goes far to near for blending). This has not been measured
 on a phone yet: compare GPU time with VSYNC off against the figures above.
+
+**Pooled vertex buffers** (`app/src/pool.rs`): chunk and LOD meshes live in 4 MB GPU buffers
+("pages") instead of one buffer each, so a new mesh is one `write_buffer` into space that is
+already there and a mesh that goes away just returns its range (no buffer created or freed per
+chunk, which is slow on some OpenGL ES drivers). Free ranges are kept sorted per page, first fit,
+merged with their neighbours; a mesh bigger than a page gets its own; an empty page is given
+back once the others have a page's worth of room. Each draw binds its range of a page. The
+overlay's VERTS line shows MB holding meshes / MB reserved and the page count (around the spawn
+in the test harness: 35 of 36 MB in 9 pages). Harness renders drawn from the pool are
+pixel-identical to the old per-chunk buffers on the OpenGL backend.
 
 ### What is kept between launches
 
@@ -481,5 +492,4 @@ Also texture repeat across merged quads.
 1. Flip the default mesher to GREEDY once it has been checked on a phone (the menu choice is
    now remembered, so switching it once is enough to keep testing it); then try one instance
    per quad (8 bytes) on a phone. (The faster per-face scan is done.)
-2. Pooled vertex buffers instead of one buffer per chunk.
-3. Immersive mode / real window insets instead of the fixed HUD insets.
+2. Immersive mode / real window insets instead of the fixed HUD insets.

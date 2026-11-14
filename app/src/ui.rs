@@ -373,6 +373,7 @@ pub fn stats_lines(perf: &Perf) -> Vec<String> {
     v.push(format!("CHUNKS {}", perf.chunks));
     v.push(format!("DRAWN {}/{}  HIDDEN {}", perf.drawn, perf.meshes, perf.hidden));
     v.push(format!("QUADS {}", perf.quads));
+    v.push(format!("VERTS {:.0}/{:.0}MB IN {} PAGES", perf.pool.2, perf.pool.1, perf.pool.0));
     v.push(format!("LOD {} SECT {}K QUADS", perf.lod_drawn, perf.lod_quads / 1000));
     if perf.lod_pending > 0 {
         v.push(format!("LOD BUILDING {}", perf.lod_pending));

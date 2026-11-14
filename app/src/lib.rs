@@ -15,6 +15,7 @@ pub mod hyrig;
 mod math;
 mod perf;
 mod player;
+mod pool;
 mod sky;
 mod texgen;
 mod textures;
@@ -121,6 +122,7 @@ impl ApplicationHandler for App {
                     }
                     self.perf.drawn = g.drawn_chunks();
                     self.perf.hidden = g.hidden_chunks();
+                    self.perf.pool = g.pool_usage();
                     self.perf.quads = g.drawn_quads();
                     (self.perf.lod_drawn, self.perf.lod_quads) = g.drawn_lod();
                     self.perf.lod_pending = self.game.client.lod.stats.pending;
