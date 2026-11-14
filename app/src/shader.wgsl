@@ -57,6 +57,9 @@ struct VsOut {
     @location(2) uv: vec2<f32>,
     @location(3) @interpolate(flat) layer: u32,
     @location(4) @interpolate(flat) face: u32,
+    // Water surfaces only: how close the shore is, 0 in open water (two blocks or more from
+    // it), 1 touching a block, interpolated across the face.
+    @location(5) shore: f32,
 };
 
 // Texture coordinates for a face, from a position in blocks: one texture per block, upright
@@ -112,7 +115,10 @@ fn vs_main(v: VsIn) -> VsOut {
     let blk = f32((b >> 20u) & 15u) / 15.0;
 
     let world = v.origin.xyz + local;
-    let ao_f = 0.55 + 0.15 * f32(ao);
+    // Water has no ambient occlusion: on its surface the AO bits say how far the shore is
+    // (blockforge::mesh::shore_corners: 0 touching .. 3 two blocks or more).
+    let water = tex == u32(g.flags.z + 0.5);
+    let ao_f = select(0.55 + 0.15 * f32(ao), 1.0, water);
 
     var o: VsOut;
     o.clip = g.view_proj * vec4<f32>(world, 1.0);
@@ -125,6 +131,9 @@ fn vs_main(v: VsIn) -> VsOut {
     o.uv = face_uv(face, local + vec3<f32>(0.0, lift, 0.0));
     o.layer = tex;
     o.face = face;
+    // Distance 0, 1, 1.41 or 2+ blocks, as closeness falling linearly to 0 at two blocks.
+    var close = array<f32, 4>(1.0, 0.5, 0.29, 0.0);
+    o.shore = select(0.0, close[ao], water && face == 2u);
     return o;
 }
 
@@ -321,6 +330,11 @@ fn vnoise(p: vec2<f32>) -> f32 {
     );
 }
 
+// How fast the waves run (1 would be deep-water speed for their length) and how much they
+// tilt the surface.
+const WAVE_SPEED: f32 = 0.22;
+const WAVE_SLOPE: f32 = 0.4;
+
 // How many wave trains the water sums, longest first (each 1.34 times shorter than the one
 // before: 34 blocks down to under half a block).
 const WAVE_OCTAVES: i32 = 16;
@@ -340,27 +354,30 @@ const WAVE_OCTAVES: i32 = 16;
 // and chop come and go in noise patches, and gusts roughen some areas. Long waves travel
 // faster than short ones, as in deep water. A train fades out before it is shorter than a few
 // pixels on screen (no shimmer or moire far away), which also ends the loop early there.
+// Along the shore (`shore`, from the mesher) the waves calm down and a band of foam laps
+// against the blocks, coming and going and broken up into bubbles by noise, so the water
+// meets the land instead of sliding past it.
 // Returns the colour and how opaque it is (the translucent pass blends with it; LOD water is
 // drawn opaque).
-fn water_shade(world: vec3<f32>, face: u32, light: vec3<f32>) -> vec4<f32> {
+fn water_shade(world: vec3<f32>, face: u32, light: vec3<f32>, shore: f32) -> vec4<f32> {
     let to_cam = g.cam_pos.xyz - world;
     let dist = length(to_cam);
     let v = to_cam / max(dist, 1e-4);
+    let t = g.flags.y;
+    // One pixel's footprint on the water, stretched at grazing angles.
+    let fp = dist * (1.1 / g.screen.y) / max(abs(v.y), 0.04);
     var n = face_normal(face);
     if (face == 2u) {
-        let t = g.flags.y;
-        // One pixel's footprint on the water, stretched at grazing angles.
-        let fp = dist * (1.1 / g.screen.y) / max(abs(v.y), 0.04);
         // Warp: every point is pushed around by noise that drifts with time.
         let q = world.xz * 0.043;
-        let warp = vec2<f32>(vnoise(q + vec2<f32>(t * 0.021, -t * 0.013)), vnoise(q + vec2<f32>(37.2 - t * 0.017, 11.7 + t * 0.019))) - 0.5;
+        let warp = vec2<f32>(vnoise(q + vec2<f32>(t * 0.009, -t * 0.006)), vnoise(q + vec2<f32>(37.2 - t * 0.007, 11.7 + t * 0.008))) - 0.5;
         var p = world.xz + warp * 9.0;
         // Patches where the swell is high or low, and gusts that roughen the small waves.
         let swell = 0.5 + 0.8 * vnoise(world.xz * 0.019 + vec2<f32>(t * 0.011, 5.3));
         let gust = 0.4 + 1.2 * vnoise(world.xz * 0.011 + vec2<f32>(t * 0.008, -t * 0.006));
         var s = vec2<f32>(0.0);
         var freq = 6.2831853 / 34.0;
-        var weight = 0.8;
+        var weight = WAVE_SLOPE;
         var angle = 0.6;
         for (var i = 0; i < WAVE_OCTAVES; i++) {
             let keep = smoothstep(2.5, 7.0, 6.2831853 / (freq * fp));
@@ -368,14 +385,16 @@ fn water_shade(world: vec3<f32>, face: u32, light: vec3<f32>) -> vec4<f32> {
                 break;
             }
             let d = vec2<f32>(sin(angle), cos(angle));
-            let x = dot(d, p) * freq - t * sqrt(9.8 * freq) * 0.5;
+            let x = dot(d, p) * freq - t * sqrt(9.8 * freq) * WAVE_SPEED;
             let dw = exp(sin(x) - 1.0) * cos(x);
             s += d * (dw * freq * weight * keep * select(gust, swell, i < 6));
-            p -= d * (dw * weight * 2.0);
+            p -= d * (dw * weight * 2.4);
             angle += 1.2324;
             weight *= 0.79;
             freq *= 1.34;
         }
+        // Calmer next to the shore.
+        s *= 1.0 - 0.7 * clamp(shore, 0.0, 1.0);
         n = normalize(vec3<f32>(-s.x, 1.0, -s.y));
     }
     let cos_v = clamp(dot(n, v), 0.0, 1.0);
@@ -388,13 +407,31 @@ fn water_shade(world: vec3<f32>, face: u32, light: vec3<f32>) -> vec4<f32> {
     // ripples show in the body instead: facets tilted toward the sun's side of the sky are
     // lit a little more, those tilted away a little less (the same colour on average).
     let sun_side = normalize(vec2<f32>(g.sun.x, g.sun.z) + vec2<f32>(1e-4, 0.0));
-    let facet = clamp(1.0 + 4.0 * dot(n.xz, sun_side), 0.55, 1.6);
+    let facet = clamp(1.0 + 3.0 * dot(n.xz, sun_side), 0.6, 1.5);
     let body = mix(vec3<f32>(0.004, 0.016, 0.040), vec3<f32>(0.010, 0.040, 0.070), cos_v * 0.6) * light * facet;
     // Sun and moon glints.
     let glint = pow(max(dot(n, normalize(g.sun.xyz + v)), 0.0), 300.0) * 2.2 * g.sun.w * g.sun_color.rgb
         + pow(max(dot(n, normalize(g.moon.xyz + v)), 0.0), 400.0) * 0.5 * g.moon.w * vec3<f32>(0.80, 0.85, 0.95);
-    let col = mix(body, sky, fres) + glint;
-    return vec4<f32>(col, mix(0.95, 0.99, fres));
+    var col = mix(body, sky, fres) + glint;
+    var alpha = mix(0.95, 0.99, fres);
+    // Foam along the shore. The band laps in and out (a slow swing that differs along the
+    // shore), its edge is ragged, and inside it the foam is broken into bubbles and gaps;
+    // far away, where bubbles would be smaller than a pixel, it turns into a soft band.
+    if (shore > 0.01) {
+        let lap = 0.13 * sin(t * 0.7 + vnoise(world.xz * 0.35) * 9.0);
+        let ragged = 0.3 * (vnoise(world.xz * 1.7 + vec2<f32>(t * 0.03, -t * 0.02)) - 0.5);
+        let reach = shore + lap + ragged;
+        let bubbles = vnoise(world.xz * 5.0 + vec2<f32>(t * 0.05, t * 0.035)) * 0.6
+            + vnoise(world.xz * 11.0 - vec2<f32>(t * 0.04, -t * 0.06)) * 0.4;
+        let fine = mix(bubbles, 0.5, smoothstep(0.08, 0.3, fp));
+        let foam = smoothstep(0.55, 0.8, reach) * smoothstep(0.3, 0.55, fine + (reach - 0.7) * 0.8);
+        // Further out, thin streaks of froth drifting off it.
+        let streaks = smoothstep(0.25, 0.6, reach) * smoothstep(0.55, 0.75, fine) * 0.25;
+        let froth = max(foam * 0.85, streaks);
+        col = mix(col, vec3<f32>(0.80, 0.84, 0.86) * light, froth);
+        alpha = mix(alpha, 1.0, froth);
+    }
+    return vec4<f32>(col, alpha);
 }
 
 @fragment
@@ -408,7 +445,7 @@ fn fs_main(f: VsOut) -> @location(0) vec4<f32> {
     var col: vec3<f32>;
     var alpha = g.fog_params.z;
     if (f.layer == u32(g.flags.z + 0.5)) {
-        let w = water_shade(f.world, f.face, f.color);
+        let w = water_shade(f.world, f.face, f.color, f.shore);
         col = w.rgb;
         alpha = w.a;
     } else {

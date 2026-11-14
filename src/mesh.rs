@@ -18,9 +18,12 @@ use crate::coords::{ChunkPos, Face, LocalPos, CHUNK_SIZE, CHUNK_VOLUME};
 use crate::registry::{BlockRegistry, RenderLayer};
 use crate::world::ChunkStore;
 
-const PADDED: usize = (CHUNK_SIZE + 2) as usize;
+/// How many cells of the neighbouring chunks a snapshot holds on each side: one for faces and
+/// ambient occlusion, a second so water can tell the shore up to two blocks away.
+const BORDER: i32 = 2;
+const PADDED: usize = (CHUNK_SIZE + 2 * BORDER) as usize;
 
-/// Block data for one chunk plus a one-voxel border. Border cells from unloaded
+/// Block data for one chunk plus a two-voxel border. Border cells from unloaded
 /// chunks are `UNKNOWN`, which hides the faces touching them.
 pub struct PaddedChunk {
     blocks: Vec<BlockState>,
@@ -31,13 +34,12 @@ impl PaddedChunk {
         PaddedChunk { blocks: vec![state; PADDED * PADDED * PADDED] }
     }
 
-    /// Coordinates are chunk-relative, -1..=CHUNK_SIZE on each axis.
+    /// Coordinates are chunk-relative, -BORDER..CHUNK_SIZE + BORDER on each axis.
     #[inline]
     fn idx(x: i32, y: i32, z: i32) -> usize {
-        debug_assert!(
-            (-1..=CHUNK_SIZE).contains(&x) && (-1..=CHUNK_SIZE).contains(&y) && (-1..=CHUNK_SIZE).contains(&z)
-        );
-        (((y + 1) as usize * PADDED) + (z + 1) as usize) * PADDED + (x + 1) as usize
+        let r = -BORDER..CHUNK_SIZE + BORDER;
+        debug_assert!(r.contains(&x) && r.contains(&y) && r.contains(&z));
+        (((y + BORDER) as usize * PADDED) + (z + BORDER) as usize) * PADDED + (x + BORDER) as usize
     }
 
     #[inline]
@@ -50,7 +52,7 @@ impl PaddedChunk {
         self.blocks[i] = s;
     }
 
-    /// Snapshot of `pos` and the one-voxel shell around it. Runs on the caller's thread
+    /// Snapshot of `pos` and the two-voxel shell around it. Runs on the caller's thread
     /// (the render thread, for the client), so it avoids per-voxel palette lookups where
     /// it can: uniform chunks are filled, and the centre chunk is decoded in one pass.
     pub fn capture(store: &ChunkStore, pos: ChunkPos) -> PaddedChunk {
@@ -136,9 +138,9 @@ pub fn has_no_faces(reg: &BlockRegistry, store: &ChunkStore, pos: ChunkPos) -> b
 /// destination start in chunk-relative coordinates).
 fn axis_span(d: i32) -> (i32, i32, i32) {
     match d {
-        -1 => (CHUNK_SIZE - 1, 1, -1),
+        -1 => (CHUNK_SIZE - BORDER, BORDER, -BORDER),
         0 => (0, CHUNK_SIZE, 0),
-        _ => (0, 1, CHUNK_SIZE),
+        _ => (0, BORDER, CHUNK_SIZE),
     }
 }
 
@@ -364,6 +366,38 @@ pub(crate) fn corner_ao(reg: &BlockRegistry, pc: &PaddedChunk, x: i32, y: i32, z
     out
 }
 
+/// How far each corner of a liquid's surface is from the shore: the nearest block standing in
+/// the liquid at the surface's own level, within two blocks. 0 = the corner touches one,
+/// 1 = one block away, 2 = one block away diagonally, 3 = open water (the same as "no
+/// occlusion", so the code travels in the AO bits, which water doesn't otherwise use). The
+/// shader turns it into foam and calmer waves along the shore. A corner's code depends only
+/// on the 4 x 4 cells around it, so the chunks on either side of a seam agree.
+pub(crate) fn shore_corners(reg: &BlockRegistry, pc: &PaddedChunk, x: i32, y: i32, z: i32) -> [u8; 4] {
+    let blocks = |cx: i32, cz: i32| {
+        let s = pc.at(cx, y, cz);
+        s != UNKNOWN && !s.is_air() && reg.get(s).solid
+    };
+    let corners = &FACE_CORNERS[Face::PosY.index()];
+    let mut out = [3u8; 4];
+    for (k, c) in corners.iter().enumerate() {
+        // The corner point; the cells around it start 2 before it and end 1 after it.
+        let (px, pz) = (x + c[0], z + c[2]);
+        for i in -2..=1 {
+            for j in -2..=1 {
+                if blocks(px + i, pz + j) {
+                    let code = match (i == -2 || i == 1, j == -2 || j == 1) {
+                        (false, false) => 0,
+                        (true, true) => 2,
+                        _ => 1,
+                    };
+                    out[k] = out[k].min(code);
+                }
+            }
+        }
+    }
+    out
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn emit_quad(
     layer: &mut MeshLayer,
@@ -457,7 +491,9 @@ fn mesh_chunk_impl(reg: &BlockRegistry, pc: &PaddedChunk, skip_greedy: bool) -> 
                     if face_hidden(reg, state, face, nb) {
                         continue;
                     }
-                    let ao = if def.render == RenderLayer::Translucent {
+                    let ao = if surface && face == Face::PosY {
+                        shore_corners(reg, pc, x, y, z)
+                    } else if def.render == RenderLayer::Translucent {
                         [3; 4]
                     } else {
                         corner_ao(reg, pc, x, y, z, face)
@@ -638,6 +674,46 @@ mod tests {
         let m = mesh_chunk(&r, &pc);
         assert_eq!(m.opaque.quad_count(), 0);
         assert_eq!(m.translucent.quad_count(), 10);
+    }
+
+    #[test]
+    fn water_surfaces_know_where_the_shore_is() {
+        let r = reg();
+        let (water, stone) = (r.state("water").unwrap(), r.state("stone").unwrap());
+        let mut pc = PaddedChunk::filled(AIR);
+        for x in 4..9 {
+            for z in 4..9 {
+                pc.set(x, 5, z, water);
+            }
+        }
+        // A pillar standing in the pond, and the pond's west side is land.
+        pc.set(6, 5, 6, stone);
+        for z in 3..10 {
+            pc.set(3, 5, z, stone);
+        }
+        let m = mesh_chunk(&r, &pc);
+        let shore = |x: u32, z: u32| -> Vec<u32> {
+            let mut v: Vec<u32> = m
+                .translucent
+                .vertices
+                .iter()
+                .filter(|v| v.face_index() == Face::PosY as u32 && v.x() == x * 4 && v.z() == z * 4)
+                .map(|v| v.ao())
+                .collect();
+            v.sort_unstable();
+            v
+        };
+        // Two blocks from both the land and the pillar: open water.
+        assert_eq!(shore(9, 4), vec![3], "the pond's far corner is 2+ blocks from everything");
+        // On the shore line: touching. A block out from it: one away.
+        assert_eq!(shore(4, 5), vec![0, 0]);
+        assert_eq!(shore(5, 4), vec![1, 1]);
+        // Around the pillar: its corner touches it, from all three water cells.
+        assert_eq!(shore(6, 6), vec![0, 0, 0]);
+        assert_eq!(shore(8, 6), vec![1, 1, 1, 1], "a block east of the pillar");
+        assert_eq!(shore(8, 8), vec![2, 2, 2, 2], "diagonally a block from the pillar's corner");
+        // Sides and the bottom of the pond are not surfaces: no shore there.
+        assert!(m.translucent.vertices.iter().filter(|v| v.face_index() != Face::PosY as u32).all(|v| v.ao() == 3));
     }
 
     #[test]

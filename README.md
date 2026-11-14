@@ -7,7 +7,7 @@ A mobile-first voxel engine in Rust, in two crates:
   architecture lives here and is tested without a GPU.
 * the **app** (`app/`): the Android front-end. winit + wgpu renderer, touch controls and HUD.
 
-> **Status:** 103 unit + 9 end-to-end tests in the core and 78 in the app (plus WGSL
+> **Status:** 104 unit + 9 end-to-end tests in the core and 78 in the app (plus WGSL
 > validation) pass. The APK builds on GitHub Actions and has been run and measured on a phone
 > (see the numbers further down).
 
@@ -35,7 +35,7 @@ cargo run --release --bin headless   # stream, mesh, edit; prints stats + an ASC
 | `worldgen` | Deterministic terrain, pure function of (seed, chunk). Heights in **quarter-blocks**, so the surface ends in **half-slabs** (not under water: slabs aren't waterlogged yet). Caves, sea level, bedrock, `Column` heightmap + ground layer |
 | `terrain`, `climate`, `biome`, `noise` | Vintage Story-style world: continents, blended **landforms**, mountain chains; temperature from latitude and altitude, rainfall; biomes emerge from the climate (see "World generation") |
 | `world`, `save` | Procedural base + **edit journal** (undo/redo, tiny saves, delta sync). Versioned + CRC32 formats, atomic write-then-rename |
-| `mesh` | Padded 34³ snapshot (no locks), **8-byte packed vertices**, shape-aware face culling, per-vertex AO, 3 render layers, index-free quads |
+| `mesh` | Padded 36³ snapshot (no locks; two cells of each neighbour, the second for water shores), **8-byte packed vertices**, shape-aware face culling, per-vertex AO, 3 render layers, index-free quads |
 | `lod` | **Level-of-detail terrain** to the horizon: quadtree of sections built from the seed, mesher, streaming (see below) |
 | `behavior` | Event-driven blocks emitting commands (deterministic, budgeted). Example: falling sand |
 | `server`, `client`, `protocol` | **Client/server split even in singleplayer**; sim distance independent of view distance |
@@ -313,12 +313,18 @@ Next: trees and plants per biome, rivers, rain shadows behind mountains.
   `exp(sin x - 1)` (broad troughs, sharp crests), each turned by an angle that never lines up
   again, and each dragging the point the shorter ones are measured at by its own slope, so
   ripples bunch on the faces of the swell and no pattern repeats. Long waves travel faster
-  (deep-water speed). The surface is also warped by drifting noise, swell and chop come and go
+  than short ones, at a little under a quarter of deep-water speed (WAVE_SPEED), so the sea
+  moves slowly. The surface is also warped by drifting noise, swell and chop come and go
   in patches, and gusts roughen some areas. Up close, where water reflects little, ripples
   shade the body: facets tilted toward the sun's side are a little lighter, the others a little
   darker (same colour on average). A wave train fades out before it gets shorter than a few
   pixels on screen (which also ends the loop early far away), so far water is calm instead of
-  drawing moire rings. The surface sits 1/8 block (4 of 32 pixels) below the top of its block,
+  drawing moire rings.
+* **Shores:** the mesher codes, per corner of each water surface, how far the nearest block
+  standing in the water is (touching, one block, one diagonally, two or more), in the AO bits
+  water doesn't use. Along the shore the waves calm down over two blocks, and a band of foam
+  laps in and out against the blocks, ragged and broken into bubbles, with thin streaks of
+  froth further out, so the water meets the land instead of sliding past it. The surface sits 1/8 block (4 of 32 pixels) below the top of its block,
   like Minecraft's, so shores show a small lip; LOD water matches.
 * All textures are uploaded as one mipmapped texture array (averaged in linear light) and
   sampled with world-position coordinates, so greedy quads and LOD terrain repeat them once
