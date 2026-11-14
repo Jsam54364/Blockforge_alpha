@@ -23,6 +23,8 @@ serde_json = "1"
 
 [target.'cfg(target_os = "android")'.dependencies]
 winit = { version = "0.30", features = ["android-native-activity"] }
+# Reads the safe area from the Java activity (src/android.rs).
+jni = "0.21"
 
 [dev-dependencies]
 # Used by tests/shader.rs to validate the WGSL on the host, before the slow APK build.
@@ -62,7 +64,12 @@ target_sdk_version = 35
 [package.metadata.android.application]
 label = "Blockforge"
 icon = "@mipmap/ic_launcher"
+# The activity is a small Java subclass of NativeActivity (app/java), for immersive mode and
+# the safe area. cargo-apk does not compile Java: the Android workflow compiles it into
+# classes.dex and adds it to the APK before signing.
+has_code = true
 
 [package.metadata.android.application.activity]
+name = "com.blockforge.alpha.BlockforgeActivity"
 orientation = "landscape"
 config_changes = "orientation|keyboardHidden|screenSize|smallestScreenSize|screenLayout|uiMode|density"

@@ -25,9 +25,11 @@ pub const LOD_DISTANCES: [u32; 7] = [0, 1024, 2048, 4096, 8192, 16384, 32768];
 /// LOD quality steps: names and first-ring widths in blocks (see blockforge::lod).
 pub const LOD_QUALITY: [(&str, f32); 3] = blockforge::lod::LodSettings::QUALITY;
 
-/// Android draws the status bar over the top edge and the navigation bar over the right
-/// edge in landscape. These fixed insets come from a real phone's screenshots (status bar
-/// about 24dp, nav bar about 51dp). The proper fix is immersive mode or reading real insets.
+/// Margins for when the system does not say where its bars are (an APK without the Java
+/// activity, or before the first report): Android draws the status bar over the top edge and
+/// the navigation bar over the right edge in landscape, about 24dp and 51dp on a real phone.
+/// Normally the bars are hidden (immersive mode) and the HUD keeps clear of what the
+/// activity reports instead (`Ui::set_safe_area`).
 pub const SAFE_TOP_DP: f32 = 28.0;
 pub const SAFE_RIGHT_DP: f32 = 56.0;
 
@@ -282,6 +284,9 @@ pub struct Ui {
     pub hours: f64,
     size: (f32, f32),
     dp: f32,
+    /// How far the system bars and cut-out reach into each edge (left, top, right, bottom),
+    /// in pixels, as the system reports it; `None` = unknown (fixed margins, `SAFE_*_DP`).
+    safe: Option<[f32; 4]>,
     buttons: Vec<Button>,
 }
 
@@ -399,8 +404,19 @@ impl Ui {
             hours: crate::sky::START_HOUR,
             size: (1.0, 1.0),
             dp: 1.0,
+            safe: None,
             buttons: Vec::new(),
         }
+    }
+
+    /// The safe area from the system (see `safe`), or `None` to keep the fixed margins.
+    pub fn set_safe_area(&mut self, px: Option<[f32; 4]>) {
+        self.safe = px;
+    }
+
+    /// Left, top, right and bottom margins to keep the HUD in, in pixels.
+    fn margins(&self) -> [f32; 4] {
+        self.safe.unwrap_or([0.0, SAFE_TOP_DP * self.dp, SAFE_RIGHT_DP * self.dp, 0.0])
     }
 
     pub fn set_surface(&mut self, w: u32, h: u32, scale_factor: f64) {
@@ -498,10 +514,9 @@ impl Ui {
         rect(out, cx - th * 0.5, cy - len, th, len * 2.0, XHAIR);
 
         let margin = 8.0 * dp;
-        let safe_top = SAFE_TOP_DP * dp;
-        let safe_right = SAFE_RIGHT_DP * dp;
+        let [safe_left, safe_top, safe_right, _] = self.margins();
         if self.settings.show_stats {
-            self.draw_stats(perf, out, margin, safe_top + 4.0 * dp);
+            self.draw_stats(perf, out, safe_left + margin, safe_top + 4.0 * dp);
         }
 
         // Menu button (three bars), kept clear of the system bars
@@ -556,7 +571,7 @@ impl Ui {
         let right = menu_x + bs;
         // Bottom right: two rows of two.
         let (cw, ch) = (76.0 * dp, 52.0 * dp);
-        let bottom = h - 10.0 * dp;
+        let bottom = h - self.margins()[3] - 10.0 * dp;
         let pad: [[(&str, Action); 2]; 2] = [
             [("CROUCH", Action::Press("crouch")), ("CRAWL", Action::Press("crawl"))],
             [("ROLL", Action::Hold("roll")), ("JUMP", Action::Hold("jump"))],
@@ -792,9 +807,41 @@ mod tests {
             assert!(b.x + b.w <= 2400.0 - SAFE_RIGHT_DP * 2.75 + 0.5, "{:?} is under the nav bar", b.action);
         }
         // And it still fits on a portrait screen.
+        let landscape = u.buttons.len();
         u.set_surface(1080, 2400, 2.75);
         build(&mut u);
         assert!(u.buttons.iter().all(|b| b.x >= 0.0 && b.x + b.w <= 1080.0));
+        assert!(landscape > 10);
+    }
+
+    #[test]
+    fn the_hud_keeps_clear_of_the_safe_area_the_system_reports() {
+        let mut u = ui();
+        u.settings.walk = true;
+        u.settings.show_stats = true;
+        // Immersive mode with nothing in the way: the menu button moves into the corner.
+        u.set_safe_area(Some([0.0; 4]));
+        build(&mut u);
+        let menu = u.buttons.iter().find(|b| b.action == Action::ToggleMenu).unwrap();
+        assert!(menu.x + menu.w > 2400.0 - 20.0 * 2.75 && menu.y < 10.0 * 2.75, "{:?}", (menu.x, menu.y));
+        // A camera cut-out on the left and the gesture bar at the bottom.
+        let safe = [120.0, 0.0, 30.0, 70.0];
+        u.set_safe_area(Some(safe));
+        for acts in [false, true] {
+            u.acts_open = acts;
+            let out = build(&mut u);
+            for b in &u.buttons {
+                assert!(b.x >= safe[0] && b.y >= safe[1], "{:?}", b.action);
+                assert!(b.x + b.w <= 2400.0 - safe[2] && b.y + b.h <= 1080.0 - safe[3], "{:?}", b.action);
+            }
+            // The stats panel too (drawn first, from the top left).
+            assert!(out.iter().take(6).all(|v| v.pos[0] >= safe[0]));
+        }
+        // Unknown again: back to the fixed margins.
+        u.set_safe_area(None);
+        build(&mut u);
+        let menu = u.buttons.iter().find(|b| b.action == Action::ToggleMenu).unwrap();
+        assert!(menu.y >= SAFE_TOP_DP * 2.75 && menu.x + menu.w <= 2400.0 - SAFE_RIGHT_DP * 2.75);
     }
 
     #[test]

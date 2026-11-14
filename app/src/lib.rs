@@ -5,6 +5,8 @@
 //! before it spends time building the APK.
 #![allow(dead_code)]
 
+#[cfg(target_os = "android")]
+mod android;
 mod clouds;
 mod font;
 mod game;
@@ -37,6 +39,9 @@ pub struct App {
     game: game::Game,
     perf: perf::Perf,
     hud: Vec<ui::HudVertex>,
+    frames: u64,
+    #[cfg(target_os = "android")]
+    android_app: Option<winit::platform::android::activity::AndroidApp>,
 }
 
 impl App {
@@ -47,6 +52,20 @@ impl App {
             game: game::Game::new(save_dir),
             perf: perf::Perf::new(),
             hud: Vec::new(),
+            frames: 0,
+            #[cfg(target_os = "android")]
+            android_app: None,
+        }
+    }
+
+    /// Asks the activity how far the system bars and cut-out reach into the window, twice a
+    /// second (they change when the phone turns or the bars are swiped in).
+    fn update_safe_area(&mut self) {
+        #[cfg(target_os = "android")]
+        if self.frames % 30 == 1 {
+            if let Some(a) = &self.android_app {
+                self.game.ui.set_safe_area(android::safe_insets(a.vm_as_ptr(), a.activity_as_ptr()));
+            }
         }
     }
 }
@@ -112,6 +131,8 @@ impl ApplicationHandler for App {
             }
             WindowEvent::RedrawRequested => {
                 let frame_start = Instant::now();
+                self.frames += 1;
+                self.update_safe_area();
                 self.game.update();
                 let view_blocks = self.game.view_blocks();
                 self.perf.chunks = self.game.client.store.len();
@@ -176,11 +197,13 @@ fn android_main(app: winit::platform::android::activity::AndroidApp) {
     use winit::platform::android::EventLoopBuilderExtAndroid;
 
     let save_dir = app.internal_data_path();
+    let handle = app.clone();
     let event_loop = EventLoop::builder()
         .with_android_app(app)
         .build()
         .expect("could not create the event loop");
     event_loop.set_control_flow(ControlFlow::Poll);
     let mut state = App::new(save_dir);
+    state.android_app = Some(handle);
     event_loop.run_app(&mut state).expect("event loop failed");
 }

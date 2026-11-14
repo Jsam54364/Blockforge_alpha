@@ -7,7 +7,7 @@ A mobile-first voxel engine in Rust, in two crates:
   architecture lives here and is tested without a GPU.
 * the **app** (`app/`): the Android front-end. winit + wgpu renderer, touch controls and HUD.
 
-> **Status:** 114 unit + 9 end-to-end tests in the core and 81 in the app (plus WGSL
+> **Status:** 114 unit + 9 end-to-end tests in the core and 82 in the app (plus WGSL
 > validation) pass. The APK builds on GitHub Actions and has been run and measured on a phone
 > (see the numbers further down).
 
@@ -116,9 +116,16 @@ from underwater). Tests prove every face is wound counter-clockwise from outside
 mesher and after projection (`mesh.rs`, `gfx.rs`). Flying inside solid rock therefore looks
 see-through, as in any voxel game.
 
-The HUD keeps clear of Android's status bar (top) and navigation bar (right, in landscape) using
-fixed insets measured from a real phone (`SAFE_TOP_DP`, `SAFE_RIGHT_DP` in `ui.rs`). Immersive
-mode or real inset queries would replace these.
+**Immersive mode and the safe area.** The activity is a small Java subclass of NativeActivity
+(`app/java/com/blockforge/alpha/BlockforgeActivity.java`; cargo-apk does not compile Java, so
+the Android workflow compiles it with `javac` and `d8` into `classes.dex` and adds it to the APK
+before aligning and signing). On the UI thread, where Android requires it, it hides the status
+and navigation bars (they come back for a moment when swiped in from an edge, and hide again),
+lets the game draw beside a camera cut-out, and keeps the screen on. It also records how far the
+bars and cut-out still reach into each edge, which the game reads through JNI twice a second
+(`src/android.rs`) and keeps the HUD inside (`Ui::set_safe_area`). If that cannot be read (an
+APK built without the Java part), the HUD falls back to fixed margins measured from a real
+phone (`SAFE_TOP_DP`, `SAFE_RIGHT_DP` in `ui.rs`).
 
 Culling: back faces (solid terrain only), a real six-plane frustum test per chunk bounding
 box (`math::Frustum`, tested to never reject a visible box), and occlusion culling of chunks
@@ -492,4 +499,6 @@ Also texture repeat across merged quads.
 1. Flip the default mesher to GREEDY once it has been checked on a phone (the menu choice is
    now remembered, so switching it once is enough to keep testing it); then try one instance
    per quad (8 bytes) on a phone. (The faster per-face scan is done.)
-2. Immersive mode / real window insets instead of the fixed HUD insets.
+2. Measure on a phone what occlusion culling, the vertex pool and the faster scan buy (CULL
+   ALL vs NOCAVE, the GPU and MAIN THREAD lines), and check immersive mode on a phone with a
+   camera cut-out and one with 3-button navigation.
