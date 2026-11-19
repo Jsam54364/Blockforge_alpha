@@ -314,7 +314,7 @@ fn settings_take_effect_at_once_and_lead_back() {
             &[Action::ToggleWalk, Action::ToggleView, Action::ToggleStats],
             &[Action::RenderDist(1), Action::RenderDist(-1), Action::LodDist(1), Action::CycleLodQuality, Action::ToggleFog, Action::ToggleClouds, Action::ToggleRays, Action::ToggleVsync],
             &[Action::CycleCull, Action::ToggleMesher],
-            &[Action::OpenControls, Action::HudOpacity(1), Action::LookSpeed(-1), Action::JoySize(1)],
+            &[Action::OpenControls, Action::HudOpacity(1), Action::LookSpeed(-1), Action::JoySize(1), Action::ToggleTouchBuild, Action::ToggleOneStance],
         ];
         for (t, actions) in expect.iter().enumerate() {
             tap(&mut u, Action::Tab(t as u8));
@@ -516,7 +516,8 @@ fn the_controls_editor_moves_resizes_hides_and_adds_controls() {
         check_layout(&mut u, wf, hf);
         // Every control is there to grab, the walking ones too.
         let grabs = u.buttons.iter().filter(|b| matches!(b.action, Action::CtlGrab(_))).count();
-        assert_eq!(grabs, CONTROLS.iter().filter(|c| c.shown).count());
+        // (all but the one stance button, which stands in for three when that is set)
+        assert_eq!(grabs, CONTROLS.iter().filter(|c| c.shown && c.key != "stance").count());
         // Nothing to resize or hide until one is picked.
         assert!(!has(&u, Action::CtlSize(1)) && !has(&u, Action::CtlHide));
         // Drag ATTACK to the middle of the screen.
@@ -594,6 +595,50 @@ fn the_controls_editor_moves_resizes_hides_and_adds_controls() {
 }
 
 #[test]
+fn one_stance_button_stands_in_for_crouch_crawl_and_roll() {
+    for (w, h) in SIZES {
+        let (wf, hf) = (w as f32, h as f32);
+        let mut u = hud(w, h, true);
+        build(&mut u);
+        assert!(!has(&u, Action::Hold("stance")));
+        u.screen = Screen::Settings;
+        u.tab = 3;
+        build(&mut u);
+        tap(&mut u, Action::ToggleOneStance);
+        assert!(u.settings.one_stance);
+        u.screen = Screen::Playing;
+        check_layout(&mut u, wf, hf);
+        let b = find(&u, Action::Hold("stance"));
+        assert!(b.w >= 40.0 * 2.75 && b.h >= 40.0 * 2.75);
+        // HUD buttons act on the touch: the game times the taps and the hold.
+        assert_eq!(u.press(1, b.x + b.w * 0.5, b.y + b.h * 0.5), Some(Action::Hold("stance")));
+        for a in [Action::Press("crouch"), Action::Press("crawl"), Action::Hold("roll")] {
+            assert!(!has(&u, a), "{a:?} still shows");
+        }
+        // Not while flying.
+        u.settings.walk = false;
+        build(&mut u);
+        assert!(!has(&u, Action::Hold("stance")));
+        // The editor shows the stance button, not the three; ADD doesn't offer them either.
+        u.settings.walk = true;
+        u.apply(Action::OpenControls);
+        u.apply(Action::CtlAddList);
+        check_layout(&mut u, wf, hf);
+        let at = |k: &str| CONTROLS.iter().position(|c| c.key == k).unwrap() as u8;
+        assert!(has(&u, Action::CtlGrab(at("stance"))));
+        for k in ["roll", "crouch", "crawl"] {
+            assert!(!has(&u, Action::CtlGrab(at(k))) && !has(&u, Action::CtlShow(at(k))));
+        }
+        // Back to three buttons.
+        u.settings.one_stance = false;
+        u.screen = Screen::Playing;
+        build(&mut u);
+        find(&u, Action::Press("crouch"));
+        assert!(!has(&u, Action::Hold("stance")));
+    }
+}
+
+#[test]
 fn a_damaged_controls_file_still_gives_a_layout() {
     let l = Layout::from_text("attack=0.5,0.5,9.0,1\nplace=-,-,0.1,0\npause=0.2,0.2,1.0,0\nnope=1,1,1,1\njump=banana\nwave=x,y,1.0,1\n");
     let at = |k: &str| CONTROLS.iter().position(|c| c.key == k).unwrap();
@@ -666,6 +711,8 @@ fn settings_survive_a_round_trip_through_text() {
         hud_opacity: 50,
         look_speed: 8,
         joy_size: 2,
+        touch_build: true,
+        one_stance: true,
     };
     let mut back = Settings::default();
     back.apply_text(&s.to_text());

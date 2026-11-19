@@ -171,7 +171,8 @@ Settings has four groups, as tabs on the left of one big frame: General (walk or
 camera: first person, behind or in front, stats on/off, and the time of day when opened from a
 world), Video (render distance 2-12 chunks, LOD distance OFF, 1K ... 32K blocks, LOD quality, fog,
 clouds, god rays, VSync), Performance (culling, mesher) and Controls (the button layout editor,
-below; button opacity 30-100%, look sensitivity 1-10, the stick's size). The group's settings
+below; button opacity 30-100%, look sensitivity 1-10, the stick's size, Building: Buttons or
+Touch + Buttons, and Crouch, Crawl, Roll: Three Buttons or One Button). The group's settings
 are in the middle, with arrows to step values and switches; on the right a note on what the group
 is about over a sepia picture (a group with more than five settings uses that room for a second
 column instead). Changes take effect at once (a new render distance goes to the server straight
@@ -213,6 +214,16 @@ and quads drawn. The HUD and menus are drawn by a small immediate-mode layer (`u
   cubes drawn on the CPU from each block's own textures when the renderer starts, kept in
   the bottom of the world-thumbnails texture.
 * **Jump, Roll, Crouch, Crawl, Act** (walking only), and **Pause**.
+* **Building by touch** (optional, Settings > Controls > Building: Touch + Buttons): on the
+  look side of the screen, a quick tap that doesn't drag places the hotbar's block where you
+  look, or uses the block if it can be used (a block whose behaviour says `usable()`; the server
+  gets `UseBlock` and the behaviour's `on_used` runs; no built-in block is usable yet). Pressing
+  and holding still for 0.35 s digs, the same as holding Attack (chop after chop), until the
+  finger lifts; a drag is only looking. The Attack and Place buttons still work.
+* **One stance button** (optional, Settings > Controls > Crouch, Crawl, Roll: One Button):
+  Crouch, Crawl and Roll become one button. A tap crouches (or stands up), holding it for
+  0.35 s crawls (or stands up from crawling), and two quick taps (within 0.28 s) roll. A single
+  tap waits that long before crouching, so a double tap never crouches first.
 * **Layout editor** (Settings > Controls > Button Layout): every control is outlined and can be
   dragged anywhere on screen; tap one to pick it, then make it smaller or bigger (50-200%) or
   hide it. Add puts hidden controls back, including extras that start hidden: Camera, Use,

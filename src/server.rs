@@ -314,6 +314,13 @@ impl Server {
                     }
                 }
             }
+            ClientMsg::UseBlock { pos } => {
+                if let Some(s) = self.world.get_block(pos) {
+                    if self.behaviors.has(s.id()) {
+                        self.events.push_back((pos, BlockEvent::Used(s)));
+                    }
+                }
+            }
             ClientMsg::Undo => {
                 if let Some(e) = self.world.undo() {
                     self.after_edit(e);
@@ -437,6 +444,7 @@ impl Server {
                     BlockEvent::Broken(s) => b.on_broken(&mut ctx, pos, s),
                     BlockEvent::NeighborChanged(s) => b.on_neighbor_changed(&mut ctx, pos, s),
                     BlockEvent::Tick(s) => b.on_tick(&mut ctx, pos, s),
+                    BlockEvent::Used(s) => b.on_used(&mut ctx, pos, s),
                 }
             }
             self.stats.events_processed += 1;

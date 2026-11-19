@@ -127,6 +127,11 @@ pub struct Settings {
     pub look_speed: u8,
     /// The stick's size: an index into `controls::JOY_RADII`.
     pub joy_size: u8,
+    /// Building by touching the world as well as with the buttons: hold to dig, tap to place
+    /// a block (or to use a block that can be used).
+    pub touch_build: bool,
+    /// One button for crouch (tap), crawl (hold) and roll (double tap), instead of three.
+    pub one_stance: bool,
 }
 
 pub const OPACITY_MIN: u8 = 30;
@@ -188,6 +193,8 @@ impl Default for Settings {
             hud_opacity: 85,
             look_speed: 5,
             joy_size: 1,
+            touch_build: false,
+            one_stance: false,
         }
     }
 }
@@ -196,7 +203,7 @@ impl Settings {
     /// `key=value` lines, one per setting, for the settings file kept between launches.
     pub fn to_text(&self) -> String {
         format!(
-            "render_chunks={}\nlod_level={}\nlod_quality={}\nfog={}\ncull={}\nvsync={}\ngreedy={}\nshow_stats={}\nclouds={}\ngod_rays={}\nwalk={}\nview={}\nhud_opacity={}\nlook_speed={}\njoy_size={}\n",
+            "render_chunks={}\nlod_level={}\nlod_quality={}\nfog={}\ncull={}\nvsync={}\ngreedy={}\nshow_stats={}\nclouds={}\ngod_rays={}\nwalk={}\nview={}\nhud_opacity={}\nlook_speed={}\njoy_size={}\ntouch_build={}\none_stance={}\n",
             self.render_chunks,
             self.lod_level,
             self.lod_quality,
@@ -211,7 +218,9 @@ impl Settings {
             self.view.key(),
             self.hud_opacity,
             self.look_speed,
-            self.joy_size
+            self.joy_size,
+            self.touch_build,
+            self.one_stance
         )
     }
 
@@ -230,6 +239,14 @@ impl Settings {
                 "view" => {
                     if let Some(v) = CamView::from_key(value) {
                         self.view = v;
+                    }
+                }
+                "touch_build" | "one_stance" => {
+                    let Ok(v) = value.parse::<bool>() else { continue };
+                    if key == "touch_build" {
+                        self.touch_build = v;
+                    } else {
+                        self.one_stance = v;
                     }
                 }
                 "hud_opacity" | "look_speed" | "joy_size" => {
@@ -344,6 +361,8 @@ pub enum Action {
     HudOpacity(i8),
     LookSpeed(i8),
     JoySize(i8),
+    ToggleTouchBuild,
+    ToggleOneStance,
     /// Opens the controls editor; its toolbar: bigger or smaller, hide, the list of hidden
     /// controls, put one back, everything back where it was, and done.
     OpenControls,
@@ -821,6 +840,14 @@ impl Ui {
             | Action::CtlReset
             | Action::CtlDone => {
                 self.apply_controls(a);
+                false
+            }
+            Action::ToggleTouchBuild => {
+                self.settings.touch_build = !self.settings.touch_build;
+                false
+            }
+            Action::ToggleOneStance => {
+                self.settings.one_stance = !self.settings.one_stance;
                 false
             }
             Action::HudOpacity(d) => {

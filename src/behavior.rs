@@ -23,6 +23,8 @@ pub enum BlockEvent {
     Broken(BlockState),
     NeighborChanged(BlockState),
     Tick(BlockState),
+    /// A player used (tapped or interacted with) the block.
+    Used(BlockState),
 }
 
 impl BlockEvent {
@@ -31,7 +33,8 @@ impl BlockEvent {
             BlockEvent::Placed(s)
             | BlockEvent::Broken(s)
             | BlockEvent::NeighborChanged(s)
-            | BlockEvent::Tick(s) => s,
+            | BlockEvent::Tick(s)
+            | BlockEvent::Used(s) => s,
         }
     }
 }
@@ -78,6 +81,13 @@ pub trait BlockBehavior: Send + Sync {
     fn on_broken(&self, _ctx: &mut BehaviorCtx<'_>, _pos: BlockPos, _state: BlockState) {}
     fn on_neighbor_changed(&self, _ctx: &mut BehaviorCtx<'_>, _pos: BlockPos, _state: BlockState) {}
     fn on_tick(&self, _ctx: &mut BehaviorCtx<'_>, _pos: BlockPos, _state: BlockState) {}
+    /// A player used the block (a door would open, a chest show what is in it).
+    fn on_used(&self, _ctx: &mut BehaviorCtx<'_>, _pos: BlockPos, _state: BlockState) {}
+    /// Whether using the block does anything: the client then uses it on a tap instead of
+    /// placing a block against it.
+    fn usable(&self) -> bool {
+        false
+    }
 }
 
 /// Gravity block (sand, gravel): falls one cell per two ticks until it lands.
@@ -144,6 +154,11 @@ impl BehaviorTable {
     pub fn has(&self, id: u16) -> bool {
         matches!(self.by_id.get(id as usize), Some(Some(_)))
     }
+
+    /// Whether a block with this id does something when used.
+    pub fn usable(&self, id: u16) -> bool {
+        self.get(id).is_some_and(|b| b.usable())
+    }
 }
 
 #[cfg(test)]
@@ -157,6 +172,30 @@ mod tests {
         let t = BehaviorTable::builtin(&reg).unwrap();
         assert!(t.has(reg.id("sand").unwrap()));
         assert!(!t.has(reg.id("stone").unwrap()));
+    }
+
+    #[test]
+    fn usable_blocks_are_the_ones_whose_behaviour_says_so() {
+        struct Lever;
+        impl BlockBehavior for Lever {
+            fn usable(&self) -> bool {
+                true
+            }
+        }
+        let reg = BlockRegistry::from_toml(
+            "[[block]]\nname = \"air\"\n[[block]]\nname = \"lever\"\nbehavior = \"lever\"\n[[block]]\nname = \"sand\"\nbehavior = \"falling\"\n[[block]]\nname = \"stone\"\n",
+        )
+        .unwrap();
+        let mut named: HashMap<String, Arc<dyn BlockBehavior>> = HashMap::new();
+        named.insert("lever".into(), Arc::new(Lever));
+        named.insert("falling".into(), Arc::new(Falling));
+        let t = BehaviorTable::build(&reg, &named).unwrap();
+        assert!(t.usable(1));
+        assert!(!t.usable(2) && !t.usable(3) && !t.usable(99));
+        // Nothing in the game's own blocks is usable yet: a tap places against all of them.
+        let game = BlockRegistry::builtin();
+        let t = BehaviorTable::builtin(&game).unwrap();
+        assert!((0..game.len() as u16).all(|id| !t.usable(id)));
     }
 
     #[test]

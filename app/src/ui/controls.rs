@@ -48,7 +48,7 @@ const fn ctl(key: &'static str, name: &'static str, look: Look, size: (f32, f32)
 }
 
 /// Every control, in drawing order.
-pub const CONTROLS: [Control; 17] = [
+pub const CONTROLS: [Control; 18] = [
     ctl("hotbar", "Hotbar", Look::Hotbar, HOTBAR_DP, "", None, Action::Nothing, false, true),
     ctl("attack", "Attack", Look::Round, (82.0, 82.0), "", Some("@pickaxe"), Action::Hold("attack"), false, true),
     ctl("place", "Place", Look::Round, (64.0, 64.0), "", Some("@block"), Action::Hold("place"), false, true),
@@ -56,6 +56,9 @@ pub const CONTROLS: [Control; 17] = [
     ctl("roll", "Roll", Look::Square, (64.0, 40.0), "Roll", None, Action::Hold("roll"), true, true),
     ctl("crouch", "Crouch", Look::Square, (64.0, 40.0), "Crouch", None, Action::Press("crouch"), true, true),
     ctl("crawl", "Crawl", Look::Square, (64.0, 40.0), "Crawl", None, Action::Press("crawl"), true, true),
+    // Instead of the three above when the setting asks for one button: tap to crouch, hold to
+    // crawl, double tap to roll.
+    ctl("stance", "Crouch / Crawl / Roll", Look::Square, (72.0, 44.0), "Crouch", None, Action::Hold("stance"), true, true),
     ctl("act", "Act", Look::Square, (76.0, 48.0), "Act", None, Action::ToggleActs, true, true),
     Control { key: "pause", name: "Pause", look: Look::Square, size: (48.0, 48.0), label: "", icon: Some("pause"), action: Action::Open(Screen::Pause), walk: false, shown: true, keep: true },
     // Extras: the editor's ADD puts them on screen.
@@ -165,7 +168,7 @@ impl Ui {
             "jump" => at(36.0, 36.0),
             "attack" => at(123.0, 47.0),
             "place" => at(36.0, 118.0),
-            "roll" => at(123.0, 118.0),
+            "roll" | "stance" => at(123.0, 118.0),
             "crouch" => at(123.0, 166.0),
             "crawl" => at(36.0, 178.0),
             "hotbar" => {
@@ -179,7 +182,8 @@ impl Ui {
             }
             _ => {
                 // Extras: a row across the middle, where the editor shows them first.
-                let k = i.saturating_sub(9) as f32;
+                let first = CONTROLS.iter().position(|c| c.key == "view").unwrap_or(0);
+                let k = i.saturating_sub(first) as f32;
                 (w * 0.5 + (k % 4.0 - 1.5) * 76.0 * dp, h * 0.42 + (k / 4.0).floor() * 52.0 * dp, 1.0)
             }
         }
@@ -202,7 +206,17 @@ impl Ui {
 
     /// Whether control `i` is on screen now (walk-only ones need the character).
     fn control_visible(&self, i: usize) -> bool {
-        self.layout.places[i].shown && (!CONTROLS[i].walk || self.settings.walk)
+        self.layout.places[i].shown && (!CONTROLS[i].walk || self.settings.walk) && self.stance_fits(i)
+    }
+
+    /// Whether control `i` belongs to the stance setting in force: the three buttons, or the
+    /// one that does all three.
+    fn stance_fits(&self, i: usize) -> bool {
+        match CONTROLS[i].key {
+            "roll" | "crouch" | "crawl" => !self.settings.one_stance,
+            "stance" => self.settings.one_stance,
+            _ => true,
+        }
     }
 
     /// The icon slot of the block with this id (`gfx::icon_uv`).
@@ -364,7 +378,7 @@ impl Ui {
         rect(out, 0.0, 0.0, w, h, [0, 0, 0, if self.over_world() { 70 } else { 110 }]);
         draw::centered(out, Serif, "Drag a control to move it. Pick one to resize or hide it.", (sl + w - sr) * 0.5, h * 0.62, 17.0 * dp, DIM, true);
         for i in 0..CONTROLS.len() {
-            if !self.layout.places[i].shown {
+            if !self.layout.places[i].shown || !self.stance_fits(i) {
                 continue;
             }
             let [x, y, cw, ch] = self.control_rect(i);
@@ -443,7 +457,7 @@ impl Ui {
     /// The hidden controls, for ADD to put back on screen.
     fn draw_add_list(&mut self, out: &mut Vec<HudVertex>, cx: f32, top: f32) {
         let dp = self.dp;
-        let hidden: Vec<usize> = (0..CONTROLS.len()).filter(|&i| !self.layout.places[i].shown).collect();
+        let hidden: Vec<usize> = (0..CONTROLS.len()).filter(|&i| !self.layout.places[i].shown && self.stance_fits(i)).collect();
         let (bw, bh, gap, pad) = (110.0 * dp, 38.0 * dp, 6.0 * dp, 10.0 * dp);
         let (w, _) = self.size;
         let [sl, _, sr, _] = self.margins();

@@ -42,7 +42,7 @@ pub const TABS: [(&str, &str, &str); 4] = [
     ("General", "monitor", "How you get about and what you see of the game: walking or flying, the camera, the stats overlay and the time of day."),
     ("Video", "image", "How far and how finely the world is drawn, and its sky: fog, clouds and god rays. Turn these down if the game runs slowly."),
     ("Performance", "speed", "What the renderer leaves out and how it builds the terrain. The defaults suit most phones."),
-    ("Controls", "touch_app", "The buttons on the screen: where they are and how big (Customize), how solid they look, how fast dragging turns the view, and the stick's size."),
+    ("Controls", "touch_app", "The buttons on the screen: where they are and how big, how solid they look, how fast dragging turns the view, the stick's size, building by touch, and one button for crouch, crawl and roll."),
 ];
 
 /// One setting on the settings page.
@@ -783,6 +783,14 @@ impl Ui {
                 ("Button Opacity", Control::Stepper(format!("{}%", s.hud_opacity), Action::HudOpacity(-1), Action::HudOpacity(1))),
                 ("Look Sensitivity", Control::Stepper(s.look_speed.to_string(), Action::LookSpeed(-1), Action::LookSpeed(1))),
                 ("Joystick Size", Control::Stepper(super::controls::JOY_SIZES[s.joy_size as usize % 3].into(), Action::JoySize(-1), Action::JoySize(1))),
+                (
+                    "Building",
+                    Control::Stepper(if s.touch_build { "Touch + Buttons".into() } else { "Buttons".into() }, Action::ToggleTouchBuild, Action::ToggleTouchBuild),
+                ),
+                (
+                    "Crouch, Crawl, Roll",
+                    Control::Stepper(if s.one_stance { "One Button".into() } else { "Three Buttons".into() }, Action::ToggleOneStance, Action::ToggleOneStance),
+                ),
             ],
         };
         // With many settings the note on the right gives way to a second column.

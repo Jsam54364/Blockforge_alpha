@@ -16,6 +16,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use blockforge::behavior::BehaviorTable;
 use blockforge::block::BlockState;
 use blockforge::client::Client;
 use blockforge::coords::{BlockPos, CHUNK_SIZE};
@@ -46,6 +47,16 @@ const CHOP_EVERY: Duration = Duration::from_millis(900);
 /// PLACE held: the first repeat after this, then one every `PLACE_EVERY`.
 const PLACE_FIRST: Duration = Duration::from_millis(400);
 const PLACE_EVERY: Duration = Duration::from_millis(220);
+/// Building by touch: a touch on the world held this long without moving digs; one that
+/// lifts sooner without moving is a tap (place, or use). Moving further than `DRAG_PIXELS`
+/// dp makes it a look.
+const DIG_AFTER: Duration = Duration::from_millis(350);
+const DRAG_DP: f32 = 8.0;
+/// The one stance button: held this long it crawls; a second tap this soon after the first
+/// rolls (so a single tap's crouch waits that long to be sure).
+const CRAWL_AFTER: Duration = Duration::from_millis(350);
+const DOUBLE_TAP: Duration = Duration::from_millis(280);
+const ROLL_PULSE: Duration = Duration::from_millis(200);
 /// How long the stick takes to fade out after the thumb lifts.
 const JOY_FADE: f32 = 0.25;
 /// The left part of the screen where a touch is the stick (elsewhere it looks around).
@@ -135,9 +146,23 @@ fn saved_player(text: &str) -> Option<[f64; 3]> {
 
 struct TouchInfo {
     last: (f32, f32),
-    /// For the stick: where its ring is (it follows the thumb past its edge).
+    /// For the stick: where its ring is (where the thumb landed).
     base: (f32, f32),
     stick: bool,
+    /// Where and when it started, whether it has moved far enough to be a look, and whether
+    /// it is digging (building by touch).
+    start: (f32, f32),
+    t0: Instant,
+    moved: bool,
+    digging: bool,
+}
+
+/// The one stance button held: by which touch, since when, and whether it has already done
+/// something (crawled, or rolled on a double tap) so letting go does nothing more.
+struct Stance {
+    touch: u64,
+    since: Instant,
+    done: bool,
 }
 
 /// ATTACK being held: by which touch, since when, and when the next chop starts.
@@ -213,6 +238,13 @@ pub struct Game {
     chop_lands: Option<Instant>,
     placing: Option<(u64, Instant)>,
     joy_last: Option<(Joy, Instant)>,
+    /// The one stance button: held now; a tap's crouch waiting to see if a second tap (a roll)
+    /// follows; a roll under way.
+    stance: Option<Stance>,
+    crouch_at: Option<Instant>,
+    roll_until: Option<Instant>,
+    /// Which blocks do something when used (a tap uses them instead of building on them).
+    behaviors: Option<BehaviorTable>,
     /// The character (he stands where he was left while the camera flies).
     pub player: Player,
     /// Whether the last frame was in walk mode (to notice the switch).
@@ -226,6 +258,7 @@ pub struct Game {
 impl Game {
     /// Opens `world`, taking over the app's `ui` (with its settings) until `close`.
     pub fn new(world: WorldSpec, mut ui: Ui, registry: Arc<BlockRegistry>) -> Game {
+        let behaviors = BehaviorTable::builtin(&registry).ok();
 
         // Pick up where the last session in this world stopped: camera, player and time.
         let state_path = world.dir.as_ref().map(|d| d.join(STATE_FILE));
@@ -287,6 +320,10 @@ impl Game {
             chop_lands: None,
             placing: None,
             joy_last: None,
+            stance: None,
+            crouch_at: None,
+            roll_until: None,
+            behaviors,
             player,
             walking: ui_walk,
             held: HashMap::new(),
@@ -445,6 +482,29 @@ impl Game {
                 self.client.break_block(hit.pos);
             }
         }
+        // The one stance button: held long enough, crawl; a tap's crouch once no second tap
+        // came.
+        if let Some(s) = &mut self.stance {
+            if !s.done && now.duration_since(s.since) >= CRAWL_AFTER {
+                s.done = true;
+                self.player.press("crawl");
+            }
+        }
+        if self.crouch_at.is_some_and(|t| now >= t) {
+            self.crouch_at = None;
+            self.player.press("crouch");
+        }
+        if self.roll_until.is_some_and(|t| now >= t) {
+            self.roll_until = None;
+        }
+        // Building by touch: a still finger on the world digs once held long enough.
+        if self.ui.settings.touch_build && self.attack.is_none() {
+            if let Some((&id, t)) = self.touches.iter_mut().find(|(_, t)| !t.stick && !t.moved && !t.digging && now.duration_since(t.t0) >= DIG_AFTER) {
+                t.digging = true;
+                // As ATTACK held past a punch: a chop now, landing and repeating.
+                self.attack = Some(Attack { touch: id, since: now - HEAVY_AFTER, next_chop: None });
+            }
+        }
         if let Some((touch, next)) = self.placing {
             if now >= next {
                 self.place_target();
@@ -467,6 +527,30 @@ impl Game {
         }
         if self.placing.is_some_and(|(t, _)| t == id) {
             self.placing = None;
+        }
+        if let Some(s) = self.stance.take_if(|s| s.touch == id) {
+            if !s.done {
+                // A tap: crouch, unless a second tap comes soon and makes it a roll.
+                self.crouch_at = Some(Instant::now() + DOUBLE_TAP);
+            }
+        }
+    }
+
+    /// A tap on the world while building by touch: use the block if it can be used, else put
+    /// the hotbar's block against it.
+    fn tap_world(&mut self) {
+        let usable = |g: &Game, pos: BlockPos| {
+            g.client.block_at(pos).is_some_and(|s| g.behaviors.as_ref().is_some_and(|b| b.usable(s.id())))
+        };
+        match self.target() {
+            Some(hit) if usable(self, hit.pos) => {
+                self.client.use_block(hit.pos);
+                if self.ui.settings.walk {
+                    self.player.press("interact");
+                }
+            }
+            Some(_) => self.place_target(),
+            None => {}
         }
     }
 
@@ -506,7 +590,7 @@ impl Game {
         self.update_joystick(now);
         self.update_buttons(now);
         self.player.jump = self.held.values().any(|b| *b == "jump");
-        self.player.roll = self.held.values().any(|b| *b == "roll");
+        self.player.roll = self.held.values().any(|b| *b == "roll") || self.roll_until.is_some_and(|t| now < t);
         let eye = self.player.update(&self.client, dt as f64, (strafe, forward), look, aspect, walk, cam_view == CamView::Front);
         if walk {
             self.cam.pos = eye;
@@ -531,6 +615,15 @@ impl Game {
             Action::Hold("place") => {
                 self.place_target();
                 self.placing = Some((id, Instant::now() + PLACE_FIRST));
+            }
+            Action::Hold("stance") => {
+                let now = Instant::now();
+                // A second tap soon after a first: roll (and forget the first tap's crouch).
+                let rolled = self.crouch_at.take().is_some();
+                if rolled {
+                    self.roll_until = Some(now + ROLL_PULSE);
+                }
+                self.stance = Some(Stance { touch: id, since: now, done: rolled });
             }
             Action::Hold(button) => {
                 self.held.insert(id, button);
@@ -558,6 +651,7 @@ impl Game {
             self.ui_touches.clear();
             self.attack = None;
             self.placing = None;
+            self.stance = None;
             if screen_before == Screen::Settings {
                 self.save_state(); // keeps what was applied
             }
@@ -608,16 +702,20 @@ impl Game {
                 let stick = x < w * STICK_ZONE && !self.touches.values().any(|t| t.stick);
                 let r = self.stick_radius();
                 let base = if stick { (x.clamp(r, (w - r).max(r)), y.clamp(r, (h - r).max(r))) } else { (x, y) };
-                self.touches.insert(id, TouchInfo { last: (x, y), base, stick });
+                self.touches.insert(id, TouchInfo { last: (x, y), base, stick, start: (x, y), t0: Instant::now(), moved: false, digging: false });
                 // A touch elsewhere closes the action grid.
                 self.ui.acts_open = false;
             }
             TouchPhase::Moved => {
                 let look = LOOK_SENS * (0.25 + 0.15 * self.ui.settings.look_speed as f32);
+                let drag = DRAG_DP * self.ui.dp_scale();
                 if let Some(t) = self.touches.get_mut(&id) {
                     let dx = x - t.last.0;
                     let dy = y - t.last.1;
                     t.last = (x, y);
+                    if (x - t.start.0).hypot(y - t.start.1) > drag {
+                        t.moved = true;
+                    }
                     // The stick's ring stays where the thumb first landed.
                     if !t.stick {
                         self.cam.yaw -= dx * look;
@@ -626,7 +724,16 @@ impl Game {
                 }
             }
             TouchPhase::Ended | TouchPhase::Cancelled => {
-                self.touches.remove(&id);
+                if let Some(t) = self.touches.remove(&id) {
+                    if t.digging {
+                        // Stop digging (a chop already on its way still lands).
+                        if self.attack.as_ref().is_some_and(|a| a.touch == id) {
+                            self.attack = None;
+                        }
+                    } else if self.ui.settings.touch_build && !t.stick && !t.moved && phase == TouchPhase::Ended && t.t0.elapsed() < DIG_AFTER {
+                        self.tap_world();
+                    }
+                }
             }
         }
     }
@@ -796,6 +903,123 @@ mod tests {
         assert!(g.state_text().contains("hotbar=stone,dirt,grass,glowstone,"), "{}", g.state_text());
         let (bar, slot) = saved_hotbar(&g.state_text(), &reg, &g.ui.blocks);
         assert_eq!((bar, slot), (g.ui.hotbar, 3));
+    }
+
+    /// A world in memory around seed 1337's spawn, loaded, with the HUD laid out.
+    fn loaded_game(walk: bool) -> Game {
+        let reg = Arc::new(BlockRegistry::builtin());
+        let mut ui = Ui::new();
+        ui.screen = Screen::Playing;
+        ui.settings.render_chunks = 2;
+        ui.settings.walk = walk;
+        let mut g = Game::new(WorldSpec { dir: None, seed: 1337, settings_path: None }, ui, reg);
+        g.set_surface(2400, 1080, 2.75);
+        g.ui.build(&crate::perf::Perf::new(), &mut Vec::new());
+        g
+    }
+
+    fn run_until(g: &mut Game, what: &str, secs: f32, done: &dyn Fn(&Game) -> bool) {
+        let t = Instant::now();
+        while !done(g) {
+            assert!(t.elapsed().as_secs_f32() < secs, "timed out waiting for {what}");
+            g.update();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    fn run_for(g: &mut Game, secs: f32) {
+        let t = Instant::now();
+        while t.elapsed().as_secs_f32() < secs {
+            g.update();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn building_by_touch_taps_to_place_and_holds_to_dig() {
+        let mut g = loaded_game(false);
+        g.ui.settings.touch_build = true;
+        let [x, _, z] = g.gen.find_spawn();
+        let (x, z) = (x.floor() as i32 + 6, z.floor() as i32);
+        let ground = g.gen.describe(x, z).height;
+        g.cam = CameraView { pos: [x as f32 + 0.5, ground + 4.0, z as f32 + 0.5], yaw: 0.0, pitch: -std::f32::consts::FRAC_PI_2 + 0.001 };
+        run_until(&mut g, "the ground below", 20.0, &|g| g.target().is_some());
+        let hit = g.target().unwrap();
+        let cell = hit.pos.neighbor(hit.face);
+        // A tap on the world (the look side, away from every button) places the hotbar's block.
+        let (tx, ty) = (1500.0, 420.0);
+        assert!(g.ui.hit(tx, ty).is_none());
+        g.touch(1, TouchPhase::Started, tx, ty);
+        g.touch(1, TouchPhase::Ended, tx, ty);
+        run_until(&mut g, "the placed block", 5.0, &|g| g.client.is_solid(cell));
+        // A drag is a look: nothing is built.
+        let yaw = g.cam.yaw;
+        g.touch(2, TouchPhase::Started, tx, ty);
+        g.touch(2, TouchPhase::Moved, tx + 60.0, ty);
+        g.touch(2, TouchPhase::Ended, tx + 60.0, ty);
+        assert!(g.cam.yaw != yaw);
+        g.cam.yaw = yaw;
+        run_for(&mut g, 0.3);
+        assert_eq!(g.target().map(|h| h.pos), Some(cell), "the drag placed nothing on top");
+        // Held still: after a moment it digs, and keeps digging.
+        g.touch(3, TouchPhase::Started, tx, ty);
+        run_for(&mut g, 0.2);
+        assert!(g.client.is_solid(cell), "not yet");
+        run_until(&mut g, "the dig", 5.0, &|g| !g.client.is_solid(cell));
+        run_until(&mut g, "the next block", 5.0, &|g| g.target().is_some_and(|h| h.pos != cell));
+        let below = g.target().unwrap().pos;
+        run_until(&mut g, "the second dig", 5.0, &|g| !g.client.is_solid(below));
+        g.touch(3, TouchPhase::Ended, tx, ty);
+        assert!(g.attack.is_none());
+        // Off, a tap does nothing.
+        g.ui.settings.touch_build = false;
+        let next = g.target().unwrap();
+        let above = next.pos.neighbor(next.face);
+        g.touch(4, TouchPhase::Started, tx, ty);
+        g.touch(4, TouchPhase::Ended, tx, ty);
+        run_for(&mut g, 0.4);
+        assert!(!g.client.is_solid(above));
+    }
+
+    #[test]
+    fn one_stance_button_taps_to_crouch_holds_to_crawl_and_double_taps_to_roll() {
+        let mut g = loaded_game(true);
+        g.ui.settings.one_stance = true;
+        run_until(&mut g, "the ground under him", 20.0, &|g| g.ready(Duration::ZERO));
+        run_for(&mut g, 2.0);
+        let press = |g: &mut Game, id: u64| {
+            g.ui_touches.insert(id, Action::Hold("stance"));
+            g.ui_action(id, Action::Hold("stance"));
+        };
+        // A tap: he crouches, once the moment for a second tap has passed.
+        press(&mut g, 1);
+        g.button_released(1);
+        g.update();
+        assert!(!g.player.ctl.crouching);
+        run_until(&mut g, "the crouch", 2.0, &|g| g.player.ctl.crouching);
+        // Another tap stands him up.
+        press(&mut g, 2);
+        g.button_released(2);
+        run_until(&mut g, "standing", 2.0, &|g| !g.player.ctl.crouching);
+        run_for(&mut g, 0.4);
+        // A double tap: a roll, and no crouch.
+        press(&mut g, 3);
+        g.button_released(3);
+        g.update();
+        press(&mut g, 4);
+        assert!(g.roll_until.is_some());
+        g.update();
+        assert!(g.player.roll);
+        g.button_released(4);
+        run_for(&mut g, 0.6);
+        assert!(!g.player.ctl.crouching && g.crouch_at.is_none());
+        run_for(&mut g, 1.0);
+        // Held: he goes down to crawl, and letting go changes nothing.
+        press(&mut g, 5);
+        run_until(&mut g, "the crawl", 3.0, &|g| g.player.ctl.prone);
+        g.button_released(5);
+        run_for(&mut g, 0.6);
+        assert!(g.player.ctl.prone && !g.player.ctl.crouching);
     }
 
     #[test]

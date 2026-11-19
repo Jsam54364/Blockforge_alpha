@@ -223,6 +223,11 @@ impl Client {
         self.link.send(ClientMsg::PlaceBlock { pos, state });
     }
 
+    /// Uses the block at `pos` (see `BlockBehavior::on_used`).
+    pub fn use_block(&mut self, pos: BlockPos) {
+        self.link.send(ClientMsg::UseBlock { pos });
+    }
+
     pub fn undo(&mut self) {
         self.link.send(ClientMsg::Undo);
     }
@@ -355,6 +360,11 @@ impl Client {
     }
 
     /// Solid block at `pos` in the client's replica (false if unloaded). For raycasts.
+    /// The block at `pos`, if its chunk is loaded.
+    pub fn block_at(&self, pos: BlockPos) -> Option<BlockState> {
+        self.store.block(pos)
+    }
+
     pub fn is_solid(&self, pos: BlockPos) -> bool {
         match (self.store.block(pos), self.registry.as_ref()) {
             (Some(s), Some(r)) => r.get(s).solid,

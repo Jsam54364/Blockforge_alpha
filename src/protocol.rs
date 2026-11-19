@@ -20,6 +20,8 @@ pub enum ClientMsg {
     SetViewDistance { chunks: u8 },
     BreakBlock { pos: BlockPos },
     PlaceBlock { pos: BlockPos, state: BlockState },
+    /// Use (interact with) the block at `pos`: its behaviour's `on_used` runs on the server.
+    UseBlock { pos: BlockPos },
     Undo,
     Redo,
     Disconnect,
