@@ -37,6 +37,16 @@ pub(super) enum Style {
     Row,
 }
 
+/// What the top bar leaves between the logo and its square buttons (`x0..x1`, at `y`, `h`
+/// high), and where the page under it starts.
+struct Top {
+    x0: f32,
+    x1: f32,
+    y: f32,
+    h: f32,
+    below: f32,
+}
+
 /// The settings page's groups: name, icon and what is in them.
 pub const TABS: [(&str, &str, &str); 4] = [
     ("General", "monitor", "How you get about and what you see of the game: walking or flying, the camera, the stats overlay and the time of day."),
@@ -195,14 +205,60 @@ impl Ui {
         draw::width(Serif, label, size) + if icon { h * 1.0 } else { 0.0 } + h * 1.3
     }
 
-    /// The logo at the top left, small; returns its bottom right corner.
-    fn small_logo(&self, out: &mut Vec<HudVertex>) -> (f32, f32) {
-        let [sl, st, ..] = self.margins();
-        let lh = (58.0 * self.dp).min(self.size.1 * 0.16);
+    /// The bar along the top of a page: the small logo at the left and `squares` (icon
+    /// buttons: icon, action, enabled) at the right, the last at the edge. Returns the room
+    /// between them for tabs or a title, and where the page below starts.
+    fn top_bar(&mut self, out: &mut Vec<HudVertex>, squares: &[(&str, Action, bool)]) -> Top {
+        let (w, h) = self.size;
+        let dp = self.dp;
+        let [sl, st, sr, _] = self.margins();
+        let bh = 42.0 * dp;
+        let y = st + 6.0 * dp;
+        let lh = (50.0 * dp).min(h * 0.14);
         let lw = lh * LOGO_ASPECT;
-        let (x, y) = (sl + 8.0 * self.dp, st + 2.0 * self.dp);
-        draw::image(out, "logo", x, y, lw, lh, OPAQUE);
-        (x + lw, y + lh)
+        let lx = sl + 8.0 * dp;
+        draw::image(out, "logo", lx, st + 2.0 * dp, lw, lh, OPAQUE);
+        let mut x = w - sr - 8.0 * dp;
+        for &(icon, action, enabled) in squares.iter().rev() {
+            x -= bh;
+            self.button(out, Style::Stone, (x, y, bh, bh), "", Some(icon), Serif, action, enabled, false);
+            x -= 8.0 * dp;
+        }
+        Top { x0: lx + lw + 12.0 * dp, x1: x - 4.0 * dp, y, h: bh, below: (st + 2.0 * dp + lh).max(y + bh) + 8.0 * dp }
+    }
+
+    /// The page's area under the top bar: left, top, right, bottom. Panels fill it, edge to
+    /// edge.
+    fn page_box(&self, t: &Top) -> (f32, f32, f32, f32) {
+        let (w, h) = self.size;
+        let dp = self.dp;
+        let [sl, _, sr, sb] = self.margins();
+        (sl + 8.0 * dp, t.below, w - sr - 8.0 * dp, h - sb - 8.0 * dp)
+    }
+
+    /// A title plaque in the top bar, in the middle of the screen if there is room.
+    fn bar_plaque(&self, out: &mut Vec<HudVertex>, t: &Top, title: &str, icon: Option<&str>) {
+        let [sl, _, sr, _] = self.margins();
+        let room = t.x1 - t.x0;
+        let pw = (300.0 * self.dp).min(room);
+        let cx = ((sl + self.size.0 - sr) * 0.5).clamp(t.x0 + pw * 0.5, t.x1 - pw * 0.5);
+        let py = t.y + 4.0 * self.dp;
+        self.plaque(out, cx, py, pw, t.h - 4.0 * self.dp, title, icon);
+    }
+
+    /// Bar buttons side by side across `x..x + w` at `y`, `h` high, each taking its `share`
+    /// of the width. Items: label, icon, action, enabled, glowing, share.
+    #[allow(clippy::type_complexity)]
+    fn button_row(&mut self, out: &mut Vec<HudVertex>, (x, y, w, h): (f32, f32, f32, f32), items: &[(&str, &str, Action, bool, bool, f32)]) {
+        let gap = 8.0 * self.dp;
+        let total: f32 = items.iter().map(|it| it.5).sum();
+        let room = w - gap * (items.len() as f32 - 1.0).max(0.0);
+        let mut bx = x;
+        for it in items {
+            let bw = room * it.5 / total.max(0.001);
+            self.button(out, Style::Bar, (bx, y, bw, h), it.0, Some(it.1), Serif, it.2, it.3, it.4);
+            bx += bw + gap;
+        }
     }
 
     /// A title plaque centred at `cx`, with a gem in a setting over its middle and an optional
@@ -222,46 +278,6 @@ impl Ui {
             x += isz + h * 0.2;
         }
         draw::left(out, Serif, title, x, y + h * 0.52, size, INK, true);
-    }
-
-    /// The square button with an X at the top right; does `action`.
-    fn close_button(&mut self, out: &mut Vec<HudVertex>, action: Action) -> f32 {
-        let [_, st, sr, _] = self.margins();
-        let s = 44.0 * self.dp;
-        let x = self.size.0 - sr - 10.0 * self.dp - s;
-        self.button(out, Style::Stone, (x, st + 4.0 * self.dp, s, s), "", Some("close"), Serif, action, true, false);
-        x
-    }
-
-    /// Bar buttons along the bottom: `left` from the left edge, `right` to the right edge,
-    /// each as wide as its label needs (all narrower together if they don't fit). Items:
-    /// label, icon, action, enabled, glowing. Returns the row's top.
-    fn bottom_row(&mut self, out: &mut Vec<HudVertex>, left: &[(&str, &str, Action, bool, bool)], right: &[(&str, &str, Action, bool, bool)]) -> f32 {
-        let (w, h) = self.size;
-        let dp = self.dp;
-        let [sl, _, sr, sb] = self.margins();
-        let bh = 42.0 * dp;
-        let y = h - sb - 8.0 * dp - bh;
-        let gap = 10.0 * dp;
-        let natural = |items: &[(&str, &str, Action, bool, bool)]| -> Vec<f32> {
-            items.iter().map(|it| self.bar_width(it.0, true, bh).max(120.0 * dp)).collect()
-        };
-        let (lw, rw) = (natural(left), natural(right));
-        let n = (left.len() + right.len()) as f32;
-        let avail = w - sl - sr - 20.0 * dp - gap * (n - 1.0).max(0.0) - if !left.is_empty() && !right.is_empty() { 20.0 * dp } else { 0.0 };
-        let total: f32 = lw.iter().chain(rw.iter()).sum();
-        let k = (avail / total.max(1.0)).min(1.0);
-        let mut x = sl + 10.0 * dp;
-        for (it, bw) in left.iter().zip(&lw) {
-            self.button(out, Style::Bar, (x, y, bw * k, bh), it.0, Some(it.1), Serif, it.2, it.3, it.4);
-            x += bw * k + gap;
-        }
-        let mut x = w - sr - 10.0 * dp - (rw.iter().sum::<f32>() * k + gap * (right.len() as f32 - 1.0).max(0.0));
-        for (it, bw) in right.iter().zip(&rw) {
-            self.button(out, Style::Bar, (x, y, bw * k, bh), it.0, Some(it.1), Serif, it.2, it.3, it.4);
-            x += bw * k + gap;
-        }
-        y
     }
 
     /// A heading between two small gems with rules running out from them.
@@ -408,35 +424,31 @@ impl Ui {
         (h * 0.15).clamp(48.0 * dp, 64.0 * dp)
     }
 
-    /// SINGLE PLAYER: tabs at the top; the worlds on the left, the picked one's picture and
-    /// details on the right; what to do along the bottom.
+    /// SINGLE PLAYER: tabs, Back and the settings in the top bar; the worlds on the left; on the
+    /// right the picked one's picture and details, and under them what to do.
     fn draw_world_list(&mut self, out: &mut Vec<HudVertex>) {
-        let (w, _) = self.size;
         let dp = self.dp;
         let k = self.k();
-        let [sl, st, sr, _] = self.margins();
-        let (logo_r, logo_b) = self.small_logo(out);
-        // Tabs: this page and Multiplayer; the settings at the right.
-        let th = 40.0 * dp;
-        let cog = self.close_button_like(out, "settings", Action::OpenSettings);
-        let tw = (180.0 * dp).min((cog - logo_r - 30.0 * dp) * 0.5);
-        let tx = logo_r + 14.0 * dp;
-        let ty = st + 6.0 * dp;
-        self.button(out, Style::Bar, (tx, ty, tw, th), "Single Player", Some("person"), Serif, Action::Nothing, true, true);
-        self.button(out, Style::Bar, (tx + tw + 8.0 * dp, ty, tw, th), "Multiplayer", Some("public"), Serif, Action::Open(Screen::Multiplayer), true, false);
+        let t = self.top_bar(out, &[("arrow_left", Action::Open(Screen::Title), true), ("settings", Action::OpenSettings, true)]);
+        self.tabs(out, &t, false);
         let some = self.picked().is_some();
-        let bar = self.bottom_row(
-            out,
-            &[("Back", "arrow_left", Action::Open(Screen::Title), true, false), ("Create New World", "add", Action::NewWorld, true, false), ("Re-Create", "refresh", Action::RecreateWorld, some, false)],
-            &[("Edit", "edit", Action::EditWorld, some, false), ("Delete", "delete", Action::AskDelete, some, false), ("Play", "play_arrow", Action::PlayWorld, some, some)],
-        );
-        let (x0, x1) = (sl + 14.0 * dp, w - sr - 14.0 * dp);
-        let y0 = logo_b.max(ty + th) + 14.0 * dp;
-        let y1 = bar - 16.0 * dp;
-        let gap = 18.0 * dp;
+        let (x0, y0, x1, y1) = self.page_box(&t);
+        let gap = 14.0 * dp;
         let lw = ((x1 - x0) - gap) * 0.58;
         let ph = (y1 - y0).max(40.0 * dp);
-        let (dx, dy, dw, dh) = (x0 + lw + gap, y0, x1 - x0 - lw - gap, ph);
+        // The right column: the picked world, then two rows of buttons.
+        let (dx, dw) = (x0 + lw + gap, x1 - x0 - lw - gap);
+        let bh = 40.0 * dp;
+        let bgap = 8.0 * dp;
+        let row2 = y1 - bh;
+        let row1 = row2 - bgap - bh;
+        self.button_row(out, (dx, row1, dw, bh), &[("Re-Create", "refresh", Action::RecreateWorld, some, false, 0.34), ("Create New World", "add", Action::NewWorld, true, false, 0.66)]);
+        self.button_row(
+            out,
+            (dx, row2, dw, bh),
+            &[("Edit", "edit", Action::EditWorld, some, false, 1.0), ("Delete", "delete", Action::AskDelete, some, false, 1.0), ("Play", "play_arrow", Action::PlayWorld, some, some, 1.0)],
+        );
+        let (dy, dh) = (y0, (row1 - 10.0 * dp - y0).max(40.0 * dp));
         draw::panel(out, x0, y0, lw, ph, k);
         self.buttons.push(Button { x: x0, y: y0, w: lw, h: ph, action: Action::Nothing });
         draw::panel(out, dx, dy, dw, dh, k);
@@ -527,13 +539,14 @@ impl Ui {
         draw::centered(out, Serif, &created, dx + dw * 0.5, ty + line, draw::fit(Serif, &created, s, iw), DIM, true);
     }
 
-    /// A square icon button at the top right (the settings cog); returns its left edge.
-    fn close_button_like(&mut self, out: &mut Vec<HudVertex>, icon: &str, action: Action) -> f32 {
-        let [_, st, sr, _] = self.margins();
-        let s = 44.0 * self.dp;
-        let x = self.size.0 - sr - 10.0 * self.dp - s;
-        self.button(out, Style::Stone, (x, st + 4.0 * self.dp, s, s), "", Some(icon), Serif, action, true, false);
-        x
+    /// SINGLE PLAYER and MULTIPLAYER, as tabs in the top bar.
+    fn tabs(&mut self, out: &mut Vec<HudVertex>, t: &Top, multi: bool) {
+        let dp = self.dp;
+        let tw = (180.0 * dp).min((t.x1 - t.x0 - 8.0 * dp) * 0.5);
+        let single = if multi { Action::Open(Screen::WorldList) } else { Action::Nothing };
+        let other = if multi { Action::Nothing } else { Action::Open(Screen::Multiplayer) };
+        self.button(out, Style::Bar, (t.x0, t.y, tw, t.h), "Single Player", Some("person"), Serif, single, true, !multi);
+        self.button(out, Style::Bar, (t.x0 + tw + 8.0 * dp, t.y, tw, t.h), "Multiplayer", Some("public"), Serif, other, true, multi);
     }
 
     /// A world's picture in a thin frame (the default picture if it has none yet).
@@ -570,40 +583,34 @@ impl Ui {
         self.buttons.push(Button { x, y, w, h, action: Action::Focus(field as u8) });
     }
 
-    /// The plaque title at the top middle (beside the small logo); returns where content starts.
-    fn page_top(&mut self, out: &mut Vec<HudVertex>, title: &str, icon: Option<&str>) -> f32 {
-        let (w, _) = self.size;
-        let dp = self.dp;
-        let [sl, st, sr, _] = self.margins();
-        let (logo_r, logo_b) = self.small_logo(out);
-        let ph = 42.0 * dp;
-        let cx = (sl + w - sr) * 0.5;
-        let pw = (300.0 * dp).min((cx - logo_r - 10.0 * dp) * 2.0).max(160.0 * dp);
-        let py = st + 12.0 * dp;
-        self.plaque(out, cx.max(logo_r + pw * 0.5 + 10.0 * dp), py, pw, ph, title, icon);
-        logo_b.max(py + ph) + 14.0 * dp
-    }
-
-    /// CREATE NEW WORLD (`create`) or EDIT WORLD.
+    /// CREATE NEW WORLD (`create`) or EDIT WORLD: the fields in a panel filling the page, the
+    /// button to finish at its bottom right (the keyboard takes the bottom while typing).
     fn draw_world_form(&mut self, out: &mut Vec<HudVertex>, create: bool) {
-        let (w, h) = self.size;
+        let (_, h) = self.size;
         let dp = self.dp;
-        let [sl, _, sr, sb] = self.margins();
-        let cx = (sl + w - sr) * 0.5;
+        let [_, _, _, sb] = self.margins();
         let typing = self.focus.is_some();
-        let top = self.page_top(out, if create { "Create New World" } else { "Edit World" }, Some(if create { "add" } else { "edit" }));
-        let bottom = if typing {
-            h - sb - self.keyboard_height() - 10.0 * dp
-        } else {
-            let named = !self.fields[0].trim().is_empty();
-            let (label, icon, action) = if create { ("Create World", "add", Action::CreateWorld) } else { ("Save", "check", Action::SaveWorld) };
-            self.bottom_row(out, &[("Back", "arrow_left", Action::Open(Screen::WorldList), true, false)], &[(label, icon, action, named, named)]) - 16.0 * dp
-        };
-        let pw = (600.0 * dp).min(w - sl - sr - 40.0 * dp);
-        let px = cx - pw * 0.5;
+        let t = self.top_bar(out, &[("arrow_left", Action::Open(Screen::WorldList), true)]);
+        self.bar_plaque(out, &t, if create { "Create New World" } else { "Edit World" }, Some(if create { "add" } else { "edit" }));
+        let (px, top, x1, y1) = self.page_box(&t);
+        let bottom = if typing { h - sb - self.keyboard_height() - 10.0 * dp } else { y1 };
+        let pw = x1 - px;
         let ph = (bottom - top).max(60.0 * dp);
         draw::panel(out, px, top, pw, ph, self.k());
         self.buttons.push(Button { x: px, y: top, w: pw, h: ph, action: Action::Nothing });
+        let finish_h = if typing {
+            0.0
+        } else {
+            let named = !self.fields[0].trim().is_empty();
+            let (label, icon, action) = if create { ("Create World", "add", Action::CreateWorld) } else { ("Save", "check", Action::SaveWorld) };
+            let (bw, bh) = ((240.0 * dp).min(pw * 0.5), 42.0 * dp);
+            self.button(out, Style::Bar, (px + pw - 18.0 * dp - bw, top + ph - 16.0 * dp - bh, bw, bh), label, Some(icon), Serif, action, named, named);
+            bh + 16.0 * dp
+        };
+        // The fields: centred, not wider than reads well.
+        let cw = (pw - 44.0 * dp).min(640.0 * dp);
+        let (px, pw) = (px + (pw - cw) * 0.5 - 22.0 * dp, cw + 44.0 * dp);
+        let ph = ph - finish_h;
         let pad = 22.0 * dp;
         let fields: &[(&str, &str)] =
             if create { &[("World Name", "New World"), ("Seed for the World Generator", "Leave blank for a random seed")] } else { &[("World Name", "New World")] };
@@ -680,23 +687,32 @@ impl Ui {
         self.button(out, Style::Stone, (x0 + 8.0 * unit, ry, 2.0 * unit - gap, kh), "Done", Some("check"), Serif, Action::KeysDone, true, false);
     }
 
+    /// DELETE WORLD: the question in a panel filling the page, Cancel and Delete under it.
     fn draw_delete(&mut self, out: &mut Vec<HudVertex>) {
-        let (w, _) = self.size;
         let dp = self.dp;
-        let [sl, _, sr, _] = self.margins();
-        let cx = (sl + w - sr) * 0.5;
-        let top = self.page_top(out, "Delete World", Some("delete"));
-        let bar = self.bottom_row(out, &[("Cancel", "arrow_left", Action::Open(Screen::WorldList), true, false)], &[("Delete", "delete", Action::ConfirmDelete, true, false)]);
-        let pw = (560.0 * dp).min(w - sl - sr - 40.0 * dp);
-        let ph = bar - 16.0 * dp - top;
-        draw::panel(out, cx - pw * 0.5, top, pw, ph, self.k());
+        let t = self.top_bar(out, &[("arrow_left", Action::Open(Screen::WorldList), true)]);
+        self.bar_plaque(out, &t, "Delete World", Some("delete"));
+        let (x0, top, x1, y1) = self.page_box(&t);
+        let (pw, ph) = (x1 - x0, y1 - top);
+        let cx = x0 + pw * 0.5;
+        draw::panel(out, x0, top, pw, ph, self.k());
+        self.buttons.push(Button { x: x0, y: top, w: pw, h: ph, action: Action::Nothing });
+        let bh = 42.0 * dp;
+        let rw = (440.0 * dp).min(pw - 40.0 * dp);
+        let by = top + ph - 18.0 * dp - bh;
+        self.button_row(
+            out,
+            (cx - rw * 0.5, by, rw, bh),
+            &[("Cancel", "arrow_left", Action::Open(Screen::WorldList), true, false, 1.0), ("Delete", "delete", Action::ConfirmDelete, true, false, 1.0)],
+        );
         let name = self.picked().map(|e| e.name.clone()).unwrap_or_default();
-        let mid = top + ph * 0.5;
+        let mid = top + (by - top) * 0.5;
+        let tw = pw.min(700.0 * dp);
         draw::icon(out, "warning", cx, mid - 40.0 * dp, 44.0 * dp, WARN);
         let q = "Are you sure you want to delete this world?";
-        draw::centered(out, Serif, q, cx, mid + 2.0 * dp, draw::fit(Serif, q, 21.0 * dp, pw * 0.86), INK, true);
+        draw::centered(out, Serif, q, cx, mid + 2.0 * dp, draw::fit(Serif, q, 21.0 * dp, tw * 0.86), INK, true);
         let l = format!("'{name}' will be lost forever! (A long time!)");
-        draw::centered(out, Serif, &l, cx, mid + 30.0 * dp, draw::fit(Serif, &l, 17.0 * dp, pw * 0.86), DANGER, true);
+        draw::centered(out, Serif, &l, cx, mid + 30.0 * dp, draw::fit(Serif, &l, 17.0 * dp, tw * 0.86), DANGER, true);
     }
 
     /// The settings: groups on the left, the group's settings in the middle, what the group
@@ -705,20 +721,16 @@ impl Ui {
         let (w, h) = self.size;
         let dp = self.dp;
         let k = self.k();
-        let [sl, st, sr, _] = self.margins();
         let back = self.settings_back;
         if back == Screen::Pause {
             rect(out, 0.0, 0.0, w, h, [0, 0, 0, 120]);
         }
-        let (logo_r, logo_b) = self.small_logo(out);
-        let close_x = self.close_button(out, Action::Open(back));
-        let ph = 44.0 * dp;
-        let pw = (280.0 * dp).min(close_x - logo_r - 30.0 * dp);
-        let pcx = ((logo_r + close_x) * 0.5).max(logo_r + pw * 0.5 + 8.0 * dp);
-        self.plaque(out, pcx, st + 12.0 * dp, pw, ph, "Settings", Some("settings"));
-        let bar = self.bottom_row(out, &[("Back", "arrow_left", Action::Open(back), true, false)], &[("Reset to Default", "restart_alt", Action::ResetSettings, true, false)]);
-        let (x0, x1) = (sl + 14.0 * dp, w - sr - 14.0 * dp);
-        let (y0, y1) = (logo_b.max(st + 12.0 * dp + ph) + 12.0 * dp, bar - 14.0 * dp);
+        // Reset, Back (to where the settings were opened from) and X (from the game menu,
+        // straight back into the game).
+        let close = if back == Screen::Pause { Screen::Playing } else { back };
+        let t = self.top_bar(out, &[("restart_alt", Action::ResetSettings, true), ("arrow_left", Action::Open(back), true), ("close", Action::Open(close), true)]);
+        self.bar_plaque(out, &t, "Settings", Some("settings"));
+        let (x0, y0, x1, y1) = self.page_box(&t);
         let (fw, fh) = (x1 - x0, y1 - y0);
         draw::panel(out, x0, y0, fw, fh, k);
         self.buttons.push(Button { x: x0, y: y0, w: fw, h: fh, action: Action::Nothing });
@@ -929,17 +941,20 @@ impl Ui {
         draw::centered(out, Serif, &n, cx, by + bh + 18.0 * dp, 15.0 * dp, DIM, true);
     }
 
-    /// MULTIPLAYER, MODS, COSMETICS: what is (not) there yet.
+    /// MULTIPLAYER, MODS, COSMETICS: what is (not) there yet, in a panel filling the page.
     fn draw_page(&mut self, out: &mut Vec<HudVertex>, title: &str, icon: &str, lines: &[&str]) {
-        let (w, _) = self.size;
         let dp = self.dp;
-        let [sl, _, sr, _] = self.margins();
-        let cx = (sl + w - sr) * 0.5;
-        let top = self.page_top(out, title, Some(icon));
-        let bar = self.bottom_row(out, &[("Back", "arrow_left", Action::Open(Screen::Title), true, false)], &[]);
-        let pw = (600.0 * dp).min(w - sl - sr - 40.0 * dp);
-        let ph = bar - 16.0 * dp - top;
-        draw::panel(out, cx - pw * 0.5, top, pw, ph, self.k());
+        let t = self.top_bar(out, &[("arrow_left", Action::Open(Screen::Title), true)]);
+        if title == "Multiplayer" {
+            self.tabs(out, &t, true);
+        } else {
+            self.bar_plaque(out, &t, title, Some(icon));
+        }
+        let (x0, top, x1, y1) = self.page_box(&t);
+        let (pw, ph) = (x1 - x0, y1 - top);
+        let cx = x0 + pw * 0.5;
+        draw::panel(out, x0, top, pw, ph, self.k());
+        let pw = pw.min(640.0 * dp);
         let size = 18.0 * dp;
         let mut wrapped: Vec<(String, bool)> = Vec::new();
         for (i, l) in lines.iter().enumerate() {
@@ -964,23 +979,13 @@ impl Ui {
         let (w, h) = self.size;
         let dp = self.dp;
         let k = self.k();
-        let [sl, st, sr, _] = self.margins();
         rect(out, 0.0, 0.0, w, h, [0, 0, 0, 120]);
-        let (logo_r, logo_b) = self.small_logo(out);
-        let close_x = self.close_button(out, Action::Open(Screen::Playing));
-        let th = 40.0 * dp;
-        let ty = st + 6.0 * dp;
-        let tw = (190.0 * dp).min(close_x - logo_r - 30.0 * dp);
-        self.button(out, Style::Bar, (logo_r + 14.0 * dp, ty, tw, th), "Inventory", Some("backpack"), Serif, Action::Nothing, true, true);
+        let t = self.top_bar(out, &[("close", Action::Open(Screen::Playing), true)]);
+        let tw = (190.0 * dp).min(t.x1 - t.x0);
+        self.button(out, Style::Bar, (t.x0, t.y, tw, t.h), "Inventory", Some("backpack"), Serif, Action::Nothing, true, true);
         let sel = self.inv_sel.filter(|&k| k < self.blocks.len());
-        let bar = self.bottom_row(
-            out,
-            &[("Clear Slot", "delete", Action::ClearSlot, self.held_block() != 0, false)],
-            &[("Add to Hotbar", "star", Action::AddToHotbar, sel.is_some(), sel.is_some())],
-        );
-        let (x0, x1) = (sl + 14.0 * dp, w - sr - 14.0 * dp);
-        let (y0, y1) = (logo_b.max(ty + th) + 14.0 * dp, bar - 16.0 * dp);
-        let gap = 18.0 * dp;
+        let (x0, y0, x1, y1) = self.page_box(&t);
+        let gap = 14.0 * dp;
         let pad = 14.0 * dp;
         // The grid: as many columns as fit at a comfortable size.
         let n = self.blocks.len().max(1);
@@ -1021,6 +1026,15 @@ impl Ui {
         let slot_s = ((dw - 2.0 * dpad) / 9.0).min(38.0 * dp);
         let hb_y = y0 + dh - dpad - slot_s;
         let hb_x = dx + (dw - 9.0 * slot_s) * 0.5;
+        // Clear Slot and Add to Hotbar over the hotbar.
+        let bh = 38.0 * dp;
+        let by = hb_y - 24.0 * dp - bh;
+        let held = self.held_block() != 0;
+        self.button_row(
+            out,
+            (dx + dpad, by, dw - 2.0 * dpad, bh),
+            &[("Clear Slot", "delete", Action::ClearSlot, held, false, 1.0), ("Add to Hotbar", "star", Action::AddToHotbar, sel.is_some(), sel.is_some(), 1.3)],
+        );
         draw::left(out, Serif, "Hotbar", hb_x, hb_y - 12.0 * dp, 15.0 * dp, DIM, true);
         for n in 0..9 {
             let sx = hb_x + n as f32 * slot_s;
@@ -1046,7 +1060,7 @@ impl Ui {
                 let ns = 15.0 * dp;
                 let mut ny = ry + 18.0 * dp;
                 for l in draw::wrap(Serif, block_note(&name), ns, dw - 2.0 * dpad) {
-                    if ny > hb_y - 30.0 * dp {
+                    if ny > by - 14.0 * dp {
                         break;
                     }
                     draw::left(out, Serif, &l, dx + dpad, ny, ns, DIM, true);
@@ -1055,7 +1069,7 @@ impl Ui {
             }
             None => {
                 let s = "Pick a block to put it in the hotbar.";
-                draw::centered(out, Serif, s, dx + dw * 0.5, y0 + (hb_y - y0) * 0.45, draw::fit(Serif, s, 17.0 * dp, dw - 2.0 * dpad), DIM, true);
+                draw::centered(out, Serif, s, dx + dw * 0.5, y0 + (by - y0) * 0.45, draw::fit(Serif, s, 17.0 * dp, dw - 2.0 * dpad), DIM, true);
             }
         }
     }

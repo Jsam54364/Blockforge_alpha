@@ -874,7 +874,11 @@ impl Ui {
             }
             Action::OpenSettings => {
                 self.tab = 0;
-                self.settings_back = if self.screen == Screen::Pause { Screen::Pause } else { Screen::Title };
+                // Back leads to where the settings were opened from.
+                self.settings_back = match self.screen {
+                    Screen::Pause | Screen::WorldList => self.screen,
+                    _ => Screen::Title,
+                };
                 self.screen = Screen::Settings;
                 false
             }

@@ -138,12 +138,16 @@ play, skins or mods so far).
 
 ### Worlds (`app/src/worlds.rs`)
 
-Single Player opens the world list, under tabs for Single Player and Multiplayer (and a cog for
-the settings): on the left every saved world as a row with its picture, name, seed, when it was
+Every menu page has the same top bar: the small logo at the left, the page's tabs or title plaque,
+and square icon buttons at the right (Back, and the settings cog or an X); under it the page's
+panels fill the screen edge to edge, with the page's own buttons inside its frame rather than in a
+row along the bottom. Single Player opens the world list (tabs for Single Player and Multiplayer,
+Back and the cog in the top bar): on the left every saved world as a row with its picture, name, seed, when it was
 last played (date and time, in the phone's time zone) and its size on disk, the most recent
 first (drag the list to scroll it); on the right the picked world's big picture, its name between
-gems, seed, last played, play time, size and when it was created. Along the bottom: Back, Create
-New World, Re-Create, and Edit, Delete and Play (glowing once a world is picked). Tap a world to
+gems, seed, last played, play time, size and when it was created, and under it two rows of
+buttons: Re-Create and Create New World, then Edit, Delete and Play (glowing once a world is
+picked). Tap a world to
 pick it and again to play it, or use Play. Create New World asks for a name
 and an optional seed (a number is used as it is, a word is hashed so it always gives the same
 world, blank is random). Edit renames the picked world, Re-Create opens the create page filled
@@ -176,7 +180,9 @@ Touch + Buttons, and Crouch, Crawl, Roll: Three Buttons or One Button). The grou
 are in the middle, with arrows to step values and switches; on the right a note on what the group
 is about over a sepia picture (a group with more than five settings uses that room for a second
 column instead). Changes take effect at once (a new render distance goes to the server straight
-away); the X and Back go back, Reset to Default puts the defaults back.
+away). The top bar's squares: Reset to Default puts the defaults back, Back goes back to where
+the settings were opened from (the title, the world list or the game menu), and X closes them
+(from the game menu, straight back into the game).
 
 In a world, the pause button at the top right opens the game menu over the world (which keeps
 running behind it): Back to Game, Settings, and Save & Quit to Title, which saves the world, takes
