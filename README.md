@@ -194,9 +194,10 @@ and quads drawn. The HUD and menus are drawn by a small immediate-mode layer (`u
 ### Touch controls (`app/src/ui/controls.rs`, `app/src/game.rs`, `app/src/icons.rs`)
 
 * **Stick:** a touch on the left 45% of the screen (not on a button) puts the stick's ring
-  under the thumb. It walks, jogs or sprints by how far it is pushed (or flies where you look);
-  past the ring's edge the ring follows the thumb. It fades out a quarter second after the
-  thumb lifts, and is not drawn at all otherwise.
+  under the thumb, and there it stays until the thumb lifts: a plain thin ring with a light
+  knob that follows the thumb out to the ring's edge. How far it is pushed walks, jogs or
+  sprints (or flies where you look). It fades out a quarter second after the thumb lifts, and is
+  not drawn at all otherwise.
 * **Look:** drag anywhere else.
 * **Attack** (round, pickaxe): a tap is a punch, which breaks the block under the crosshair.
   Held past 0.3 s it becomes a heavy attack: the character chops, and each chop breaks a block

@@ -198,22 +198,22 @@ def glow_frame(w, h, inset, radius, color=(70, 150, 255)):
 
 
 def joystick_base(size):
-    """The stick's ring: a dark see-through disc in a thin metal ring, with four chevrons."""
+    """The stick's ring: a faint dark disc inside one thin light ring."""
     ss = 4
     S = size * ss
     m = Image.new("RGBA", (S, S), (0, 0, 0, 0))
     d = ImageDraw.Draw(m)
-    d.ellipse([2 * ss, 2 * ss, S - 2 * ss, S - 2 * ss], fill=(10, 12, 18, 110), outline=(20, 20, 24, 200), width=4 * ss)
-    d.ellipse([5 * ss, 5 * ss, S - 5 * ss, S - 5 * ss], outline=(176, 178, 190, 210), width=3 * ss)
-    d.ellipse([S * 0.22, S * 0.22, S * 0.78, S * 0.78], outline=(176, 178, 190, 60), width=2 * ss)
-    c = S / 2
-    for ang in (0, 90, 180, 270):
-        a = np.radians(ang)
-        r1, r2, w = S * 0.40, S * 0.33, S * 0.07
-        tip = (c + np.cos(a) * r1, c + np.sin(a) * r1)
-        b1 = (c + np.cos(a) * r2 - np.sin(a) * w, c + np.sin(a) * r2 + np.cos(a) * w)
-        b2 = (c + np.cos(a) * r2 + np.sin(a) * w, c + np.sin(a) * r2 - np.cos(a) * w)
-        d.polygon([tip, b1, b2], fill=(150, 200, 255, 170))
+    d.ellipse([3 * ss, 3 * ss, S - 3 * ss, S - 3 * ss], fill=(0, 0, 0, 70), outline=(235, 238, 245, 170), width=3 * ss)
+    return m.resize((size, size), Image.LANCZOS)
+
+
+def joystick_knob(size):
+    """The stick's thumb: a plain light disc with a soft edge."""
+    ss = 4
+    S = size * ss
+    m = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+    d = ImageDraw.Draw(m)
+    d.ellipse([2 * ss, 2 * ss, S - 2 * ss, S - 2 * ss], fill=(235, 238, 245, 150), outline=(255, 255, 255, 210), width=2 * ss)
     return m.resize((size, size), Image.LANCZOS)
 
 
@@ -283,10 +283,7 @@ def main():
     add("round", O.round_button(128), [0, 0, 0, 0])
     add("glow_round", glow_ring(160), [0, 0, 0, 0])
     add("joy_base", joystick_base(200), [0, 0, 0, 0])
-    knob = O.round_button(96)
-    g = O.gem(60)
-    knob.alpha_composite(g, ((96 - 60) // 2, (96 - 60) // 2))
-    add("joy_knob", knob, [0, 0, 0, 0])
+    add("joy_knob", joystick_knob(96), [0, 0, 0, 0])
     add("pickaxe", pickaxe(), [0, 0, 0, 0])
     # The title screen's logo and the pedestal its character stands on.
     add("logo", O.logo(LOGO), [0, 0, 0, 0])

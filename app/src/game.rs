@@ -613,21 +613,13 @@ impl Game {
                 self.ui.acts_open = false;
             }
             TouchPhase::Moved => {
-                let r = self.stick_radius();
                 let look = LOOK_SENS * (0.25 + 0.15 * self.ui.settings.look_speed as f32);
                 if let Some(t) = self.touches.get_mut(&id) {
                     let dx = x - t.last.0;
                     let dy = y - t.last.1;
                     t.last = (x, y);
-                    if t.stick {
-                        // Past the ring's edge, the ring follows the thumb.
-                        let (ox, oy) = (x - t.base.0, y - t.base.1);
-                        let len = ox.hypot(oy);
-                        if len > r {
-                            let k = 1.0 - r / len;
-                            t.base = (t.base.0 + ox * k, t.base.1 + oy * k);
-                        }
-                    } else {
+                    // The stick's ring stays where the thumb first landed.
+                    if !t.stick {
                         self.cam.yaw -= dx * look;
                         self.cam.pitch = (self.cam.pitch - dy * look).clamp(-1.5, 1.5);
                     }
@@ -807,7 +799,7 @@ mod tests {
     }
 
     #[test]
-    fn the_stick_appears_under_the_thumb_and_follows_it() {
+    fn the_stick_appears_under_the_thumb_and_stays_put() {
         let reg = Arc::new(BlockRegistry::builtin());
         let mut ui = Ui::new();
         ui.screen = Screen::Playing;
@@ -826,12 +818,16 @@ mod tests {
         // Half way out: half speed, the ring stays.
         g.touch(1, TouchPhase::Moved, 500.0 + r * 0.5, 600.0);
         assert!((g.stick().0 - 0.5).abs() < 0.01);
-        // Past the edge: full speed, and the ring is pulled along.
+        // Past the edge: full speed; the ring stays put, the knob stops at its edge.
         g.touch(1, TouchPhase::Moved, 500.0 + r * 3.0, 600.0);
         g.update();
         let j = g.ui.joystick.unwrap();
         assert!((g.stick().0 - 1.0).abs() < 0.01);
-        assert!((j.base[0] - (500.0 + r * 2.0)).abs() < 0.5 && (j.knob[0] - (500.0 + r * 3.0)).abs() < 0.5, "{j:?}");
+        assert!(j.base == [500.0, 600.0] && (j.knob[0] - (500.0 + r)).abs() < 0.5, "{j:?}");
+        // Back inside: it follows the thumb again from the same spot.
+        g.touch(1, TouchPhase::Moved, 500.0, 600.0 - r * 0.5);
+        g.update();
+        assert!(g.ui.joystick.unwrap().base == [500.0, 600.0] && (g.stick().1 - 0.5).abs() < 0.01);
         // Let go: it fades, then is gone; the character stops.
         g.touch(1, TouchPhase::Ended, 500.0 + r * 3.0, 600.0);
         g.update();
