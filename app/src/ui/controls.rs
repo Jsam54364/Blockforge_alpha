@@ -5,7 +5,7 @@
 use super::draw::{self, nine};
 use super::screens::Style;
 use super::{rect, Action, Button, HudVertex, Request, Screen, Ui};
-use crate::atlas::FontId::{Pixel, Serif};
+use crate::atlas::FontId::Serif;
 
 /// How a control looks.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -224,7 +224,7 @@ impl Ui {
     fn draw_control(&mut self, out: &mut Vec<HudVertex>, i: usize, grab: bool) {
         let c = &CONTROLS[i];
         let [x, y, w, h] = self.control_rect(i);
-        let opacity = if self.screen == Screen::Controls { self.draft.hud_opacity } else { self.settings.hud_opacity };
+        let opacity = self.settings.hud_opacity;
         let tint = self.alpha(opacity);
         let ink = [INK[0], INK[1], INK[2], tint[3]];
         let k = self.dp * 0.42 * (w / (c.size.0 * self.dp)).clamp(0.6, 1.4);
@@ -265,8 +265,8 @@ impl Ui {
                 if let Some(name) = c.icon {
                     draw::icon(out, name, cx, cy, h * 0.56, ink);
                 } else {
-                    let size = draw::fit(Pixel, c.label, h * 0.42, w * 0.84);
-                    draw::centered(out, Pixel, c.label, cx, cy, size, ink, true);
+                    let size = draw::fit(Serif, c.label, h * 0.46, w * 0.8);
+                    draw::centered(out, Serif, c.label, cx, cy, size, ink, true);
                 }
                 self.buttons.push(Button { x, y, w, h, action: if grab { Action::CtlGrab(i as u8) } else { c.action } });
             }
@@ -287,16 +287,13 @@ impl Ui {
                 nine(out, "glow", sel - g, y - g, s + 2.0 * g, s + 2.0 * g, k, [255, 255, 255, 255]);
                 let ix = x + w - s;
                 nine(out, "button", ix, y, s, s, k * 0.8, tint);
-                draw::icon(out, "apps", ix + s * 0.5, y + s * 0.5, s * 0.6, ink);
-                if self.inventory_open && !grab {
-                    nine(out, "glow", ix - g, y - g, s + 2.0 * g, s + 2.0 * g, k, [255, 255, 255, 230]);
-                }
+                draw::icon(out, "backpack", ix + s * 0.5, y + s * 0.5, s * 0.58, ink);
                 if grab {
                     self.buttons.push(Button { x, y, w, h, action: Action::CtlGrab(i as u8) });
                 } else {
                     self.buttons.push(Button { x: ix, y, w: s, h: s, action: Action::ToggleInventory });
                     // The picked block's name, for a moment after picking it.
-                    if self.seconds - self.slot_changed < 1.6 || self.inventory_open {
+                    if self.seconds - self.slot_changed < 1.6 {
                         if let Some(b) = self.blocks.iter().find(|b| b.id == self.held_block()) {
                             let name = b.name.clone();
                             draw::centered(out, Serif, &name, x + 4.5 * s, y - 14.0 * self.dp, 17.0 * self.dp, INK, true);
@@ -326,10 +323,7 @@ impl Ui {
             let r = self.control_rect(act);
             self.draw_act_grid(out, r);
         }
-        if self.inventory_open {
-            let hb = self.control_rect(0);
-            self.draw_block_picker(out, hb);
-        }
+
     }
 
     /// Everything else the character can do, in a grid by the ACT button.
@@ -356,38 +350,8 @@ impl Ui {
         for (r, row) in grid.iter().enumerate() {
             for (c, (label, action)) in row.iter().enumerate() {
                 let (bx, by) = (px + gap + c as f32 * (gw + gap), py + gap + r as f32 * (gh + gap));
-                self.button(out, Style::Stone, (bx, by, gw, gh), label, None, Pixel, *action, true, false);
+                self.button(out, Style::Stone, (bx, by, gw, gh), label, None, Serif, *action, true, false);
             }
-        }
-    }
-
-    /// Every placeable block, above the hotbar: tapping one puts it in the picked slot.
-    fn draw_block_picker(&mut self, out: &mut Vec<HudVertex>, hotbar: [f32; 4]) {
-        let dp = self.dp;
-        let (w, _) = self.size;
-        let [sl, st, sr, _] = self.margins();
-        let n = self.blocks.len().max(1);
-        let cols = n.min(9);
-        let rows = n.div_ceil(cols);
-        let gap = 6.0 * dp;
-        let pad = 12.0 * dp;
-        let room_h = hotbar[1] - 34.0 * dp - st;
-        let tile = (46.0 * dp).min((room_h - 2.0 * pad) / rows as f32 - gap).min((w - sl - sr - 2.0 * pad) / cols as f32 - gap);
-        let (pw, ph) = (cols as f32 * (tile + gap) - gap + 2.0 * pad, rows as f32 * (tile + gap) - gap + 2.0 * pad);
-        let px = (hotbar[0] + hotbar[2] * 0.5 - pw * 0.5).clamp(sl, (w - sr - pw).max(sl));
-        let py = (hotbar[1] - 34.0 * dp - ph).max(st);
-        draw::panel(out, px, py, pw, ph, dp * 0.3);
-        self.buttons.push(Button { x: px, y: py, w: pw, h: ph, action: Action::Nothing });
-        let held = self.held_block();
-        for k in 0..self.blocks.len() {
-            let (tx, ty) = (px + pad + (k % cols) as f32 * (tile + gap), py + pad + (k / cols) as f32 * (tile + gap));
-            nine(out, "slot", tx, ty, tile, tile, dp * 0.3, [255, 255, 255, 255]);
-            draw::thumb(out, crate::gfx::icon_uv(k), tx + tile * 0.12, ty + tile * 0.1, tile * 0.76, tile * 0.76);
-            if self.blocks[k].id == held {
-                let g = 18.0 * dp * 0.3;
-                nine(out, "glow", tx - g, ty - g, tile + 2.0 * g, tile + 2.0 * g, dp * 0.3, [255, 255, 255, 255]);
-            }
-            self.buttons.push(Button { x: tx, y: ty, w: tile, h: tile, action: Action::PickBlock(k as u16) });
         }
     }
 
@@ -509,6 +473,7 @@ impl Ui {
 
     /// A finger moved: drags the control it holds in the editor.
     pub fn moved(&mut self, id: u64, x: f32, y: f32) {
+        self.drag_list(id, y);
         let Some((did, i, dx, dy)) = self.drag else { return };
         if did != id {
             return;
@@ -529,7 +494,8 @@ impl Ui {
                 self.slot_changed = self.seconds;
             }
             Action::ToggleInventory => {
-                self.inventory_open = !self.inventory_open;
+                self.screen = Screen::Inventory;
+                self.inv_sel = self.icon_of(self.held_block());
                 self.acts_open = false;
             }
             Action::PickBlock(k) => {

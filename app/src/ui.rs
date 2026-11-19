@@ -305,12 +305,11 @@ pub enum Action {
     Shift,
     /// World list: the pencil on a row (pick it and edit it).
     EditWorldAt(usize),
-    /// Opens the settings page (from the title screen or the game menu), on a copy of the
-    /// settings that APPLY keeps and BACK forgets.
+    /// Opens the settings page (from the title screen or the game menu); changes there take
+    /// effect at once.
     OpenSettings,
     /// Settings page: which group of settings shows.
     Tab(u8),
-    ApplySettings,
     ResetSettings,
     /// The title screen's QUIT.
     Quit,
@@ -355,6 +354,13 @@ pub enum Action {
     CtlShow(u8),
     CtlReset,
     CtlDone,
+    /// The inventory: picks block `n` of `Ui::blocks` (tapping the picked one again puts it in
+    /// the hotbar), puts the picked one in the hotbar's slot, empties the slot.
+    InvPick(u16),
+    AddToHotbar,
+    ClearSlot,
+    /// The title screen's arrows under the character: turn him.
+    TurnShowcase(i8),
 }
 
 /// Where the player is: the title screen (Minecraft-style main menu over a turning
@@ -378,6 +384,8 @@ pub enum Screen {
     /// Settings > Controls > Customize: moving, resizing, hiding and adding the game's
     /// buttons.
     Controls,
+    /// Every block, to put in the hotbar (over the game).
+    Inventory,
     Playing,
 }
 
@@ -392,6 +400,8 @@ pub struct WorldEntry {
     pub last_played: String,
     pub play_time: String,
     pub size: String,
+    /// When it was made ("11/03/2026").
+    pub created: String,
     /// Its picture's slot in the renderer's thumbnails (`gfx::thumb_uv`), if it has one.
     pub thumb: Option<usize>,
 }
@@ -450,8 +460,7 @@ pub struct Ui {
     /// The touch holding a menu button down, and that button: menus act when the finger
     /// lifts off the same button (and the button glows meanwhile).
     pressed: Option<(u64, Action)>,
-    /// The settings page's working copy, the group showing, and where BACK and APPLY go.
-    pub draft: Settings,
+    /// The settings page's group showing, and where BACK goes.
     pub tab: u8,
     settings_back: Screen,
     /// The keyboard's capitals (`caps_auto`: only for the next letter).
@@ -472,11 +481,30 @@ pub struct Ui {
     pub hotbar: [u16; 9],
     pub slot: usize,
     slot_changed: f32,
-    pub inventory_open: bool,
     /// The floating stick, while it shows (the game moves it).
     pub joystick: Option<Joy>,
     /// What the fingers on the game's buttons are holding (they glow).
     pub touching: Vec<Action>,
+    /// The title screen's character: where it stands (set by `build`), and which way it turns.
+    pub showcase: Option<Showcase>,
+    pub showcase_yaw: f32,
+    /// The first `under` vertices of the title screen go under its character (the pedestal).
+    pub under: usize,
+    /// The inventory's picked block (an index into `blocks`).
+    pub inv_sel: Option<usize>,
+    /// A finger dragging the world list: touch, where it started, the scroll then, and
+    /// whether it has moved far enough to be a drag (then it picks nothing).
+    list_drag: Option<(u64, f32, usize, bool)>,
+}
+
+/// Where the title screen's character is drawn: the middle of his feet on screen, and his
+/// height (1.8 blocks) in pixels; `yaw`: which way he faces (0 = at the viewer).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Showcase {
+    pub x: f32,
+    pub feet: f32,
+    pub height: f32,
+    pub yaw: f32,
 }
 
 const WHITE: [u8; 4] = [255, 255, 255, 255];
@@ -602,7 +630,7 @@ impl Ui {
             loading_chunks: 0,
             requests: Vec::new(),
             pressed: None,
-            draft: Settings::default(),
+
             tab: 0,
             settings_back: Screen::Title,
             caps: true,
@@ -616,9 +644,13 @@ impl Ui {
             hotbar: [0; 9],
             slot: 0,
             slot_changed: -10.0,
-            inventory_open: false,
             joystick: None,
             touching: Vec::new(),
+            showcase: None,
+            showcase_yaw: 0.0,
+            under: 0,
+            inv_sel: None,
+            list_drag: None,
         }
     }
 
@@ -626,6 +658,7 @@ impl Ui {
     pub fn over_world(&self) -> bool {
         match self.screen {
             Screen::Playing | Screen::Pause => true,
+            Screen::Inventory => true,
             Screen::Settings | Screen::Controls => self.settings_back == Screen::Pause,
             _ => false,
         }
@@ -640,6 +673,9 @@ impl Ui {
             self.grab_control(id, i as usize, x, y);
             return None;
         }
+        if let Action::SelectWorld(_) = a {
+            self.list_drag = Some((id, y, self.scroll, false));
+        }
         if self.screen == Screen::Playing || matches!(a, Action::Key(_) | Action::Backspace | Action::Shift | Action::Nothing) {
             return Some(a);
         }
@@ -652,6 +688,15 @@ impl Ui {
         if self.drag.is_some_and(|d| d.0 == id) {
             self.drag = None;
             return None;
+        }
+        if let Some((did, _, _, dragged)) = self.list_drag {
+            if did == id {
+                self.list_drag = None;
+                if dragged {
+                    self.pressed = None;
+                    return None;
+                }
+            }
         }
         match self.pressed {
             Some((pid, a)) if pid == id => {
@@ -672,13 +717,27 @@ impl Ui {
         self.pressed.map(|(_, a)| a)
     }
 
-    /// The settings that actions change: the page's working copy while it is open.
+    /// The settings that actions change.
     fn edited(&mut self) -> &mut Settings {
-        if matches!(self.screen, Screen::Settings | Screen::Controls) {
-            &mut self.draft
-        } else {
-            &mut self.settings
+        &mut self.settings
+    }
+
+    /// A finger moved on the world list: past a few dp it scrolls the list a row at a time
+    /// (and no longer picks the world it started on).
+    fn drag_list(&mut self, id: u64, y: f32) {
+        let Some((did, y0, s0, dragged)) = self.list_drag else { return };
+        if did != id {
+            return;
         }
+        let dy = y - y0;
+        if !dragged && dy.abs() < 10.0 * self.dp {
+            return;
+        }
+        let rh = self.list_row_height().max(1.0);
+        let rows = (-dy / rh).round() as i64;
+        let max = self.worlds.len().saturating_sub(1) as i64;
+        self.scroll = (s0 as i64 + rows).clamp(0, max) as usize;
+        self.list_drag = Some((did, y0, s0, true));
     }
 
     /// The next thing the app has to do for the world screens.
@@ -782,13 +841,11 @@ impl Ui {
             Action::Open(s) => {
                 self.screen = s;
                 self.acts_open = false;
-                self.inventory_open = false;
                 self.focus = None;
                 self.pressed = None;
                 false
             }
             Action::OpenSettings => {
-                self.draft = self.settings;
                 self.tab = 0;
                 self.settings_back = if self.screen == Screen::Pause { Screen::Pause } else { Screen::Title };
                 self.screen = Screen::Settings;
@@ -798,14 +855,33 @@ impl Ui {
                 self.tab = t;
                 false
             }
-            Action::ApplySettings => {
-                let changed = self.draft.render_chunks != self.settings.render_chunks;
-                self.settings = self.draft;
-                self.screen = self.settings_back;
-                changed
-            }
             Action::ResetSettings => {
-                self.draft = Settings { vsync: self.draft.vsync, ..Settings::default() };
+                let before = self.settings.render_chunks;
+                self.settings = Settings { vsync: self.settings.vsync, ..Settings::default() };
+                self.settings.render_chunks != before
+            }
+            Action::TurnShowcase(d) => {
+                self.showcase_yaw += d as f32 * std::f32::consts::FRAC_PI_4;
+                false
+            }
+            Action::InvPick(k) => {
+                let k = k as usize;
+                if k < self.blocks.len() {
+                    if self.inv_sel == Some(k) {
+                        self.apply(Action::AddToHotbar);
+                    }
+                    self.inv_sel = Some(k);
+                }
+                false
+            }
+            Action::AddToHotbar => {
+                if let Some(k) = self.inv_sel {
+                    self.apply(Action::PickBlock(k as u16));
+                }
+                false
+            }
+            Action::ClearSlot => {
+                self.hotbar[self.slot.min(8)] = 0;
                 false
             }
             Action::Quit => {
@@ -921,12 +997,10 @@ impl Ui {
                 false
             }
             Action::RenderDist(d) => {
-                let page = self.screen == Screen::Settings;
                 let s = self.edited();
                 let old = s.render_chunks;
                 s.render_chunks = step(old, d, RENDER_MIN, RENDER_MAX);
-                // On the settings page it only counts once applied.
-                s.render_chunks != old && !page
+                s.render_chunks != old
             }
             Action::LodDist(d) => {
                 let s = self.edited();
@@ -985,7 +1059,6 @@ impl Ui {
             }
             Action::ToggleActs => {
                 self.acts_open = !self.acts_open;
-                self.inventory_open = false;
                 false
             }
             Action::Time(_) | Action::Hold(_) | Action::Press(_) => false,
@@ -996,6 +1069,8 @@ impl Ui {
     pub fn build(&mut self, perf: &Perf, out: &mut Vec<HudVertex>) {
         out.clear();
         self.buttons.clear();
+        self.showcase = None;
+        self.under = 0;
         if self.screen == Screen::Playing {
             self.draw_hud(perf, out);
         } else {

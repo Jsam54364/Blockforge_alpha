@@ -221,13 +221,10 @@ pub fn load_thumbnail(save_dir: &Path, folder: &str) -> Option<Vec<u8>> {
     })
 }
 
-/// "November 14, 2026 - 10:45 AM" for seconds since 1970, shifted by `offset` seconds (the
-/// phone's time zone).
+/// "11/14/2026 9:42 PM" for seconds since 1970, shifted by `offset` seconds (the phone's
+/// time zone).
 pub fn date_time_label(secs: u64, offset: i64) -> String {
-    const MONTHS: [&str; 12] =
-        ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
     let t = secs as i64 + offset;
-    let (y, m, d) = civil(t.div_euclid(86400));
     let mins = t.rem_euclid(86400) / 60;
     let (hh, mm) = (mins / 60, mins % 60);
     let (h12, ampm) = match hh {
@@ -236,7 +233,13 @@ pub fn date_time_label(secs: u64, offset: i64) -> String {
         12 => (12, "PM"),
         _ => (hh - 12, "PM"),
     };
-    format!("{} {d}, {y} - {h12}:{mm:02} {ampm}", MONTHS[(m - 1) as usize])
+    format!("{} {h12}:{mm:02} {ampm}", short_date(secs, offset))
+}
+
+/// "11/03/2026" for seconds since 1970, shifted by `offset` seconds.
+pub fn short_date(secs: u64, offset: i64) -> String {
+    let (y, m, d) = civil((secs as i64 + offset).div_euclid(86400));
+    format!("{m:02}/{d:02}/{y}")
 }
 
 /// "12h 34m", "5m", "Under a minute".
@@ -431,9 +434,10 @@ mod tests {
 
     #[test]
     fn labels_for_the_world_list() {
-        assert_eq!(date_time_label(1_763_136_000, 0), "November 14, 2025 - 4:00 PM");
-        assert_eq!(date_time_label(1_763_136_000, -7 * 3600), "November 14, 2025 - 9:00 AM");
-        assert_eq!(date_time_label(0, 0), "January 1, 1970 - 12:00 AM");
+        assert_eq!(date_time_label(1_763_136_000, 0), "11/14/2025 4:00 PM");
+        assert_eq!(date_time_label(1_763_136_000, -7 * 3600), "11/14/2025 9:00 AM");
+        assert_eq!(date_time_label(0, 0), "01/01/1970 12:00 AM");
+        assert_eq!(short_date(1_763_136_000, 0), "11/14/2025");
         assert_eq!(play_time_label(30), "Under a minute");
         assert_eq!(play_time_label(5 * 60 + 10), "5m");
         assert_eq!(play_time_label(12 * 3600 + 34 * 60), "12h 34m");

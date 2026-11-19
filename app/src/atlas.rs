@@ -143,7 +143,10 @@ mod tests {
     #[test]
     fn the_atlas_has_everything_the_menus_draw() {
         let a = atlas();
-        for p in ["white", "button", "bar", "panel", "plaque", "glow", "field", "toggle_on", "toggle_off", "gem", "logo"] {
+        for p in [
+            "white", "button", "bar", "glow_hex", "panel", "plaque", "glow", "field", "slot", "rule", "toggle_on", "toggle_off", "gem", "setting", "round",
+            "glow_round", "joy_base", "joy_knob", "pickaxe", "logo", "pedestal",
+        ] {
             let r = a.piece(p).rect;
             assert!(r[2] > 0.0 && r[3] > 0.0 && r[0] + r[2] <= a.size && r[1] + r[3] <= a.size, "{p}");
         }
@@ -157,6 +160,24 @@ mod tests {
             assert!(font.width("Single Player", 30.0) > font.width("Single", 30.0));
         }
         assert!(a.has_icon("person") && a.icon("settings").rect.is_some());
+        // Every icon and picture the menus name is in the atlas.
+        let sources = [include_str!("ui.rs"), include_str!("ui/screens.rs"), include_str!("ui/controls.rs")];
+        let has_piece = |n: &str| a.pieces.contains_key(n);
+        for src in sources {
+            for (pat, piece) in [("icon(out, \"", false), ("image(out, \"", true), ("nine(out, \"", true), ("Some(\"", false)] {
+                for part in src.split(pat).skip(1) {
+                    let name = &part[..part.find('"').unwrap()];
+                    if name.starts_with('@') || name.is_empty() || name.contains(' ') || name.chars().any(|c| c.is_uppercase()) {
+                        continue; // "@pickaxe" and the like, labels
+                    }
+                    if piece {
+                        assert!(has_piece(name), "no picture {name:?} in the atlas");
+                    } else {
+                        assert!(a.has_icon(name) || has_piece(name), "no icon {name:?} in the atlas");
+                    }
+                }
+            }
+        }
         // The PNG is the size the table says.
         let dec = png::Decoder::new(ATLAS_PNG);
         let r = dec.read_info().unwrap();

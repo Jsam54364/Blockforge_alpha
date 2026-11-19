@@ -98,3 +98,92 @@ mod tests {
         }
     }
 }
+
+/// The character shown on the title screen: the HyRig model idling on flat ground, posed
+/// each frame and turned toward the viewer (or the way the arrows under him turned him).
+pub struct Showcase {
+    ctl: crate::hyrig::Controller,
+    rig: crate::hyrig::Rig,
+    world: crate::hyrig::BoxWorld,
+    /// The turn he is drawn at (eases toward the one asked for).
+    yaw: f32,
+    verts: Vec<crate::hyrig::rig::Vertex>,
+}
+
+impl Showcase {
+    pub fn new() -> Showcase {
+        let cfg = crate::hyrig::Config::builtin();
+        let rig = crate::hyrig::Rig::builtin(&cfg);
+        let mut ctl = crate::hyrig::Controller::new(cfg, crate::hyrig::View::Follow);
+        let world = crate::hyrig::BoxWorld::new(Vec::new(), 1.0e3);
+        ctl.teleport(&world, 0.0, Some(0.0), 0.0, Some(0.0));
+        Showcase { ctl, rig, world, yaw: 0.0, verts: Vec::new() }
+    }
+
+    /// Moves him on by `dt` seconds, turned to `yaw` (0: facing the viewer); returns his
+    /// triangles with his feet at the origin, facing +Z when `yaw` is 0.
+    pub fn update(&mut self, dt: f32, yaw: f32) -> &[crate::hyrig::rig::Vertex] {
+        let input = crate::hyrig::Input {
+            move_x: 0.0,
+            move_y: 0.0,
+            look_yaw: 0.0,
+            look_pitch: 0.0,
+            jump: false,
+            roll: false,
+            actions: Vec::new(),
+        };
+        let out = self.ctl.update(&self.world, dt.clamp(0.0, 0.1) as f64, &input);
+        let pose = self.rig.pose(&out, [0.0; 3]);
+        self.verts.clear();
+        self.rig.triangles(&pose, &mut self.verts);
+        // Ease toward the turn asked for, and turn the posed model about his feet.
+        self.yaw += (yaw - self.yaw) * (1.0 - (-dt * 8.0).exp());
+        let p = out.position;
+        let (s, c) = self.yaw.sin_cos();
+        for v in &mut self.verts {
+            let (x, z) = (v.pos[0] - p[0] as f32, v.pos[2] - p[2] as f32);
+            v.pos = [x * c + z * s, v.pos[1] - p[1] as f32, -x * s + z * c];
+            let (nx, nz) = (v.normal[0], v.normal[2]);
+            v.normal = [nx * c + nz * s, v.normal[1], -nx * s + nz * c];
+        }
+        &self.verts
+    }
+}
+
+impl Default for Showcase {
+    fn default() -> Self {
+        Showcase::new()
+    }
+}
+
+#[cfg(test)]
+mod showcase_tests {
+    use super::*;
+
+    #[test]
+    fn the_showcase_stands_him_on_the_origin_facing_the_viewer() {
+        let mut s = Showcase::new();
+        let mut verts = Vec::new();
+        for _ in 0..30 {
+            verts = s.update(1.0 / 30.0, 0.0).to_vec();
+        }
+        assert!(verts.len() > 100);
+        let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+        for v in &verts {
+            for i in 0..3 {
+                lo[i] = lo[i].min(v.pos[i]);
+                hi[i] = hi[i].max(v.pos[i]);
+            }
+        }
+        // Feet on the ground, about 1.8 tall, centred on the origin.
+        assert!(lo[1].abs() < 0.1 && (hi[1] - 1.8).abs() < 0.25, "{lo:?} {hi:?}");
+        assert!((lo[0] + hi[0]).abs() < 0.3 && (lo[2] + hi[2]).abs() < 0.4, "{lo:?} {hi:?}");
+        // Turned half way round, what was in front is behind.
+        let front: f32 = verts.iter().map(|v| v.pos[2]).sum::<f32>() / verts.len() as f32;
+        for _ in 0..60 {
+            verts = s.update(1.0 / 30.0, std::f32::consts::PI).to_vec();
+        }
+        let back: f32 = verts.iter().map(|v| v.pos[2]).sum::<f32>() / verts.len() as f32;
+        assert!((front + back).abs() < 0.05, "{front} {back}");
+    }
+}

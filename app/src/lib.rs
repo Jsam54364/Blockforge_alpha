@@ -54,6 +54,9 @@ pub struct App {
     open_folder: Option<String>,
     /// Set by QUIT on the title screen.
     quit: bool,
+    /// The title screen's character (made the first time it shows), and when it last moved.
+    showcase: Option<title::Showcase>,
+    showcase_time: f32,
     /// The window's size and scale, for a world opened later.
     surface: (u32, u32, f64),
     perf: perf::Perf,
@@ -95,6 +98,8 @@ impl App {
             opened: Instant::now(),
             open_folder: None,
             quit: false,
+            showcase: None,
+            showcase_time: 0.0,
             surface: (1, 1, 1.0),
             perf: perf::Perf::new(),
             hud: Vec::new(),
@@ -142,6 +147,7 @@ impl App {
             });
             entries.push(ui::WorldEntry {
                 last_played: worlds::date_time_label(w.last_played, offset),
+                created: worlds::short_date(w.created, offset),
                 play_time: worlds::play_time_label(w.play_seconds),
                 size: worlds::size_label(w.size_bytes),
                 seed: (w.seed as i64).to_string(),
@@ -366,6 +372,7 @@ impl App {
         ui.seconds = seconds;
         ui.build(&self.perf, &mut self.hud);
         let over_world = ui.over_world();
+        let (under, figure) = (ui.under, ui.showcase);
         let result = match (&mut self.game, over_world) {
             (Some(game), true) => {
                 let opts = Self::render_options(game);
@@ -374,8 +381,17 @@ impl App {
                 let view_blocks = game.view_blocks();
                 g.render(&mut game.client, &render_cam, view_blocks, &opts, &self.hud)
             }
-            // The title screen, its pages and the loading screen: the panorama behind them.
-            _ => g.render_title(title::yaw(seconds), &self.hud),
+            // The title screen, its pages and the loading screen: the panorama behind them,
+            // and on the title screen the character on his pedestal.
+            _ => {
+                if let Some(sc) = figure {
+                    let dt = seconds - self.showcase_time;
+                    let verts = self.showcase.get_or_insert_with(title::Showcase::new).update(dt, sc.yaw);
+                    g.set_character(verts);
+                }
+                self.showcase_time = seconds;
+                g.render_title(title::yaw(seconds), &self.hud, under, figure)
+            }
         };
         match result {
             Ok(display_wait) => self.perf.end_frame(frame_start.elapsed().saturating_sub(display_wait)),
@@ -506,7 +522,7 @@ impl ApplicationHandler for App {
                     }
                 }
                 // SAVE & QUIT in the game's menu: save and close the world.
-                if self.game.as_ref().is_some_and(|g| !matches!(g.ui.screen, ui::Screen::Playing | ui::Screen::Loading | ui::Screen::Pause | ui::Screen::Settings)) {
+                if self.game.as_ref().is_some_and(|g| !matches!(g.ui.screen, ui::Screen::Playing | ui::Screen::Loading | ui::Screen::Pause | ui::Screen::Settings | ui::Screen::Controls | ui::Screen::Inventory)) {
                     self.close_world();
                 }
                 self.render(event_loop, frame_start);

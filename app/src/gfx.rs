@@ -1081,6 +1081,29 @@ impl Gfx {
         }
     }
 
+    /// The world uniforms for drawing the title screen's character: a camera in front of him
+    /// at the height of his chest, framed so he is `sc.height` pixels tall with his feet at
+    /// (`sc.x`, `sc.feet`) on screen, in late-afternoon light, no fog.
+    fn showcase_globals(&mut self, sc: crate::ui::Showcase, w: f32, h: f32) -> Globals {
+        let aspect = w / h.max(1.0);
+        let (vp, eye, fwd) = showcase_view_proj(sc, w, h);
+        Globals {
+            view_proj: vp,
+            cam_pos: [eye[0], eye[1], eye[2], 1.0],
+            fog_params: [1.0e4, 2.0e4, 1.0, aspect],
+            screen: [w, h, 0.0, 0.0],
+            flags: [0.0, 0.0, self.water_layer as f32, 0.0],
+            palette: self.palette,
+            lod_window: [0.0; 4],
+            lod_mask: [[0; 4]; 32],
+            tint_window: [0.0; 4],
+            sky_basis: math::sky_basis(fwd, aspect),
+            sky: self.sky.uniforms(16.0),
+            cloud: [0.0; 4],
+            rays: [0.0; 4],
+        }
+    }
+
     /// Puts a world's picture (`THUMB_W` x `THUMB_H` RGBA, sRGB) in thumbnail slot `slot`.
     pub fn set_thumbnail(&self, slot: usize, rgba: &[u8]) {
         if slot >= THUMB_SLOTS || rgba.len() != (THUMB_W * THUMB_H * 4) as usize {
@@ -1537,10 +1560,25 @@ impl Gfx {
 
     /// Draws the title screen: the turning panorama (camera yaw `yaw`) and the HUD (its
     /// buttons). The world is not drawn. Returns the display wait, as `render` does.
-    pub fn render_title(&mut self, yaw: f32, hud: &[HudVertex]) -> Result<Duration, wgpu::SurfaceError> {
+    /// The title screen: the turning panorama, then the first `under` HUD vertices, the
+    /// character standing where `figure` says (his triangles as given to `set_character`,
+    /// feet at the origin, facing +Z), then the rest of the HUD.
+    pub fn render_title(
+        &mut self,
+        yaw: f32,
+        hud: &[HudVertex],
+        under: usize,
+        figure: Option<crate::ui::Showcase>,
+    ) -> Result<Duration, wgpu::SurfaceError> {
         let (w, h) = (self.config.width as f32, self.config.height as f32);
         let view = [yaw, (crate::title::FOVY * 0.5).tan(), w / h.max(1.0), 1.0];
         self.queue.write_buffer(&self.title_uniform, 0, as_bytes(&view));
+        let figure = figure.filter(|_| self.char_verts > 0);
+        if let Some(sc) = figure {
+            let globals = self.showcase_globals(sc, w, h);
+            self.queue.write_buffer(&self.globals_solid, 0, as_bytes(std::slice::from_ref(&globals)));
+        }
+        let under = under.min(hud.len());
         self.write_ui_screen();
         let hud_verts = hud.len().min(MAX_HUD_VERTS);
         if hud_verts > 0 {
@@ -1570,12 +1608,23 @@ impl Gfx {
             pass.set_pipeline(&self.pipe_title);
             pass.set_bind_group(0, &self.bind_title, &[]);
             pass.draw(0..3, 0..1);
-            if hud_verts > 0 {
-                pass.set_pipeline(&self.ui.pipe);
-                pass.set_bind_group(0, &self.ui.bind, &[]);
-                pass.set_vertex_buffer(0, self.hud_buf.slice(0..(hud_verts * std::mem::size_of::<HudVertex>()) as u64));
-                pass.draw(0..hud_verts as u32, 0..1);
+            let draw_hud = |pass: &mut wgpu::RenderPass<'_>, range: std::ops::Range<usize>| {
+                if range.start < range.end {
+                    pass.set_pipeline(&self.ui.pipe);
+                    pass.set_bind_group(0, &self.ui.bind, &[]);
+                    pass.set_vertex_buffer(0, self.hud_buf.slice(0..(hud_verts * std::mem::size_of::<HudVertex>()) as u64));
+                    pass.draw(range.start as u32..range.end as u32, 0..1);
+                }
+            };
+            draw_hud(&mut pass, 0..under.min(hud_verts));
+            if figure.is_some() {
+                pass.set_pipeline(&self.pipe_char);
+                pass.set_bind_group(0, &self.bind_solid, &[]);
+                pass.set_bind_group(1, &self.bind_char, &[]);
+                pass.set_vertex_buffer(0, self.char_buf.slice(..));
+                pass.draw(0..self.char_verts, 0..1);
             }
+            draw_hud(&mut pass, under.min(hud_verts)..hud_verts);
         }
         self.queue.submit(std::iter::once(encoder.finish()));
         let present_start = Instant::now();
@@ -1832,6 +1881,28 @@ fn title_pipeline(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::Text
 /// Thumbnails: 256 x 144 pictures, 4 across and 7 down a 1024 x 1024 texture.
 pub const THUMB_W: u32 = crate::worlds::THUMB_W;
 pub const THUMB_H: u32 = crate::worlds::THUMB_H;
+/// The camera for the title screen's character: in front of him at the height of his chest,
+/// far enough for 1.8 blocks to fill `sc.height` pixels, with the picture shifted so his
+/// feet (the origin) land on (`sc.x`, `sc.feet`). Returns the view-projection, eye and
+/// forward direction.
+pub fn showcase_view_proj(sc: crate::ui::Showcase, w: f32, h: f32) -> (math::Mat4, [f32; 3], [f32; 3]) {
+    const CHEST: f32 = 0.95;
+    let aspect = w / h.max(1.0);
+    let t = (math::FOVY * 0.5).tan();
+    let dist = 1.8 * h / (2.0 * sc.height.max(1.0) * t);
+    let (eye, fwd) = ([0.0, CHEST, dist], [0.0, 0.0, -1.0]);
+    let mut vp = math::view_proj(eye, fwd, aspect);
+    // A shift in clip space (x and y move by w times the offset).
+    let want = [2.0 * sc.x / w - 1.0, 1.0 - 2.0 * sc.feet / h];
+    let feet_y = -CHEST / (dist * t);
+    let (dx, dy) = (want[0], want[1] - feet_y);
+    for c in 0..4 {
+        vp[c * 4] += dx * vp[c * 4 + 3];
+        vp[c * 4 + 1] += dy * vp[c * 4 + 3];
+    }
+    (vp, eye, fwd)
+}
+
 /// World pictures fill the top six rows of the thumbnails texture; the block icons
 /// (`icons.rs`) the rows under them.
 pub const THUMB_SLOTS: usize = 24;
@@ -2044,6 +2115,21 @@ fn ui_pipeline(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::Texture
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_title_character_lands_where_the_menu_puts_him() {
+        let (w, h) = (2400.0, 1080.0);
+        let sc = crate::ui::Showcase { x: 1800.0, feet: 800.0, height: 500.0, yaw: 0.0 };
+        let (vp, ..) = showcase_view_proj(sc, w, h);
+        let screen = |p: [f32; 3]| {
+            let c = [0, 1, 3].map(|r| vp[r] * p[0] + vp[4 + r] * p[1] + vp[8 + r] * p[2] + vp[12 + r]);
+            ((c[0] / c[2] + 1.0) * 0.5 * w, (1.0 - c[1] / c[2]) * 0.5 * h)
+        };
+        let (fx, fy) = screen([0.0, 0.0, 0.0]);
+        let (hx, hy) = screen([0.0, 1.8, 0.0]);
+        assert!((fx - 1800.0).abs() < 1.0 && (fy - 800.0).abs() < 1.0, "feet at {fx},{fy}");
+        assert!((hx - 1800.0).abs() < 1.0 && (fy - hy - 500.0).abs() < 2.0, "head at {hx},{hy}");
+    }
     use blockforge::mesh::PackedVertex;
 
     #[test]

@@ -41,6 +41,11 @@ pub fn thumb(out: &mut Vec<HudVertex>, uv: [f32; 4], x: f32, y: f32, w: f32, h: 
     quad(out, x, y, w, h, uv, [255, 255, 255, 255], MODE_THUMB);
 }
 
+/// A picture from the thumbnails texture, multiplied by `c` (a sepia wash, a fade).
+pub fn thumb_tinted(out: &mut Vec<HudVertex>, uv: [f32; 4], x: f32, y: f32, w: f32, h: f32, c: [u8; 4]) {
+    quad(out, x, y, w, h, uv, c, MODE_THUMB);
+}
+
 /// A painted frame stretched over the rectangle without stretching its edges: its margins
 /// are drawn `k` screen pixels per atlas pixel. Pieces with no top and bottom margins (bars,
 /// plaques) keep their proportions in height and only stretch in the middle.
@@ -152,18 +157,34 @@ pub fn icon(out: &mut Vec<HudVertex>, name: &str, cx: f32, cy: f32, size: f32, c
     quad(out, x0 + g.off[0] * k, baseline + g.off[1] * k, r[2] * k, r[3] * k, uv_of(r), c, MODE_SDF);
 }
 
-/// A framed panel, darker than the atlas piece alone so text over a bright sky stays easy
-/// to read.
+/// A framed panel: weathered stone in an iron frame with bronze corner brackets. The frame
+/// pieces are cut from the atlas at `k` screen pixels per atlas pixel.
 pub fn panel(out: &mut Vec<HudVertex>, x: f32, y: f32, w: f32, h: f32, k: f32) {
-    let i = 10.0 * k;
-    rect(out, x + i, y + i, w - 2.0 * i, h - 2.0 * i, [10, 12, 18, 140]);
-    nine(out, "panel", x, y, w, h, k, [255, 255, 255, 255]);
+    // The picture has 10 atlas pixels round the frame for the corner brackets.
+    let p = 10.0 * k;
+    nine(out, "panel", x - p, y - p, w + 2.0 * p, h + 2.0 * p, k, [255, 255, 255, 255]);
 }
 
-/// A dark inset field (text boxes, value boxes, the loading bar's trough).
+/// A sunken box with a thin iron and bronze rim (list rows, pictures, value boxes, fields).
 pub fn field(out: &mut Vec<HudVertex>, x: f32, y: f32, w: f32, h: f32, k: f32) {
     nine(out, "field", x, y, w, h, k, [255, 255, 255, 255]);
-    let i = 5.0 * k;
-    rect(out, x + i, y + i, w - 2.0 * i, h - 2.0 * i, [38, 42, 50, 140]);
-    rect(out, x + i, y + i, w - 2.0 * i, (h - 2.0 * i) * 0.45, [255, 255, 255, 10]);
+}
+
+/// Splits `s` into lines no wider than `w` at `size` (at spaces).
+pub fn wrap(font: FontId, s: &str, size: f32, w: f32) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    for word in s.split_whitespace() {
+        let next = if line.is_empty() { word.to_string() } else { format!("{line} {word}") };
+        if !line.is_empty() && width(font, &next, size) > w {
+            lines.push(std::mem::take(&mut line));
+            line = word.to_string();
+        } else {
+            line = next;
+        }
+    }
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    lines
 }

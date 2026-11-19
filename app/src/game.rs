@@ -236,7 +236,6 @@ impl Game {
             ui.blocks = block_items(&registry);
         }
         (ui.hotbar, ui.slot) = saved_hotbar(&saved, &registry, &ui.blocks);
-        ui.inventory_open = false;
         // A camera saved in a world from an older generator would be over different ground:
         // start over at the spawn (that world's save is kept, under its own name).
         let same_world = saved_generator(&saved) == WORLDGEN_VERSION;
@@ -610,9 +609,8 @@ impl Game {
                 let r = self.stick_radius();
                 let base = if stick { (x.clamp(r, (w - r).max(r)), y.clamp(r, (h - r).max(r))) } else { (x, y) };
                 self.touches.insert(id, TouchInfo { last: (x, y), base, stick });
-                // A touch elsewhere closes the action grid and the block picker.
+                // A touch elsewhere closes the action grid.
                 self.ui.acts_open = false;
-                self.ui.inventory_open = false;
             }
             TouchPhase::Moved => {
                 let r = self.stick_radius();

@@ -43,6 +43,7 @@ fn worlds(n: usize) -> Vec<WorldEntry> {
             last_played: "November 14, 2026 - 10:45 AM".into(),
             play_time: "12h 34m".into(),
             size: "256 MB".into(),
+            created: "11/03/2026".into(),
             thumb: (i % 2 == 0).then_some(i + 1),
         })
         .collect()
@@ -157,15 +158,24 @@ fn picking_playing_editing_and_deleting_worlds() {
         assert!(!has(&u, Action::SelectWorld(29)));
         let rows = u.buttons.iter().filter(|b| matches!(b.action, Action::SelectWorld(_))).count();
         assert!(rows >= 2, "{w}x{h}: {rows} rows show");
-        for _ in 0..30 - rows {
-            tap(&mut u, Action::ScrollWorlds(1));
-        }
-        find(&u, Action::SelectWorld(29));
-        tap(&mut u, Action::ScrollWorlds(1));
-        find(&u, Action::SelectWorld(29)); // still at the end
-        for _ in 0..30 - rows - 8 + 1 {
-            tap(&mut u, Action::ScrollWorlds(-1));
-        }
+        // Dragging the list scrolls it a row at a time, and picks nothing.
+        let drag = |u: &mut Ui, rows_up: f32| {
+            let b = find(u, Action::SelectWorld(u.scroll));
+            let (x, y) = (b.x + b.w * 0.5, b.y + b.h * 0.5);
+            assert_eq!(u.press(4, x, y), None);
+            let rh = u.list_row_height();
+            u.moved(4, x, y - rows_up * rh * 0.5);
+            u.moved(4, x, y - rows_up * rh);
+            assert_eq!(u.release(4, x, y - rows_up * rh), None);
+            build(u);
+        };
+        drag(&mut u, 3.0);
+        assert_eq!((u.scroll, u.selected), (3, None));
+        drag(&mut u, 40.0);
+        find(&u, Action::SelectWorld(29)); // at the end
+        assert_eq!(u.scroll, 30 - rows);
+        drag(&mut u, -(30.0 - rows as f32 - 7.0));
+        assert_eq!(u.scroll, 7);
         find(&u, Action::SelectWorld(8));
         // Pick one: its details and EDIT and DELETE show; tap it again to play it.
         tap(&mut u, Action::SelectWorld(7));
@@ -199,11 +209,6 @@ fn picking_playing_editing_and_deleting_worlds() {
         tap(&mut u, Action::SaveWorld);
         assert_eq!(u.take_request(), Some(Request::Rename { folder: "W7".into(), name: "WorldIsle 2".into() }));
         assert_eq!(u.screen, Screen::WorldList);
-        // The pencil on a row edits that row's world.
-        tap(&mut u, Action::EditWorldAt(8));
-        assert_eq!((u.screen, u.selected, u.fields[0].as_str()), (Screen::EditWorld, Some(8), "World 8"));
-        u.selected = Some(7);
-        tap(&mut u, Action::Open(Screen::WorldList));
         // Delete it, after saying yes.
         tap(&mut u, Action::AskDelete);
         assert_eq!(u.screen, Screen::DeleteWorld);
@@ -296,7 +301,7 @@ fn the_loading_screen_shows_progress() {
 }
 
 #[test]
-fn settings_change_a_copy_that_apply_keeps_and_back_forgets() {
+fn settings_take_effect_at_once_and_lead_back() {
     for (w, h) in SIZES {
         let (wf, hf) = (w as f32, h as f32);
         let mut u = title();
@@ -305,42 +310,39 @@ fn settings_change_a_copy_that_apply_keeps_and_back_forgets() {
         tap(&mut u, Action::OpenSettings);
         assert_eq!((u.screen, u.tab), (Screen::Settings, 0));
         // Every group lays out, with its settings on screen.
-        let expect: [&[Action]; 3] = [
+        let expect: [&[Action]; 4] = [
             &[Action::ToggleWalk, Action::ToggleView, Action::ToggleStats],
             &[Action::RenderDist(1), Action::RenderDist(-1), Action::LodDist(1), Action::CycleLodQuality, Action::ToggleFog, Action::ToggleClouds, Action::ToggleRays, Action::ToggleVsync],
             &[Action::CycleCull, Action::ToggleMesher],
+            &[Action::OpenControls, Action::HudOpacity(1), Action::LookSpeed(-1), Action::JoySize(1)],
         ];
         for (t, actions) in expect.iter().enumerate() {
             tap(&mut u, Action::Tab(t as u8));
             check_layout(&mut u, wf, hf);
             for a in actions.iter() {
-                find(&u, *a);
+                let b = find(&u, *a);
+                assert!(b.h >= 26.0 * 2.75, "{w}x{h}: {a:?} is {}px high", b.h);
             }
             // No time of day here: it belongs to each world.
             assert!(u.buttons.iter().all(|b| !matches!(b.action, Action::Time(_))));
         }
-        // Changes wait for APPLY ...
+        // Changes take effect at once; a new render distance is reported.
         let before = u.settings;
         tap(&mut u, Action::Tab(1));
         tap(&mut u, Action::ToggleFog);
-        tap(&mut u, Action::RenderDist(1));
-        assert_eq!(u.settings, before);
-        assert_ne!(u.draft, before);
-        // ... BACK forgets them ...
+        assert_eq!(u.settings.fog, !before.fog);
+        assert!(u.apply(Action::RenderDist(1)));
+        build(&mut u);
+        // RESET TO DEFAULT puts the defaults back (but not VSync, which the phone decides).
+        u.settings.vsync = false;
+        assert!(u.apply(Action::ResetSettings));
+        assert_eq!(u.settings, Settings { vsync: false, ..Settings::default() });
+        // The X and BACK both go back.
+        build(&mut u);
+        let backs = u.buttons.iter().filter(|b| b.action == Action::Open(Screen::Title)).count();
+        assert_eq!(backs, 2);
         tap(&mut u, Action::Open(Screen::Title));
-        assert_eq!((u.screen, u.settings), (Screen::Title, before));
-        // ... APPLY keeps them, and says when the render distance changed.
-        u.apply(Action::OpenSettings);
-        u.apply(Action::ToggleFog);
-        assert!(!u.apply(Action::ApplySettings));
-        assert_eq!((u.screen, u.settings.fog), (Screen::Title, !before.fog));
-        u.apply(Action::OpenSettings);
-        u.apply(Action::RenderDist(-1));
-        assert!(u.apply(Action::ApplySettings));
-        // RESET TO DEFAULT puts the copy back to the defaults.
-        u.apply(Action::OpenSettings);
-        u.apply(Action::ResetSettings);
-        assert_eq!(u.draft, Settings { vsync: u.settings.vsync, ..Settings::default() });
+        assert_eq!(u.screen, Screen::Title);
     }
 }
 
@@ -362,7 +364,7 @@ fn the_game_menu_opens_from_the_hud_and_leads_to_settings_and_the_title() {
         assert!(u.over_world());
         find(&u, Action::Time(1));
         find(&u, Action::Time(-1));
-        tap(&mut u, Action::ApplySettings);
+        tap(&mut u, Action::Open(Screen::Pause));
         assert_eq!(u.screen, Screen::Pause);
         tap(&mut u, Action::Open(Screen::Playing));
         assert_eq!(u.screen, Screen::Playing);
@@ -445,26 +447,35 @@ fn the_action_grid_and_the_block_picker_open_on_top() {
         let out = build(&mut u);
         assert!(out.iter().all(|v| v.pos[0] >= -30.0 && v.pos[0] <= wf + 30.0 && v.pos[1] >= -30.0 && v.pos[1] <= hf + 30.0));
         assert_eq!(on_top(&u, |a| matches!(a, Action::Press("punch" | "wave" | "revive" | "two_handed_item")) || a == Action::ToggleView), 5);
-        // The block picker closes the grid; picking a block fills the picked slot.
+        // The inventory closes the grid; picking a block twice fills the picked slot.
         u.apply(Action::Slot(6));
         u.apply(Action::ToggleInventory);
-        assert!(!u.acts_open && u.inventory_open);
-        let out = build(&mut u);
-        assert!(out.iter().all(|v| v.pos[0] >= -30.0 && v.pos[0] <= wf + 30.0 && v.pos[1] >= -30.0 && v.pos[1] <= hf + 30.0));
+        assert!(!u.acts_open);
+        assert_eq!(u.screen, Screen::Inventory);
+        assert!(u.over_world(), "the game shows behind the inventory");
+        check_layout(&mut u, wf, hf);
         let n = u.blocks.len();
-        assert_eq!(on_top(&u, |a| matches!(a, Action::PickBlock(_))), n);
         for k in 0..n {
-            let b = find(&u, Action::PickBlock(k as u16));
+            let b = find(&u, Action::InvPick(k as u16));
             assert!(b.w >= 30.0 * 2.75, "{w}x{h}: block tiles are {}px", b.w);
         }
         let granite = u.blocks.iter().position(|b| b.name == "Granite").expect("granite");
-        u.apply(Action::PickBlock(granite as u16));
+        tap(&mut u, Action::InvPick(granite as u16));
+        assert_eq!(u.inv_sel, Some(granite));
+        assert_ne!(u.held_block(), u.blocks[granite].id, "one tap only picks it");
+        tap(&mut u, Action::InvPick(granite as u16));
         assert_eq!((u.slot, u.held_block()), (6, u.blocks[granite].id));
         assert_eq!(u.icon_of(u.held_block()), Some(granite));
-        // The hotbar's slots stay pressable under the picker.
-        on_top(&u, |a| matches!(a, Action::Slot(_)));
+        // ADD TO HOTBAR puts the picked block in another slot; CLEAR SLOT empties it.
         tap(&mut u, Action::Slot(2));
-        assert_eq!(u.held_block(), u.hotbar[2]);
+        tap(&mut u, Action::AddToHotbar);
+        assert_eq!(u.hotbar[2], u.blocks[granite].id);
+        tap(&mut u, Action::ClearSlot);
+        assert_eq!(u.hotbar[2], 0);
+        build(&mut u);
+        assert!(!has(&u, Action::ClearSlot), "nothing to clear");
+        tap(&mut u, Action::Open(Screen::Playing));
+        assert_eq!(u.screen, Screen::Playing);
     }
 }
 
@@ -624,7 +635,7 @@ fn the_hud_keeps_clear_of_the_safe_area_the_system_reports() {
 #[test]
 fn settings_have_a_tab_each_and_names_read_well() {
     assert_eq!(TABS.len(), 4);
-    for (name, icon) in TABS {
+    for (name, icon, _) in TABS {
         assert!(crate::atlas::atlas().has_icon(icon), "{name}: no {icon} icon");
     }
     // Every printable character can be drawn in both fonts (world names are typed).

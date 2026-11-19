@@ -99,48 +99,59 @@ CI flow (GitHub Actions, all from a phone):
 
 ### Menus (`app/src/ui`, `app/src/ui.wgsl`, `assets/ui`, `tools/make_ui_atlas.py`)
 
-Every menu is drawn in one style: dark stone buttons with metal rims and rivets, framed panels
-with corner brackets, a title plaque with blue gems, the BlockForge logo, serif text (Crimson
-Text) and pixel text (Pixelify Sans) with icons (Material Icons), and a blue glow on the button
-under the finger. Menu buttons act when the finger lifts off them (slide off to cancel); the
-in-game buttons act on the touch.
+Every menu is drawn in one dark fantasy style: weathered stone set in iron frames with bronze
+edges, blue crystal gems at the corners and tips, long buttons with pointed ends, a title plaque
+with a gem over it, the BlockForge logo in a medieval face (Almendra) with flourished rules,
+serif text (Crimson Text) with icons (Material Icons), and a blue glow on the picked item and the
+button under the finger. Menu buttons act when the finger lifts off them (slide off to cancel);
+the in-game buttons act on the touch. The game is landscape only.
 
 Everything comes from one 2048 x 2048 atlas (`assets/ui/atlas.png` and `atlas.json`), built by
-`tools/make_ui_atlas.py` from the fonts: the frames are painted procedurally as nine-slice
-pieces, and the text and icons are signed distance fields, so they stay sharp at any size. The
+`tools/make_ui_atlas.py` from the fonts: the frames are painted procedurally
+(`tools/ui_ornate.py`: bevelled iron lit from the top left, bronze edge lines, noisy stone with
+faint cracks) as nine-slice pieces, and the text and icons are signed distance fields, so they
+stay sharp at any size. Panels are nearly opaque on purpose: blending happens in linear light,
+where a few percent of a bright sky shows strongly through dark stone. The
 UI shader (`ui.wgsl`) has three modes per vertex: atlas colour, SDF text, and the world
 thumbnails' texture. The fonts are under the SIL Open Font License and the icons under Apache
 2.0 (`assets/ui/CREDITS.md`, `assets/ui/licenses`).
 
 ### Title screen (`app/src/title.rs`, `app/src/title.wgsl`, `assets/title`)
 
-The app opens on a main menu: the BlockForge logo over Single Player, Multi Player, Settings,
-Customize and Mods, with Quit below them (it closes the app). Single Player glows until another
-button is pressed. Behind it a panorama of a sunset over the sea turns once every three minutes.
+The app opens on a main menu: the BlockForge logo over a column of Single Player, Multiplayer,
+Settings, Mods, Cosmetics and Quit (it closes the app); Single Player glows until another button
+is pressed. At the top right is the player (it opens Cosmetics), and on the right the character
+himself, the real HyRig model idling on a stone pedestal, with arrows under him that turn him
+45 degrees at a time (`title::Showcase`: the controller and rig on flat ground, posed every
+frame, drawn with the game's character pipeline between the pedestal and the rest of the menu,
+by a camera at his chest shifted in clip space so his feet land on the pedestal;
+`gfx::showcase_view_proj`). The version is at the bottom left. Behind it all a panorama of a
+sunset over the sea turns once every three minutes.
 The panorama was photographed in the game itself: twelve views 30 degrees apart from one spot
 off a west-facing coast (seed 1337, near x -1848, z 40, at 18:18), rendered with the god rays off
 so they match, and stitched into one cylindrical picture (`tools/stitch_panorama.py`: 4096 x
 683, 30 degrees above and below the horizon, 425 KB as JPEG). The title shader turns each screen
 pixel into a compass direction and elevation and samples it.
 
-Multi Player, Customize and Mods open pages that say what is and is not there yet (no network
+Multiplayer, Cosmetics and Mods open pages that say what is and is not there yet (no network
 play, skins or mods so far).
 
 ### Worlds (`app/src/worlds.rs`)
 
-Single Player opens the world list: on the left every saved world with its picture, name, seed,
-when it was last played (date and time, in the phone's time zone) and its size on disk, the most
-recent first (the scroll bar's top and bottom halves scroll); on the right the picked world's
-picture, name, seed, play time and size, with Edit and Delete. Tap a world to pick it and again
-to play it, or use Play; the pencil on a row edits that world. Create New World asks for a name
+Single Player opens the world list, under tabs for Single Player and Multiplayer (and a cog for
+the settings): on the left every saved world as a row with its picture, name, seed, when it was
+last played (date and time, in the phone's time zone) and its size on disk, the most recent
+first (drag the list to scroll it); on the right the picked world's big picture, its name between
+gems, seed, last played, play time, size and when it was created. Along the bottom: Back, Create
+New World, Re-Create, and Edit, Delete and Play (glowing once a world is picked). Tap a world to
+pick it and again to play it, or use Play. Create New World asks for a name
 and an optional seed (a number is used as it is, a word is hashed so it always gives the same
 world, blank is random). Edit renames the picked world, Re-Create opens the create page filled
 in with its name and seed (a fresh copy of the same terrain), Delete asks first and then removes
 its folder for good. Names and seeds are typed on an on-screen keyboard (shift, digits, space and
 `-`; a name starts with a capital, as on a phone; Android's own keyboard does not reach a
 NativeActivity reliably); a hardware keyboard works too. Opening a world shows Loading terrain
-with a progress bar until the player has ground under him (or 25 seconds have passed). On a
-portrait screen the picked world's panel moves under the list.
+with a progress bar until the player has ground under him (or 25 seconds have passed).
 
 A world's picture is taken when it is closed: the renderer draws the world once more without the
 HUD into a texture, reads it back, and `icon.png` (256 x 144, the middle 16:9 averaged down) is
@@ -156,14 +167,15 @@ the app starts, edits and all.
 
 ### Settings and the game menu
 
-Settings has three groups, as tabs on the left: General (walk or fly, the camera: first person,
-behind or in front, stats on/off, and the time of day when opened from a world), Video (render
-distance 2-12 chunks, LOD distance OFF, 1K ... 32K blocks, LOD quality, fog, clouds, god rays,
-VSync) and Performance (culling, mesher). Switches, steppers and choices change a copy: Apply
-keeps it (and sends a new render distance to the server), Back forgets it, Reset to Default puts
-the defaults back. With many settings and a wide panel they go in two columns. A fourth tab,
-Controls, has the button layout editor (below), button opacity (30-100%), look sensitivity
-(1-10) and the stick's size (small, medium, large).
+Settings has four groups, as tabs on the left of one big frame: General (walk or fly, the
+camera: first person, behind or in front, stats on/off, and the time of day when opened from a
+world), Video (render distance 2-12 chunks, LOD distance OFF, 1K ... 32K blocks, LOD quality, fog,
+clouds, god rays, VSync), Performance (culling, mesher) and Controls (the button layout editor,
+below; button opacity 30-100%, look sensitivity 1-10, the stick's size). The group's settings
+are in the middle, with arrows to step values and switches; on the right a note on what the group
+is about over a sepia picture (a group with more than five settings uses that room for a second
+column instead). Changes take effect at once (a new render distance goes to the server straight
+away); the X and Back go back, Reset to Default puts the defaults back.
 
 In a world, the pause button at the top right opens the game menu over the world (which keeps
 running behind it): Back to Game, Settings, and Save & Quit to Title, which saves the world, takes
@@ -193,8 +205,10 @@ and quads drawn. The HUD and menus are drawn by a small immediate-mode layer (`u
 * **Place** (round, shows the hotbar's block): puts that block on the face you look at, then
   again every 0.22 s while held (after 0.4 s), never inside you or the character.
 * **Hotbar:** nine blocks along the bottom; tap one to pick it (its name shows for a moment).
-  The last button opens a picker of every placeable block (17 now); tapping one puts it in the
-  picked slot. The hotbar is saved with each world (`state.txt`). The block pictures are little
+  The backpack button at its end opens the inventory over the game: every placeable block in a
+  grid of slots on the left; the picked one's picture, name and a line about it on the right,
+  above the hotbar. Tap a block to pick it, tap it again (or Add to Hotbar) to put it in the
+  hotbar's picked slot; tap a hotbar slot there to choose which; Clear Slot empties it. The hotbar is saved with each world (`state.txt`). The block pictures are little
   cubes drawn on the CPU from each block's own textures when the renderer starts, kept in
   the bottom of the world-thumbnails texture.
 * **Jump, Roll, Crouch, Crawl, Act** (walking only), and **Pause**.
