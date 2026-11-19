@@ -1,7 +1,8 @@
+use super::controls::{self, CONTROLS};
 use super::screens::TABS;
 use super::*;
 
-const SIZES: [(u32, u32); 5] = [(2400, 1080), (1920, 1080), (2800, 1260), (2340, 1080), (1080, 2400)];
+const SIZES: [(u32, u32); 5] = [(2400, 1080), (1920, 1080), (2800, 1260), (2340, 1080), (3200, 1440)];
 const DP: f64 = 2.75;
 
 /// In the game (the HUD tests); `title()` for the title screen.
@@ -74,7 +75,7 @@ fn check_layout(u: &mut Ui, w: f32, h: f32) {
     assert!(out.len() < MAX_HUD_VERTS, "{} vertices on {:?}", out.len(), u.screen);
     for v in &out {
         // (the glow around a button reaches a little past it)
-        assert!(v.pos[0] >= -30.0 && v.pos[0] <= w + 30.0 && v.pos[1] >= -30.0 && v.pos[1] <= h + 30.0, "{:?} off a {w}x{h} {:?}", v.pos, u.screen);
+        assert!(v.pos[0] >= -60.0 && v.pos[0] <= w + 60.0 && v.pos[1] >= -60.0 && v.pos[1] <= h + 60.0, "{:?} off a {w}x{h} {:?}", v.pos, u.screen);
     }
     let real: Vec<&Button> = u.buttons.iter().filter(|b| b.action != Action::Nothing).collect();
     for b in &real {
@@ -372,30 +373,225 @@ fn the_game_menu_opens_from_the_hud_and_leads_to_settings_and_the_title() {
     }
 }
 
+/// Every block the hotbar can hold, as the game gives them.
+fn blocks() -> Vec<BlockItem> {
+    crate::game::block_items(&blockforge::registry::BlockRegistry::builtin())
+}
+
+/// The game's HUD with the blocks in it and the default hotbar's first slots filled.
+fn hud(w: u32, h: u32, walk: bool) -> Ui {
+    let mut u = ui();
+    u.set_surface(w, h, DP);
+    u.blocks = blocks();
+    for (slot, b) in u.hotbar.iter_mut().zip(&u.blocks) {
+        *slot = b.id;
+    }
+    u.settings.walk = walk;
+    u
+}
+
+/// Every button `pick` matches is the one a touch on its middle gets (nothing on top).
+fn on_top(u: &Ui, pick: impl Fn(Action) -> bool) -> usize {
+    let mut n = 0;
+    for b in u.buttons.iter().filter(|b| pick(b.action)) {
+        assert_eq!(u.hit(b.x + b.w * 0.5, b.y + b.h * 0.5), Some(b.action), "something is over {:?}", b.action);
+        n += 1;
+    }
+    n
+}
+
 #[test]
-fn the_hud_has_the_menu_button_and_the_characters_buttons() {
+fn the_hud_has_its_controls_and_they_act_on_the_touch() {
     for (w, h) in SIZES {
         let (wf, hf) = (w as f32, h as f32);
-        let mut u = ui();
-        u.set_surface(w, h, DP);
-        u.settings.walk = false;
-        check_layout(&mut u, wf, hf);
-        assert!(!has(&u, Action::Hold("jump")));
-        u.settings.walk = true;
+        // Flying: attack, place, the hotbar and pause; nothing that needs the body.
+        let mut u = hud(w, h, false);
         u.settings.show_stats = true;
         check_layout(&mut u, wf, hf);
-        for a in [Action::Hold("jump"), Action::Hold("roll"), Action::Press("crouch"), Action::Press("crawl"), Action::ToggleActs] {
-            let b = find(&u, a);
-            assert!(b.w >= 40.0 * 2.75 && b.h >= 40.0 * 2.75, "{a:?} is {}x{}", b.w, b.h);
-            // HUD buttons act on the touch, not the lift.
-            assert_eq!(u.press(9, b.x + 2.0, b.y + 2.0), Some(a));
-        }
-        u.apply(Action::ToggleActs);
-        check_layout(&mut u, wf, hf);
-        for a in [Action::Press("punch"), Action::Press("wave"), Action::Press("revive"), Action::ToggleView] {
+        for a in [Action::Hold("attack"), Action::Hold("place"), Action::ToggleInventory, Action::Open(Screen::Pause)] {
             find(&u, a);
         }
+        for n in 0..9 {
+            let b = find(&u, Action::Slot(n));
+            assert!(b.w >= 26.0 * 2.75 && b.h >= 26.0 * 2.75, "{w}x{h}: slot {n} is {}x{}", b.w, b.h);
+        }
+        assert!(!has(&u, Action::Hold("jump")) && !has(&u, Action::ToggleActs));
+        // Walking: the character's too, none on top of another.
+        let mut u = hud(w, h, true);
+        check_layout(&mut u, wf, hf);
+        for a in [Action::Hold("attack"), Action::Hold("place"), Action::Hold("jump"), Action::Hold("roll"), Action::Press("crouch"), Action::Press("crawl"), Action::ToggleActs] {
+            let b = find(&u, a);
+            assert!(b.w >= 40.0 * 2.75 && b.h >= 40.0 * 2.75, "{w}x{h}: {a:?} is {}x{}", b.w, b.h);
+            // HUD buttons act on the touch, not the lift.
+            assert_eq!(u.press(9, b.x + b.w * 0.5, b.y + b.h * 0.5), Some(a));
+        }
+        // The extras stay off until the editor puts them on.
+        assert!(!has(&u, Action::Press("wave")) && !has(&u, Action::ToggleView));
+        // ATTACK is big and in easy reach of the right thumb; the hotbar along the bottom.
+        let attack = find(&u, Action::Hold("attack"));
+        assert!(attack.x > wf * 0.6 && attack.y > hf * 0.6);
+        let slot = find(&u, Action::Slot(4));
+        assert!(slot.y + slot.h > hf * 0.85 && slot.x + slot.w < attack.x);
     }
+}
+
+#[test]
+fn the_action_grid_and_the_block_picker_open_on_top() {
+    for (w, h) in SIZES {
+        let (wf, hf) = (w as f32, h as f32);
+        let mut u = hud(w, h, true);
+        build(&mut u);
+        u.apply(Action::ToggleActs);
+        let out = build(&mut u);
+        assert!(out.iter().all(|v| v.pos[0] >= -30.0 && v.pos[0] <= wf + 30.0 && v.pos[1] >= -30.0 && v.pos[1] <= hf + 30.0));
+        assert_eq!(on_top(&u, |a| matches!(a, Action::Press("punch" | "wave" | "revive" | "two_handed_item")) || a == Action::ToggleView), 5);
+        // The block picker closes the grid; picking a block fills the picked slot.
+        u.apply(Action::Slot(6));
+        u.apply(Action::ToggleInventory);
+        assert!(!u.acts_open && u.inventory_open);
+        let out = build(&mut u);
+        assert!(out.iter().all(|v| v.pos[0] >= -30.0 && v.pos[0] <= wf + 30.0 && v.pos[1] >= -30.0 && v.pos[1] <= hf + 30.0));
+        let n = u.blocks.len();
+        assert_eq!(on_top(&u, |a| matches!(a, Action::PickBlock(_))), n);
+        for k in 0..n {
+            let b = find(&u, Action::PickBlock(k as u16));
+            assert!(b.w >= 30.0 * 2.75, "{w}x{h}: block tiles are {}px", b.w);
+        }
+        let granite = u.blocks.iter().position(|b| b.name == "Granite").expect("granite");
+        u.apply(Action::PickBlock(granite as u16));
+        assert_eq!((u.slot, u.held_block()), (6, u.blocks[granite].id));
+        assert_eq!(u.icon_of(u.held_block()), Some(granite));
+        // The hotbar's slots stay pressable under the picker.
+        on_top(&u, |a| matches!(a, Action::Slot(_)));
+        tap(&mut u, Action::Slot(2));
+        assert_eq!(u.held_block(), u.hotbar[2]);
+    }
+}
+
+#[test]
+fn the_floating_stick_is_drawn_where_the_game_puts_it() {
+    let mut u = hud(2400, 1080, true);
+    let base_only = build(&mut u).len();
+    u.joystick = Some(Joy { base: [400.0, 700.0], knob: [470.0, 650.0], radius: 154.0, alpha: 1.0 });
+    let out = build(&mut u);
+    assert_eq!(out.len(), base_only + 12, "a ring and a knob");
+    let ring = out.chunks(6).position(|q| q.iter().any(|v| v.pos == [400.0 - 154.0, 700.0 - 154.0]) && q.iter().any(|v| v.pos == [400.0 + 154.0, 700.0 + 154.0]));
+    let ring = ring.expect("the ring around (400, 700)");
+    let knob = &out[(ring + 1) * 6..(ring + 2) * 6];
+    let kr = 154.0 * 0.48;
+    assert!(knob.iter().any(|v| v.pos == [470.0 - kr, 650.0 - kr]), "the knob at (470, 650)");
+    // It fades: alpha in the vertex colour.
+    u.joystick = Some(Joy { alpha: 0.5, ..u.joystick.unwrap() });
+    let out = build(&mut u);
+    assert!((out[ring * 6].color[3] as i32 - 127).abs() <= 1);
+}
+
+#[test]
+fn the_controls_editor_moves_resizes_hides_and_adds_controls() {
+    for (w, h) in SIZES {
+        let (wf, hf) = (w as f32, h as f32);
+        let mut u = title();
+        u.set_surface(w, h, DP);
+        u.blocks = blocks();
+        build(&mut u);
+        tap(&mut u, Action::OpenSettings);
+        tap(&mut u, Action::Tab(3));
+        check_layout(&mut u, wf, hf);
+        for a in [Action::HudOpacity(1), Action::LookSpeed(-1), Action::JoySize(1)] {
+            find(&u, a);
+        }
+        tap(&mut u, Action::OpenControls);
+        assert_eq!(u.screen, Screen::Controls);
+        check_layout(&mut u, wf, hf);
+        // Every control is there to grab, the walking ones too.
+        let grabs = u.buttons.iter().filter(|b| matches!(b.action, Action::CtlGrab(_))).count();
+        assert_eq!(grabs, CONTROLS.iter().filter(|c| c.shown).count());
+        // Nothing to resize or hide until one is picked.
+        assert!(!has(&u, Action::CtlSize(1)) && !has(&u, Action::CtlHide));
+        // Drag ATTACK to the middle of the screen.
+        let i = CONTROLS.iter().position(|c| c.key == "attack").unwrap();
+        let [x, y, cw, ch] = u.control_rect(i);
+        let (cx, cy) = (x + cw * 0.5, y + ch * 0.5);
+        assert_eq!(u.press(5, cx + 10.0, cy - 10.0), None);
+        assert!(u.holds(5));
+        u.moved(5, wf * 0.5 + 10.0, hf * 0.5 - 10.0);
+        assert_eq!(u.release(5, wf * 0.5 + 10.0, hf * 0.5 - 10.0), None);
+        let [x, y, cw, ch] = u.control_rect(i);
+        assert!((x + cw * 0.5 - wf * 0.5).abs() < 1.0 && (y + ch * 0.5 - hf * 0.5).abs() < 1.0);
+        build(&mut u);
+        // Picked: bigger twice; never past the screen's edge when dragged there.
+        tap(&mut u, Action::CtlSize(1));
+        tap(&mut u, Action::CtlSize(1));
+        let [_, _, cw2, _] = u.control_rect(i);
+        assert!((cw2 / cw - 1.2).abs() < 0.01, "{cw} -> {cw2}");
+        assert!(u.press(6, wf * 0.5, hf * 0.5).is_none());
+        u.moved(6, -wf, -hf);
+        u.release(6, -wf, -hf);
+        let [x, y, cw, ch] = u.control_rect(i);
+        let [sl, st, ..] = u.margins();
+        assert!((x - sl).abs() < 0.5 && (y - st).abs() < 0.5, "{x},{y}");
+        // (and back to the middle, clear of the others)
+        build(&mut u);
+        u.press(6, x + cw * 0.5, y + ch * 0.5);
+        u.moved(6, wf * 0.5, hf * 0.5);
+        u.release(6, wf * 0.5, hf * 0.5);
+        // Hide it, then ADD puts it back.
+        build(&mut u);
+        tap(&mut u, Action::CtlHide);
+        assert!(!u.layout.places[i].shown);
+        tap(&mut u, Action::CtlAddList);
+        // The list opens over the controls (they are grabbable again once it closes).
+        let out = build(&mut u);
+        assert!(out.iter().all(|v| v.pos[0] >= -60.0 && v.pos[0] <= wf + 60.0 && v.pos[1] >= -60.0 && v.pos[1] <= hf + 60.0));
+        let hidden = u.layout.places.iter().filter(|p| !p.shown).count();
+        assert_eq!(on_top(&u, |a| matches!(a, Action::CtlShow(_))), hidden);
+        find(&u, Action::CtlShow(i as u8));
+        let wave = CONTROLS.iter().position(|c| c.key == "wave").unwrap();
+        tap(&mut u, Action::CtlShow(wave as u8));
+        assert!(u.layout.places[wave].shown && !u.add_open);
+        build(&mut u);
+        tap(&mut u, Action::CtlAddList);
+        tap(&mut u, Action::CtlShow(i as u8));
+        check_layout(&mut u, wf, hf);
+        // The pause button can't be hidden.
+        let pause = CONTROLS.iter().position(|c| c.key == "pause").unwrap();
+        let [x, y, cw, ch] = u.control_rect(pause);
+        u.press(7, x + cw * 0.5, y + ch * 0.5);
+        u.release(7, x + cw * 0.5, y + ch * 0.5);
+        build(&mut u);
+        assert_eq!(u.sel_ctl, Some(pause));
+        assert!(!has(&u, Action::CtlHide));
+        // DONE saves and goes back to the settings; the layout survives the text file.
+        let layout = u.layout.clone();
+        tap(&mut u, Action::CtlDone);
+        assert_eq!((u.screen, u.take_request()), (Screen::Settings, Some(Request::SaveControls)));
+        assert_eq!(Layout::from_text(&layout.to_text()).to_text(), layout.to_text());
+        // In the game: WAVE is on screen now, ATTACK where it was put.
+        u.screen = Screen::Playing;
+        u.settings.walk = true;
+        build(&mut u);
+        find(&u, Action::Press("wave"));
+        let a = find(&u, Action::Hold("attack"));
+        let [x, y, ..] = u.control_rect(i);
+        assert_eq!((a.x, a.y), (x, y));
+        // RESET puts everything back.
+        u.apply(Action::OpenControls);
+        build(&mut u);
+        tap(&mut u, Action::CtlReset);
+        assert_eq!(u.layout, Layout::default());
+    }
+}
+
+#[test]
+fn a_damaged_controls_file_still_gives_a_layout() {
+    let l = Layout::from_text("attack=0.5,0.5,9.0,1\nplace=-,-,0.1,0\npause=0.2,0.2,1.0,0\nnope=1,1,1,1\njump=banana\nwave=x,y,1.0,1\n");
+    let at = |k: &str| CONTROLS.iter().position(|c| c.key == k).unwrap();
+    assert_eq!(l.places[at("attack")].scale, controls::SCALE_MAX);
+    assert_eq!(l.places[at("place")], controls::Place { at: None, scale: controls::SCALE_MIN, shown: false });
+    assert!(l.places[at("pause")].shown, "the pause button stays");
+    assert_eq!(l.places[at("jump")], Layout::default().places[at("jump")]);
+    assert_eq!(l.places[at("wave")], controls::Place { at: None, scale: 1.0, shown: true });
+    assert_eq!(Layout::from_text(""), Layout::default());
 }
 
 #[test]
@@ -427,7 +623,7 @@ fn the_hud_keeps_clear_of_the_safe_area_the_system_reports() {
 
 #[test]
 fn settings_have_a_tab_each_and_names_read_well() {
-    assert_eq!(TABS.len(), 3);
+    assert_eq!(TABS.len(), 4);
     for (name, icon) in TABS {
         assert!(crate::atlas::atlas().has_icon(icon), "{name}: no {icon} icon");
     }
@@ -456,6 +652,9 @@ fn settings_survive_a_round_trip_through_text() {
         god_rays: false,
         walk: false,
         view: CamView::Front,
+        hud_opacity: 50,
+        look_speed: 8,
+        joy_size: 2,
     };
     let mut back = Settings::default();
     back.apply_text(&s.to_text());
@@ -471,4 +670,6 @@ fn bad_settings_text_is_ignored_or_clamped() {
     assert_eq!(s.lod_level, LOD_DISTANCES.len() as u8 - 1);
     s.apply_text("render_chunks=0");
     assert_eq!(s.render_chunks, RENDER_MIN);
+    s.apply_text("hud_opacity=3\nlook_speed=99\njoy_size=7");
+    assert_eq!((s.hud_opacity, s.look_speed, s.joy_size), (OPACITY_MIN, 10, 2));
 }

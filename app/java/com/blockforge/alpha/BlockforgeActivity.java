@@ -1,6 +1,7 @@
 package com.blockforge.alpha;
 
 import android.app.NativeActivity;
+import android.content.pm.ActivityInfo;
 import android.os.Build;
 import android.os.Bundle;
 import android.view.DisplayCutout;
@@ -35,6 +36,8 @@ public class BlockforgeActivity extends NativeActivity {
     @Override
     protected void onCreate(Bundle state) {
         super.onCreate(state);
+        // Landscape only (either way up), whatever the manifest gets merged with.
+        setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
         Window w = getWindow();
         w.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         if (Build.VERSION.SDK_INT >= 28) {

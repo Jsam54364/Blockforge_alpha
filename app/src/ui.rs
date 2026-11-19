@@ -7,8 +7,11 @@
 
 use crate::font;
 
+mod controls;
 mod draw;
 mod screens;
+
+pub use controls::{BlockItem, Joy, Layout, JOY_RADII};
 use crate::perf::Perf;
 
 /// One corner of a HUD triangle (`ui.wgsl`): pixel position, texture place, sRGB colour and
@@ -118,7 +121,15 @@ pub struct Settings {
     pub walk: bool,
     /// Where the camera is while walking.
     pub view: CamView,
+    /// How opaque the game's buttons are, in percent (`OPACITY_MIN`..100).
+    pub hud_opacity: u8,
+    /// How fast dragging turns the view, 1..10 (5 = the default speed).
+    pub look_speed: u8,
+    /// The stick's size: an index into `controls::JOY_RADII`.
+    pub joy_size: u8,
 }
+
+pub const OPACITY_MIN: u8 = 30;
 
 /// The walking camera, cycled like Minecraft's F5: behind the character, in front of him
 /// looking back, or in his head.
@@ -174,6 +185,9 @@ impl Default for Settings {
             god_rays: true,
             walk: true,
             view: CamView::Back,
+            hud_opacity: 85,
+            look_speed: 5,
+            joy_size: 1,
         }
     }
 }
@@ -182,7 +196,7 @@ impl Settings {
     /// `key=value` lines, one per setting, for the settings file kept between launches.
     pub fn to_text(&self) -> String {
         format!(
-            "render_chunks={}\nlod_level={}\nlod_quality={}\nfog={}\ncull={}\nvsync={}\ngreedy={}\nshow_stats={}\nclouds={}\ngod_rays={}\nwalk={}\nview={}\n",
+            "render_chunks={}\nlod_level={}\nlod_quality={}\nfog={}\ncull={}\nvsync={}\ngreedy={}\nshow_stats={}\nclouds={}\ngod_rays={}\nwalk={}\nview={}\nhud_opacity={}\nlook_speed={}\njoy_size={}\n",
             self.render_chunks,
             self.lod_level,
             self.lod_quality,
@@ -194,7 +208,10 @@ impl Settings {
             self.clouds,
             self.god_rays,
             self.walk,
-            self.view.key()
+            self.view.key(),
+            self.hud_opacity,
+            self.look_speed,
+            self.joy_size
         )
     }
 
@@ -213,6 +230,14 @@ impl Settings {
                 "view" => {
                     if let Some(v) = CamView::from_key(value) {
                         self.view = v;
+                    }
+                }
+                "hud_opacity" | "look_speed" | "joy_size" => {
+                    let Ok(v) = value.parse::<u8>() else { continue };
+                    match key {
+                        "hud_opacity" => self.hud_opacity = v.clamp(OPACITY_MIN, 100),
+                        "look_speed" => self.look_speed = v.clamp(1, 10),
+                        _ => self.joy_size = v.min(controls::JOY_RADII.len() as u8 - 1),
                     }
                 }
                 "lod_level" => {
@@ -311,6 +336,25 @@ pub enum Action {
     Press(&'static str),
     /// Moves the time of day by this many hours (the game owns the clock and does it).
     Time(i8),
+    /// The hotbar: picks a slot; opens the block picker; puts block `n` of `Ui::blocks` in
+    /// the picked slot.
+    Slot(u8),
+    ToggleInventory,
+    PickBlock(u16),
+    /// Settings > Controls.
+    HudOpacity(i8),
+    LookSpeed(i8),
+    JoySize(i8),
+    /// Opens the controls editor; its toolbar: bigger or smaller, hide, the list of hidden
+    /// controls, put one back, everything back where it was, and done.
+    OpenControls,
+    CtlGrab(u8),
+    CtlSize(i8),
+    CtlHide,
+    CtlAddList,
+    CtlShow(u8),
+    CtlReset,
+    CtlDone,
 }
 
 /// Where the player is: the title screen (Minecraft-style main menu over a turning
@@ -331,6 +375,9 @@ pub enum Screen {
     Loading,
     /// The game menu, over the world: back to the game, settings, save and quit.
     Pause,
+    /// Settings > Controls > Customize: moving, resizing, hiding and adding the game's
+    /// buttons.
+    Controls,
     Playing,
 }
 
@@ -358,6 +405,8 @@ pub enum Request {
     Delete(String),
     /// QUIT on the title screen: close the app.
     Quit,
+    /// The controls editor is done: save the layout (`controls.txt`).
+    SaveControls,
 }
 
 struct Button {
@@ -410,6 +459,24 @@ pub struct Ui {
     caps_auto: bool,
     /// The thumbnail slot shown for worlds without a picture of their own.
     pub default_thumb: Option<usize>,
+    /// Where the game's buttons are (the player's layout), the one picked in the editor,
+    /// the finger dragging one (touch, control, offset to its centre) and the ADD list.
+    pub layout: Layout,
+    sel_ctl: Option<usize>,
+    drag: Option<(u64, usize, f32, f32)>,
+    add_open: bool,
+    /// The blocks the player can place (icon `i` is block `blocks[i]`), the hotbar's
+    /// blocks (ids, 0 = empty), the picked slot and when it last changed, and whether the
+    /// block picker is open.
+    pub blocks: Vec<BlockItem>,
+    pub hotbar: [u16; 9],
+    pub slot: usize,
+    slot_changed: f32,
+    pub inventory_open: bool,
+    /// The floating stick, while it shows (the game moves it).
+    pub joystick: Option<Joy>,
+    /// What the fingers on the game's buttons are holding (they glow).
+    pub touching: Vec<Action>,
 }
 
 const WHITE: [u8; 4] = [255, 255, 255, 255];
@@ -541,6 +608,17 @@ impl Ui {
             caps: true,
             caps_auto: true,
             default_thumb: None,
+            layout: Layout::default(),
+            sel_ctl: None,
+            drag: None,
+            add_open: false,
+            blocks: Vec::new(),
+            hotbar: [0; 9],
+            slot: 0,
+            slot_changed: -10.0,
+            inventory_open: false,
+            joystick: None,
+            touching: Vec::new(),
         }
     }
 
@@ -548,7 +626,7 @@ impl Ui {
     pub fn over_world(&self) -> bool {
         match self.screen {
             Screen::Playing | Screen::Pause => true,
-            Screen::Settings => self.settings_back == Screen::Pause,
+            Screen::Settings | Screen::Controls => self.settings_back == Screen::Pause,
             _ => false,
         }
     }
@@ -558,6 +636,10 @@ impl Ui {
     /// the finger to lift (`release`). `None` also when the touch missed every button.
     pub fn press(&mut self, id: u64, x: f32, y: f32) -> Option<Action> {
         let a = self.hit(x, y)?;
+        if let Action::CtlGrab(i) = a {
+            self.grab_control(id, i as usize, x, y);
+            return None;
+        }
         if self.screen == Screen::Playing || matches!(a, Action::Key(_) | Action::Backspace | Action::Shift | Action::Nothing) {
             return Some(a);
         }
@@ -567,6 +649,10 @@ impl Ui {
 
     /// A finger lifted: the button it pressed, if it is still on it.
     pub fn release(&mut self, id: u64, x: f32, y: f32) -> Option<Action> {
+        if self.drag.is_some_and(|d| d.0 == id) {
+            self.drag = None;
+            return None;
+        }
         match self.pressed {
             Some((pid, a)) if pid == id => {
                 self.pressed = None;
@@ -578,7 +664,7 @@ impl Ui {
 
     /// Whether a touch is holding a menu button down (the game leaves it alone).
     pub fn holds(&self, id: u64) -> bool {
-        self.pressed.is_some_and(|(pid, _)| pid == id)
+        self.pressed.is_some_and(|(pid, _)| pid == id) || self.drag.is_some_and(|d| d.0 == id)
     }
 
     /// The button being held down, if any (it glows).
@@ -588,7 +674,7 @@ impl Ui {
 
     /// The settings that actions change: the page's working copy while it is open.
     fn edited(&mut self) -> &mut Settings {
-        if self.screen == Screen::Settings {
+        if matches!(self.screen, Screen::Settings | Screen::Controls) {
             &mut self.draft
         } else {
             &mut self.settings
@@ -640,6 +726,11 @@ impl Ui {
         self.safe.unwrap_or([0.0, SAFE_TOP_DP * self.dp, SAFE_RIGHT_DP * self.dp, 0.0])
     }
 
+    /// Screen pixels per dp.
+    pub fn dp_scale(&self) -> f32 {
+        self.dp
+    }
+
     pub fn set_surface(&mut self, w: u32, h: u32, scale_factor: f64) {
         self.size = (w.max(1) as f32, h.max(1) as f32);
         self.dp = (scale_factor as f32).max(1.0);
@@ -659,9 +750,39 @@ impl Ui {
     pub fn apply(&mut self, a: Action) -> bool {
         match a {
             Action::Nothing => false,
+            Action::Slot(_)
+            | Action::ToggleInventory
+            | Action::PickBlock(_)
+            | Action::OpenControls
+            | Action::CtlGrab(_)
+            | Action::CtlSize(_)
+            | Action::CtlHide
+            | Action::CtlAddList
+            | Action::CtlShow(_)
+            | Action::CtlReset
+            | Action::CtlDone => {
+                self.apply_controls(a);
+                false
+            }
+            Action::HudOpacity(d) => {
+                let s = self.edited();
+                s.hud_opacity = (s.hud_opacity as i32 + d as i32 * 10).clamp(OPACITY_MIN as i32, 100) as u8;
+                false
+            }
+            Action::LookSpeed(d) => {
+                let s = self.edited();
+                s.look_speed = (s.look_speed as i32 + d as i32).clamp(1, 10) as u8;
+                false
+            }
+            Action::JoySize(d) => {
+                let s = self.edited();
+                s.joy_size = (s.joy_size as i32 + d as i32).clamp(0, controls::JOY_RADII.len() as i32 - 1) as u8;
+                false
+            }
             Action::Open(s) => {
                 self.screen = s;
                 self.acts_open = false;
+                self.inventory_open = false;
                 self.focus = None;
                 self.pressed = None;
                 false
@@ -864,6 +985,7 @@ impl Ui {
             }
             Action::ToggleActs => {
                 self.acts_open = !self.acts_open;
+                self.inventory_open = false;
                 false
             }
             Action::Time(_) | Action::Hold(_) | Action::Press(_) => false,

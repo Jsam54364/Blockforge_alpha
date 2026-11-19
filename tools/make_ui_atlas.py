@@ -57,6 +57,10 @@ ICON_CODES = {
     "wb_sunny": 0xE430, "layers": 0xE53B, "memory": 0xE322, "touch_app": 0xE913, "info": 0xE88E,
     "public": 0xE80B, "refresh": 0xE5D5, "casino": 0xEB40, "accessibility_new": 0xE92C,
     "filter_hdr": 0xE3DF, "auto_awesome": 0xE65F, "fullscreen": 0xE5D0,
+    # The game's controls and their editor.
+    "apps": 0xE5C3, "open_with": 0xE89F, "remove": 0xE15B, "visibility_off": 0xE8F5,
+    "keyboard_double_arrow_up": 0xEACF, "add_box": 0xE146, "opacity": 0xE91C, "gamepad": 0xE30F,
+    "zoom_out_map": 0xE56B, "front_hand": 0xE769, "gavel": 0xE90E, "inventory_2": 0xE1A1,
 }
 
 
@@ -324,6 +328,101 @@ def logo():
     return base
 
 
+def round_button(size):
+    """A round stone button with a metal rim, lit from above."""
+    ss = 4
+    S = size * ss
+    def disc(inset):
+        m = Image.new("L", (S, S), 0)
+        ImageDraw.Draw(m).ellipse([inset * ss, inset * ss, S - 1 - inset * ss, S - 1 - inset * ss], fill=255)
+        return np.asarray(m.resize((size, size), Image.LANCZOS)).astype(float) / 255
+    outer, m_rim, m_body = disc(1), disc(4), disc(10)
+    rim = vgrad(size, size, (182, 182, 192), (66, 66, 74))
+    body = stone(size, size, (66, 64, 70), (36, 35, 40))
+    img = np.zeros((size, size, 3))
+    img[...] = (12, 12, 14)
+    img = img * (1 - m_rim[..., None]) + rim * m_rim[..., None]
+    # A soft highlight across the upper half of the face.
+    yy, xx = np.mgrid[0:size, 0:size]
+    hl = np.clip(1.0 - np.hypot(xx - size * 0.5, (yy - size * 0.32) * 1.6) / (size * 0.42), 0, 1) ** 2
+    body = body + (hl * 26)[..., None]
+    img = img * (1 - m_body[..., None]) + body * m_body[..., None]
+    return to_img(img, outer * 255)
+
+
+def joystick_base(size):
+    """The stick's ring: a dark see-through disc in a thin metal ring, with four chevrons."""
+    ss = 4
+    S = size * ss
+    m = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+    d = ImageDraw.Draw(m)
+    d.ellipse([2 * ss, 2 * ss, S - 2 * ss, S - 2 * ss], fill=(10, 12, 18, 110), outline=(20, 20, 24, 200), width=4 * ss)
+    d.ellipse([5 * ss, 5 * ss, S - 5 * ss, S - 5 * ss], outline=(176, 178, 190, 210), width=3 * ss)
+    d.ellipse([S * 0.22, S * 0.22, S * 0.78, S * 0.78], outline=(176, 178, 190, 60), width=2 * ss)
+    c = S / 2
+    for ang in (0, 90, 180, 270):
+        a = np.radians(ang)
+        r1, r2, w = S * 0.40, S * 0.33, S * 0.07
+        tip = (c + np.cos(a) * r1, c + np.sin(a) * r1)
+        b1 = (c + np.cos(a) * r2 - np.sin(a) * w, c + np.sin(a) * r2 + np.cos(a) * w)
+        b2 = (c + np.cos(a) * r2 + np.sin(a) * w, c + np.sin(a) * r2 - np.cos(a) * w)
+        d.polygon([tip, b1, b2], fill=(150, 200, 255, 170))
+    return m.resize((size, size), Image.LANCZOS)
+
+
+def joystick_knob(size):
+    """The stick's thumb: a small round stone with a blue gem in the middle."""
+    k = round_button(size)
+    g = gem(int(size * 0.62))
+    k.alpha_composite(g, ((size - g.width) // 2, (size - g.height) // 2))
+    return k
+
+
+def slot(size):
+    """A hotbar slot: a dark see-through square in a thin metal rim."""
+    return framed(size, size, [(0, 0), (size, 0), (size, size), (0, size)], rim=5, outline=2, body_top=(30, 30, 36),
+                  body_bottom=(18, 18, 22), rim_top=(196, 196, 206), rim_bottom=(96, 96, 106), alpha_body=150)
+
+
+def pickaxe(size=96):
+    """A pickaxe: a wooden handle from bottom left to top right, an iron head curving across
+    its top, both outlined dark."""
+    ss = 4
+    S = size * ss
+    img = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    # The head: an arc of a circle centred at the handle's foot, so it crosses the
+    # handle's top at a right angle; the handle under it, ending in its middle.
+    cx, cy = 0.12 * S, 0.90 * S
+    r = 0.78 * S
+    a = (0.20 * S, 0.82 * S)
+    b = (cx + r * 0.7071, cy - r * 0.7071)
+    for width, colour in ((0.13, (22, 20, 26, 255)), (0.07, (126, 84, 44, 255))):
+        d.line([a, b], fill=colour, width=int(width * S))
+    d.line([(a[0] - 0.012 * S, a[1] - 0.012 * S), (b[0] - 0.012 * S, b[1] - 0.012 * S)], fill=(176, 122, 68, 255), width=int(0.022 * S))
+    box = [cx - r, cy - r, cx + r, cy + r]
+    for width, colour in ((0.18, (22, 20, 26, 255)), (0.12, (120, 128, 142, 255))):
+        d.arc(box, start=-84, end=-6, fill=colour, width=int(width * S))
+    d.arc([cx - r + 0.04 * S, cy - r + 0.04 * S, cx + r - 0.04 * S, cy + r - 0.04 * S], start=-80, end=-10, fill=(214, 222, 236, 255), width=int(0.03 * S))
+    return img.resize((size, size), Image.LANCZOS)
+
+
+def glow_ring(size, color=(70, 150, 255)):
+    """A round version of the selection glow, for round buttons."""
+    ss = 2
+    inset = size * 0.14
+    m = Image.new("L", (size * ss, size * ss), 0)
+    ImageDraw.Draw(m).ellipse([inset * ss, inset * ss, (size - inset) * ss - 1, (size - inset) * ss - 1], outline=255, width=3 * ss)
+    m = m.resize((size, size), Image.LANCZOS)
+    blur = m.filter(ImageFilter.GaussianBlur(inset * 0.45))
+    a = np.maximum(np.asarray(m).astype(float), np.asarray(blur).astype(float) * 1.6)
+    core = np.asarray(m).astype(float) / 255
+    rgb = np.zeros((size, size, 3))
+    rgb[...] = color
+    rgb = rgb * (1 - core[..., None]) + np.array([210, 235, 255]) * core[..., None]
+    return to_img(rgb, np.clip(a, 0, 255))
+
+
 def toggle(on):
     w, h = 132, 52
     img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
@@ -399,6 +498,20 @@ def main():
     pieces["toggle_off"] = [0, 0, 0, 0]
     packer.add(("piece", "gem"), gem(48))
     pieces["gem"] = [0, 0, 0, 0]
+
+    # The game's controls: round buttons, the stick, hotbar slots, the attack button's pickaxe.
+    packer.add(("piece", "round"), round_button(128))
+    pieces["round"] = [0, 0, 0, 0]
+    packer.add(("piece", "glow_round"), glow_ring(160))
+    pieces["glow_round"] = [0, 0, 0, 0]
+    packer.add(("piece", "joy_base"), joystick_base(200))
+    pieces["joy_base"] = [0, 0, 0, 0]
+    packer.add(("piece", "joy_knob"), joystick_knob(96))
+    pieces["joy_knob"] = [0, 0, 0, 0]
+    packer.add(("piece", "slot"), slot(72))
+    pieces["slot"] = [10, 10, 10, 10]
+    packer.add(("piece", "pickaxe"), pickaxe())
+    pieces["pickaxe"] = [0, 0, 0, 0]
 
     packer.add(("piece", "logo"), logo())
     pieces["logo"] = [0, 0, 0, 0]

@@ -15,6 +15,7 @@ mod gfx;
 mod glyphs;
 mod gpu_timer;
 pub mod hyrig;
+mod icons;
 mod math;
 mod perf;
 mod player;
@@ -79,11 +80,16 @@ impl App {
         if let Some(text) = save_dir.as_ref().and_then(|d| std::fs::read_to_string(d.join(worlds::SETTINGS_FILE)).ok()) {
             ui.settings.apply_text(&text);
         }
+        if let Some(text) = save_dir.as_ref().and_then(|d| std::fs::read_to_string(d.join(worlds::CONTROLS_FILE)).ok()) {
+            ui.layout = ui::Layout::from_text(&text);
+        }
+        let registry = Arc::new(BlockRegistry::builtin());
+        ui.blocks = game::block_items(&registry);
         let mut app = App {
             window: None,
             gfx: None,
             save_dir,
-            registry: Arc::new(BlockRegistry::builtin()),
+            registry,
             ui,
             game: None,
             opened: Instant::now(),
@@ -158,6 +164,15 @@ impl App {
         while let Some(r) = self.ui().take_request() {
             match r {
                 ui::Request::Quit => self.quit = true,
+                ui::Request::SaveControls => {
+                    if let Some(d) = &self.save_dir {
+                        let text = match &self.game {
+                            Some(g) => g.ui.layout.to_text(),
+                            None => self.ui.layout.to_text(),
+                        };
+                        game::write_atomically(&d.join(worlds::CONTROLS_FILE), &text);
+                    }
+                }
                 ui::Request::Play(folder) => self.open_world(&folder),
                 ui::Request::Create { name, seed } => {
                     let seed = worlds::seed_from_text(&seed);
@@ -293,7 +308,10 @@ impl App {
             TouchPhase::Started => self.ui.press(id, x, y),
             TouchPhase::Ended => self.ui.release(id, x, y),
             TouchPhase::Cancelled => self.ui.release(id, f32::NAN, f32::NAN),
-            TouchPhase::Moved => None,
+            TouchPhase::Moved => {
+                self.ui.moved(id, x, y);
+                None
+            }
         };
         if let Some(action) = action {
             let before = self.ui.screen;
@@ -402,6 +420,9 @@ impl ApplicationHandler for App {
                 }
                 self.gfx = Some(g);
                 self.window = Some(window);
+                if let Some(g) = &self.gfx {
+                    g.set_block_icons(&self.registry);
+                }
                 self.default_thumbnail();
                 self.refresh_worlds();
             }

@@ -73,5 +73,7 @@ has_code = true
 
 [package.metadata.android.application.activity]
 name = "com.blockforge.alpha.BlockforgeActivity"
-orientation = "landscape"
+# Either way up, never portrait; and not resizable, so split screen can't make it portrait.
+orientation = "sensorLandscape"
+resizeable_activity = false
 config_changes = "orientation|keyboardHidden|screenSize|smallestScreenSize|screenLayout|uiMode|density"

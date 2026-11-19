@@ -20,7 +20,7 @@ const WARN: [u8; 4] = [255, 196, 90, 255];
 
 /// How a button looks.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Style {
+pub(super) enum Style {
     /// Square-cornered stone with rivets.
     Stone,
     /// Corners cut at 45 degrees (the bottom row, QUIT).
@@ -28,7 +28,8 @@ enum Style {
 }
 
 /// The settings page's groups: name and icon.
-pub const TABS: [(&str, &str); 3] = [("General", "settings"), ("Video", "desktop_windows"), ("Performance", "speed")];
+pub const TABS: [(&str, &str); 4] =
+    [("General", "settings"), ("Video", "desktop_windows"), ("Performance", "speed"), ("Controls", "gamepad")];
 
 /// One setting on the settings page.
 enum Control {
@@ -50,7 +51,7 @@ impl Ui {
 
     /// A stone or bar button with an optional icon; glows while pressed (or when `glow`).
     #[allow(clippy::too_many_arguments)]
-    fn button(
+    pub(super) fn button(
         &mut self,
         out: &mut Vec<HudVertex>,
         style: Style,
@@ -157,6 +158,7 @@ impl Ui {
             Screen::Settings => self.draw_settings(out),
             Screen::Pause => self.draw_pause(out),
             Screen::Loading => self.draw_loading(out),
+            Screen::Controls => self.draw_controls_editor(out),
             Screen::Multiplayer => self.draw_page(
                 out,
                 "Multi Player",
@@ -186,7 +188,7 @@ impl Ui {
         let avail = h - st - sb - footer - 8.0 * dp;
         // The buttons want at least 34dp each; the logo gets the rest, up to 30% of the screen.
         let buttons_min = 6.0 * 34.0 * dp + 4.0 * gap + qgap;
-        let mut lw = ((w - sl - sr) * if w < h { 0.9 } else { 0.6 }).min(560.0 * dp);
+        let mut lw = ((w - sl - sr) * 0.6).min(560.0 * dp);
         let mut lh = lw / 3.5;
         let cap = (h * 0.3).min(avail - buttons_min).max(avail * 0.18);
         if lh > cap {
@@ -198,7 +200,7 @@ impl Ui {
 
         let (y0, y1) = (ly + lh + 4.0 * dp, h - sb - footer);
         let bh = ((y1 - y0 - 4.0 * gap - qgap) / 6.0).clamp(24.0 * dp, 48.0 * dp);
-        let bw = (300.0 * dp).min((w - sl - sr) * if w < h { 0.8 } else { 0.6 });
+        let bw = (300.0 * dp).min((w - sl - sr) * 0.6);
         let used = 6.0 * bh + 4.0 * gap + qgap;
         let by = y0 + ((y1 - y0 - used) * 0.5).max(0.0);
         let items: [(&str, &str, Action); 5] = [
@@ -249,15 +251,10 @@ impl Ui {
         let (x0, x1) = (sl + 10.0 * dp, w - sr - 10.0 * dp);
         let (y0, y1) = (top, bar - 10.0 * dp);
         let gap = 12.0 * dp;
-        // Side by side; on a narrow (portrait) screen the picked world goes under the list.
-        let stacked = x1 - x0 < 560.0 * dp;
-        let (lw, ph, (dx, dy, dw, dh)) = if stacked {
-            let dh = (200.0 * dp).min((y1 - y0) * 0.45);
-            (x1 - x0, (y1 - y0 - dh - gap).max(40.0 * dp), (x0, y1 - dh, x1 - x0, dh))
-        } else {
-            let lw = ((x1 - x0) - gap) * 0.6;
-            (lw, (y1 - y0).max(40.0 * dp), (x0 + lw + gap, y0, x1 - x0 - lw - gap, (y1 - y0).max(40.0 * dp)))
-        };
+        // The list on the left, the picked world on the right (the game is landscape only).
+        let lw = ((x1 - x0) - gap) * 0.6;
+        let ph = (y1 - y0).max(40.0 * dp);
+        let (dx, dy, dw, dh) = (x0 + lw + gap, y0, x1 - x0 - lw - gap, ph);
         draw::panel(out, x0, y0, lw, ph, k);
         self.buttons.push(Button { x: x0, y: y0, w: lw, h: ph, action: Action::Nothing });
         draw::panel(out, dx, dy, dw, dh, k);
@@ -329,37 +326,19 @@ impl Ui {
         let s = (line * 0.78).min(16.0 * dp);
         let by = dy + dh - pad - bh;
         let bw = (dw - 2.0 * pad - 10.0 * dp) * 0.5;
-        if stacked {
-            // Picture on the left, name and details beside it, EDIT and DELETE under them.
-            let th = (by - 10.0 * dp - dy - pad).max(20.0 * dp);
-            let tw = (th * 16.0 / 9.0).min(dw * 0.45);
-            let th = tw * 9.0 / 16.0;
-            self.thumb(out, e.thumb, dx + pad, dy + pad, tw, th);
-            let tx = dx + pad + tw + 12.0 * dp;
-            let room = dx + dw - pad - tx;
-            let mut ty = dy + pad + 12.0 * dp;
-            draw::left(out, Serif, &e.name, tx, ty, draw::fit(Serif, &e.name, 22.0 * dp, room), INK, true);
-            ty += 24.0 * dp;
-            for (label, value) in info {
-                let lx = draw::left(out, Serif, &format!("{label}: "), tx, ty, s, DIM, true);
-                draw::left(out, Serif, &value, tx + lx, ty, draw::fit(Serif, &value, s, room - lx), INK, true);
-                ty += line;
-            }
-        } else {
-            let text_h = 28.0 * dp + line * info.len() as f32;
-            let tw_max = dw - 2.0 * pad;
-            let th = (tw_max * 9.0 / 16.0).min(dh - 2.0 * pad - text_h - bh - 18.0 * dp).max(30.0 * dp);
-            let tw = th * 16.0 / 9.0;
-            self.thumb(out, e.thumb, dx + (dw - tw) * 0.5, dy + pad, tw, th);
-            let mut ty = dy + pad + th + 16.0 * dp;
-            let ns = draw::fit(Serif, &e.name, 24.0 * dp, tw_max);
-            draw::left(out, Serif, &e.name, dx + pad, ty, ns, INK, true);
-            ty += 22.0 * dp;
-            for (label, value) in info {
-                let lx = draw::left(out, Serif, &format!("{label}: "), dx + pad, ty, s, DIM, true);
-                draw::left(out, Serif, &value, dx + pad + lx, ty, draw::fit(Serif, &value, s, tw_max - lx), INK, true);
-                ty += line;
-            }
+        let text_h = 28.0 * dp + line * info.len() as f32;
+        let tw_max = dw - 2.0 * pad;
+        let th = (tw_max * 9.0 / 16.0).min(dh - 2.0 * pad - text_h - bh - 18.0 * dp).max(30.0 * dp);
+        let tw = th * 16.0 / 9.0;
+        self.thumb(out, e.thumb, dx + (dw - tw) * 0.5, dy + pad, tw, th);
+        let mut ty = dy + pad + th + 16.0 * dp;
+        let ns = draw::fit(Serif, &e.name, 24.0 * dp, tw_max);
+        draw::left(out, Serif, &e.name, dx + pad, ty, ns, INK, true);
+        ty += 22.0 * dp;
+        for (label, value) in info {
+            let lx = draw::left(out, Serif, &format!("{label}: "), dx + pad, ty, s, DIM, true);
+            draw::left(out, Serif, &value, dx + pad + lx, ty, draw::fit(Serif, &value, s, tw_max - lx), INK, true);
+            ty += line;
         }
         self.button(out, Style::Stone, (dx + pad, by, bw, bh), "Edit", Some("open_in_full"), Serif, Action::EditWorld, true, false);
         self.button(out, Style::Stone, (dx + pad + bw + 10.0 * dp, by, bw, bh), "Delete", Some("delete"), Serif, Action::AskDelete, true, false);
@@ -586,9 +565,15 @@ impl Ui {
                     ("VSync", Control::Fixed("Always on".into()))
                 },
             ],
-            _ => vec![
+            2 => vec![
                 ("Culling", Control::Choice(cull_name(s.cull), Action::CycleCull)),
                 ("Mesher", Control::Choice(if s.greedy { "Greedy".into() } else { "Simple".into() }, Action::ToggleMesher)),
+            ],
+            _ => vec![
+                ("Button Layout", Control::Choice("Customize".into(), Action::OpenControls)),
+                ("Button Opacity", Control::Stepper(format!("{}%", s.hud_opacity), Action::HudOpacity(-1), Action::HudOpacity(1))),
+                ("Look Sensitivity", Control::Stepper(s.look_speed.to_string(), Action::LookSpeed(-1), Action::LookSpeed(1))),
+                ("Joystick Size", Control::Stepper(super::controls::JOY_SIZES[s.joy_size as usize % 3].into(), Action::JoySize(-1), Action::JoySize(1))),
             ],
         };
         let pad = 14.0 * dp;
@@ -733,67 +718,11 @@ impl Ui {
         rect(out, cx - len, cy - th * 0.5, len * 2.0, th, XHAIR);
         rect(out, cx - th * 0.5, cy - len, th, len * 2.0, XHAIR);
 
-        let margin = 8.0 * dp;
-        let [safe_left, safe_top, safe_right, _] = self.margins();
+        let [safe_left, safe_top, _, _] = self.margins();
         if self.settings.show_stats {
-            self.draw_stats(perf, out, safe_left + margin, safe_top + 4.0 * dp);
+            self.draw_stats(perf, out, safe_left + 8.0 * dp, safe_top + 4.0 * dp);
         }
-        let bs = 48.0 * dp;
-        let (bx, by) = (w - safe_right - margin - bs, safe_top + 4.0 * dp);
-        self.button(out, Style::Stone, (bx, by, bs, bs), "", Some("pause"), Pixel, Action::Open(Screen::Pause), true, false);
-        if self.settings.walk {
-            self.draw_character_buttons(out, bx, by, bs);
-        }
-    }
-
-    /// The character's controls while walking: jump, roll, crouch and crawl at the bottom
-    /// right (under the right thumb), and ACT beside the menu button, which opens a grid of
-    /// everything else he can do.
-    fn draw_character_buttons(&mut self, out: &mut Vec<HudVertex>, menu_x: f32, menu_y: f32, bs: f32) {
-        let dp = self.dp;
-        let h = self.size.1;
-        let gap = 6.0 * dp;
-        let right = menu_x + bs;
-        let (cw, ch) = (78.0 * dp, 52.0 * dp);
-        let bottom = h - self.margins()[3] - 10.0 * dp;
-        let pad: [[(&str, Action); 2]; 2] = [
-            [("Crouch", Action::Press("crouch")), ("Crawl", Action::Press("crawl"))],
-            [("Roll", Action::Hold("roll")), ("Jump", Action::Hold("jump"))],
-        ];
-        for (r, row) in pad.iter().enumerate() {
-            for (c, (label, action)) in row.iter().enumerate() {
-                let x = right - (2 - c) as f32 * cw - (1 - c) as f32 * gap;
-                let y = bottom - (2 - r) as f32 * ch - (1 - r) as f32 * gap;
-                self.button(out, Style::Stone, (x, y, cw, ch), label, None, Pixel, *action, true, false);
-            }
-        }
-        let aw = bs * 1.6;
-        let ax = menu_x - gap - aw;
-        let acts = self.acts_open;
-        self.button(out, Style::Stone, (ax, menu_y, aw, bs), "Act", None, Pixel, Action::ToggleActs, true, acts);
-        if !self.acts_open {
-            return;
-        }
-        let grid: [[(&str, Action); 4]; 4] = [
-            [("Punch", Action::Press("punch")), ("Use", Action::Press("interact")), ("Sit", Action::Press("sit")), ("1 Hand", Action::Press("one_handed"))],
-            [("Swing", Action::Press("swing")), ("Use L", Action::Press("interact_left")), ("Wave", Action::Press("wave")), ("1 Hand L", Action::Press("one_handed_left"))],
-            [("Chop", Action::Press("chop")), ("Eat", Action::Press("eat")), ("Die", Action::Press("die")), ("2 Hands", Action::Press("two_handed"))],
-            [("Hit", Action::Press("hit")), ("View", Action::ToggleView), ("Revive", Action::Press("revive")), ("Carry", Action::Press("two_handed_item"))],
-        ];
-        let top = menu_y + bs + gap;
-        let space = (bottom - 2.0 * ch - 2.0 * gap) - top;
-        let gh = (44.0 * dp).min((space - 3.0 * gap - 12.0 * dp) / 4.0).max(30.0 * dp);
-        let room = right - self.margins()[0] - 8.0 * dp - 2.0 * gap - 4.0 * dp;
-        let gw = (88.0 * dp).min((room - 3.0 * gap) / 4.0);
-        let left = right - 4.0 * gw - 3.0 * gap;
-        let (px, py, pw, ph) = (left - gap - 4.0 * dp, top - gap - 2.0 * dp, 4.0 * gw + 5.0 * gap + 8.0 * dp, 4.0 * gh + 5.0 * gap + 4.0 * dp);
-        draw::panel(out, px, py, pw, ph, self.k() * 0.7);
-        self.buttons.push(Button { x: px, y: py, w: pw, h: ph, action: Action::Nothing });
-        for (r, row) in grid.iter().enumerate() {
-            for (c, (label, action)) in row.iter().enumerate() {
-                self.button(out, Style::Stone, (left + c as f32 * (gw + gap), top + r as f32 * (gh + gap), gw, gh), label, None, Pixel, *action, true, false);
-            }
-        }
+        self.draw_controls(out);
     }
 }
 

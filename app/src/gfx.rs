@@ -1066,6 +1066,21 @@ impl Gfx {
         self.queue.write_buffer(&self.ui.uniform, 0, as_bytes(&size));
     }
 
+    /// Draws every placeable block's icon into the thumbnails texture, in `icons::placeable`
+    /// order (the order of `Ui::blocks`).
+    pub fn set_block_icons(&self, reg: &BlockRegistry) {
+        let n = crate::icons::ICON;
+        for (i, id) in crate::icons::placeable(reg).into_iter().enumerate().take(ICON_SLOTS) {
+            let (x, y) = icon_origin(i);
+            self.queue.write_texture(
+                wgpu::ImageCopyTexture { texture: &self.ui.thumbs, mip_level: 0, origin: wgpu::Origin3d { x, y, z: 0 }, aspect: wgpu::TextureAspect::All },
+                &crate::icons::render(reg, id),
+                wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(4 * n), rows_per_image: Some(n) },
+                wgpu::Extent3d { width: n, height: n, depth_or_array_layers: 1 },
+            );
+        }
+    }
+
     /// Puts a world's picture (`THUMB_W` x `THUMB_H` RGBA, sRGB) in thumbnail slot `slot`.
     pub fn set_thumbnail(&self, slot: usize, rgba: &[u8]) {
         if slot >= THUMB_SLOTS || rgba.len() != (THUMB_W * THUMB_H * 4) as usize {
@@ -1817,8 +1832,27 @@ fn title_pipeline(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::Text
 /// Thumbnails: 256 x 144 pictures, 4 across and 7 down a 1024 x 1024 texture.
 pub const THUMB_W: u32 = crate::worlds::THUMB_W;
 pub const THUMB_H: u32 = crate::worlds::THUMB_H;
-pub const THUMB_SLOTS: usize = 28;
-const THUMBS_SIZE: u32 = 1024;
+/// World pictures fill the top six rows of the thumbnails texture; the block icons
+/// (`icons.rs`) the rows under them.
+pub const THUMB_SLOTS: usize = 24;
+pub const THUMBS_SIZE: u32 = 1024;
+const ICONS_Y: u32 = 6 * THUMB_H;
+const ICONS_PER_ROW: u32 = THUMBS_SIZE / crate::icons::ICON;
+pub const ICON_SLOTS: usize = (ICONS_PER_ROW * ((THUMBS_SIZE - ICONS_Y) / crate::icons::ICON)) as usize;
+
+/// Where block icon `i` sits in the thumbnails texture.
+pub fn icon_origin(i: usize) -> (u32, u32) {
+    let i = i as u32;
+    ((i % ICONS_PER_ROW) * crate::icons::ICON, ICONS_Y + (i / ICONS_PER_ROW) * crate::icons::ICON)
+}
+
+/// Block icon `i`'s texture coordinates: u0, v0, u1, v1.
+pub fn icon_uv(i: usize) -> [f32; 4] {
+    let (x, y) = icon_origin(i);
+    let s = THUMBS_SIZE as f32;
+    let n = crate::icons::ICON;
+    [x as f32 / s, y as f32 / s, (x + n) as f32 / s, (y + n) as f32 / s]
+}
 
 /// Where thumbnail slot `slot` starts in the thumbnails' texture, in pixels.
 pub fn thumb_origin(slot: usize) -> (u32, u32) {

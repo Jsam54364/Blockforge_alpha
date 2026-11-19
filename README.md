@@ -88,9 +88,9 @@ max_chunk_sends_per_tick}`, `Client::mesh_budget`, worker count, cave thresholds
 ## Android app (`app/`)
 
 A separate crate (its own workspace root, so the core stays dependency-free): winit + wgpu 22.x,
-NativeActivity, packaged with `cargo-apk`. Controls: left 40% of the screen is a virtual stick
-(fly where you look); right side drags to look, quick tap breaks the block under the crosshair,
-press-and-hold places stone.
+NativeActivity, packaged with `cargo-apk`. Landscape only (either way up: `sensorLandscape`,
+not resizable, and the activity asks for it again when it starts), so there are no portrait
+layouts. Controls are described under Touch controls below.
 
 CI flow (GitHub Actions, all from a phone):
 1. Upload a zip to the repo root -> `CI` unpacks it, runs the core tests.
@@ -161,7 +161,9 @@ behind or in front, stats on/off, and the time of day when opened from a world),
 distance 2-12 chunks, LOD distance OFF, 1K ... 32K blocks, LOD quality, fog, clouds, god rays,
 VSync) and Performance (culling, mesher). Switches, steppers and choices change a copy: Apply
 keeps it (and sends a new render distance to the server), Back forgets it, Reset to Default puts
-the defaults back. With many settings and a wide panel they go in two columns.
+the defaults back. With many settings and a wide panel they go in two columns. A fourth tab,
+Controls, has the button layout editor (below), button opacity (30-100%), look sensitivity
+(1-10) and the stick's size (small, medium, large).
 
 In a world, the pause button at the top right opens the game menu over the world (which keeps
 running behind it): Back to Game, Settings, and Save & Quit to Title, which saves the world, takes
@@ -174,10 +176,35 @@ Top-left overlay (Show Stats): FPS and frame time, this app's CPU use (from
 (excluding the wait for the display), GPU time (timestamp queries; shows N/A on devices
 without them) with a derived busy%, memory (VmRSS) and chunk/mesh counts. Android exposes no
 public GPU-usage percentage, hence the derived figure. The overlay's LOD line shows the sections
-and quads drawn. In walk mode the character's buttons sit at the bottom right (Crouch, Crawl,
-Roll, Jump) and Act beside the pause button opens a grid of everything else he can do. The HUD
-and menus are drawn by a small immediate-mode layer (`ui.rs`, `ui/screens.rs`, `ui/draw.rs`)
-with no UI dependencies.
+and quads drawn. The HUD and menus are drawn by a small immediate-mode layer (`ui.rs`,
+`ui/screens.rs`, `ui/controls.rs`, `ui/draw.rs`) with no UI dependencies.
+
+### Touch controls (`app/src/ui/controls.rs`, `app/src/game.rs`, `app/src/icons.rs`)
+
+* **Stick:** a touch on the left 45% of the screen (not on a button) puts the stick's ring
+  under the thumb. It walks, jogs or sprints by how far it is pushed (or flies where you look);
+  past the ring's edge the ring follows the thumb. It fades out a quarter second after the
+  thumb lifts, and is not drawn at all otherwise.
+* **Look:** drag anywhere else.
+* **Attack** (round, pickaxe): a tap is a punch, which breaks the block under the crosshair.
+  Held past 0.3 s it becomes a heavy attack: the character chops, and each chop breaks a block
+  when it lands (0.45 s into the 0.9 s swing), again and again while held. A chop on its way
+  down still lands if the button is let go.
+* **Place** (round, shows the hotbar's block): puts that block on the face you look at, then
+  again every 0.22 s while held (after 0.4 s), never inside you or the character.
+* **Hotbar:** nine blocks along the bottom; tap one to pick it (its name shows for a moment).
+  The last button opens a picker of every placeable block (17 now); tapping one puts it in the
+  picked slot. The hotbar is saved with each world (`state.txt`). The block pictures are little
+  cubes drawn on the CPU from each block's own textures when the renderer starts, kept in
+  the bottom of the world-thumbnails texture.
+* **Jump, Roll, Crouch, Crawl, Act** (walking only), and **Pause**.
+* **Layout editor** (Settings > Controls > Button Layout): every control is outlined and can be
+  dragged anywhere on screen; tap one to pick it, then make it smaller or bigger (50-200%) or
+  hide it. Add puts hidden controls back, including extras that start hidden: Camera, Use,
+  Swing, Eat, Wave, Sit, Carry and Stats. Pause can't be hidden. Reset puts everything back.
+  Done saves the layout to `controls.txt` beside the settings. Positions are kept as fractions
+  of the screen, so a layout moves to another phone; a control in its default spot follows the
+  default layout for that screen (the hotbar shrinks to fit between the stick and Attack).
 
 Back-face culling is on for solid terrain (water stays double-sided so the surface is visible
 from underwater). Tests prove every face is wound counter-clockwise from outside, both in the
@@ -252,7 +279,7 @@ pixel-identical to the old per-chunk buffers on the OpenGL backend.
 
 ### What is kept between launches
 
-`world.bfwj` (block edits) and `state.txt` (menu settings, the camera, the time of day) live in the app's
+`world.bfwj` (block edits) and `state.txt` (the camera, the time of day, the hotbar) live in each world's folder, `settings.txt` and `controls.txt` (the button layout) beside them in the app's
 internal data folder. Both are written when the app goes to the background, because Android
 can kill it there without warning; settings are also written when they are applied. The
 world file is only rewritten when a block actually changed. When the app comes back, every
@@ -484,10 +511,10 @@ Next: trees and plants per biome, rivers, rain shadows behind mountains.
   the HyRig character, seen from behind. Camera (in Settings, or Act > View) cycles like
   Minecraft's F5: behind, in front looking back at him (the camera sits 3.7 blocks out along
   where you look; blocks are still aimed from his eyes), then first person. The
-  left stick walks, jogs or sprints by how far it is pushed; JUMP and ROLL repeat while held;
+  stick walks, jogs or sprints by how far it is pushed; JUMP and ROLL repeat while held;
   CROUCH and CRAWL toggle; ACT opens everything else: punch, swing, chop, hit, use with either
-  hand, eat, wave, sit, die and revive, and the four carry states. Breaking a block punches,
-  placing one reaches out.
+  hand, eat, wave, sit, die and revive, and the four carry states. Attack punches (tap) or
+  chops (hold); placing a block reaches out.
 * **Block rules** (Minecraft's, where the kit has none): half slabs are walked up and down
   (a step is 0.6); a full block needs a jump (1.05 high); the body is 0.6 wide and 1.8 tall, so
   a two-block-high opening is walked through; a two-block wall is climbed by jumping at it

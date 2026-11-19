@@ -1,17 +1,17 @@
 //! Player-facing state: the integrated server + client, the character (or a fly camera) and
 //! touch controls.
 //!
-//! Controls (landscape):
-//!   left 40% of the screen   drag = virtual stick: walk, jog or sprint by how far it is
-//!                            pushed (or fly in the direction you are looking, in FLY mode)
-//!   right side               drag = look around
-//!   bottom right             JUMP and ROLL (hold to repeat), CROUCH, CRAWL; ACT opens the
-//!                            rest of what the character can do
-//!                            quick tap = break the block under the crosshair
-//!                            press-and-hold (no drag) = place stone on the face you look at
-//!   top-right button         settings menu (render distance, LOD distance, fog, stats)
+//! Controls (landscape; every button can be moved, resized or hidden in the controls editor):
+//!   left side         a stick appears where the thumb lands and follows it: walk, jog or
+//!                     sprint by how far it is pushed (or fly where you look, in fly mode)
+//!   right side        drag = look around
+//!   ATTACK            tap = punch (breaks the block under the crosshair); hold = chop, a
+//!                     heavy swing that breaks a block each time it lands, again and again
+//!   PLACE             puts the hotbar's block on the face you look at (hold to keep going)
+//!   hotbar            nine blocks; the last button opens a picker of every block
+//!   JUMP, ROLL, CROUCH, CRAWL, ACT (everything else the character can do), PAUSE
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -30,15 +30,28 @@ use winit::event::TouchPhase;
 use crate::hyrig::View;
 use crate::player::Player;
 use crate::sky::Clock;
-use crate::ui::{Action, CamView, Screen, Ui, LOD_DISTANCES, LOD_QUALITY};
+use crate::ui::{Action, BlockItem, CamView, Joy, Screen, Ui, JOY_RADII, LOD_DISTANCES, LOD_QUALITY};
 
 const LOOK_SENS: f32 = 0.0045;
 const FLY_SPEED: f32 = 14.0;
 const REACH: f32 = 8.0;
 /// Walking, the camera's pitch stays inside the character controller's limits.
 const WALK_PITCH: (f32, f32) = (-1.4, 1.35);
-const TAP_MAX: Duration = Duration::from_millis(300);
-const DRAG_PIXELS: f32 = 14.0;
+/// ATTACK held this long is a heavy attack (a chop) rather than a punch.
+const HEAVY_AFTER: Duration = Duration::from_millis(300);
+/// A chop lands this far into its swing, and swings again this often while held (the
+/// character's chop animation is 0.9 s).
+const CHOP_LANDS: Duration = Duration::from_millis(450);
+const CHOP_EVERY: Duration = Duration::from_millis(900);
+/// PLACE held: the first repeat after this, then one every `PLACE_EVERY`.
+const PLACE_FIRST: Duration = Duration::from_millis(400);
+const PLACE_EVERY: Duration = Duration::from_millis(220);
+/// How long the stick takes to fade out after the thumb lifts.
+const JOY_FADE: f32 = 0.25;
+/// The left part of the screen where a touch is the stick (elsewhere it looks around).
+const STICK_ZONE: f32 = 0.45;
+/// The hotbar of a new world.
+const DEFAULT_HOTBAR: [&str; 9] = ["stone", "dirt", "grass", "sand", "log", "leaves", "glowstone", "sandstone", "snow"];
 /// Settings and the camera, kept between launches next to the world save.
 use crate::worlds::STATE_FILE;
 /// A saved camera further out than this is treated as corrupt (f32 loses block precision).
@@ -121,11 +134,46 @@ fn saved_player(text: &str) -> Option<[f64; 3]> {
 }
 
 struct TouchInfo {
-    start: (f32, f32),
     last: (f32, f32),
-    t0: Instant,
+    /// For the stick: where its ring is (it follows the thumb past its edge).
+    base: (f32, f32),
     stick: bool,
-    moved: bool,
+}
+
+/// ATTACK being held: by which touch, since when, and when the next chop starts.
+struct Attack {
+    touch: u64,
+    since: Instant,
+    next_chop: Option<Instant>,
+}
+
+/// The blocks the hotbar can hold (in `icons::placeable` order, the icons' order).
+pub fn block_items(reg: &BlockRegistry) -> Vec<BlockItem> {
+    crate::icons::placeable(reg)
+        .into_iter()
+        .map(|id| BlockItem { id, name: crate::icons::display_name(&reg.def(id).name) })
+        .collect()
+}
+
+/// The hotbar saved in a world's state (`hotbar=stone,dirt,...` and `slot=n`), or the
+/// default one; unknown blocks leave their slot empty.
+fn saved_hotbar(text: &str, reg: &BlockRegistry, items: &[BlockItem]) -> ([u16; 9], usize) {
+    let id_of = |name: &str| reg.id(name.trim()).filter(|id| items.iter().any(|b| b.id == *id)).unwrap_or(0);
+    let mut bar = [0u16; 9];
+    match text.lines().find_map(|l| l.trim().strip_prefix("hotbar=")) {
+        Some(line) => {
+            for (slot, name) in bar.iter_mut().zip(line.split(',')) {
+                *slot = id_of(name);
+            }
+        }
+        None => {
+            for (slot, name) in bar.iter_mut().zip(DEFAULT_HOTBAR) {
+                *slot = id_of(name);
+            }
+        }
+    }
+    let slot = text.lines().find_map(|l| l.trim().strip_prefix("slot=")?.parse::<usize>().ok()).unwrap_or(0).min(8);
+    (bar, slot)
 }
 
 /// The world a game is opened on.
@@ -154,10 +202,17 @@ pub struct Game {
     pub ui: Ui,
     /// The time of day (the sky's sun follows it).
     pub clock: Clock,
-    /// Touches that started on a HUD button; they never reach the game controls.
-    ui_touches: HashSet<u64>,
+    /// Touches that started on a HUD button, and the button; they never reach the game
+    /// controls.
+    ui_touches: HashMap<u64, Action>,
     touches: HashMap<u64, TouchInfo>,
-    stone: BlockState,
+    /// ATTACK held; a chop on its way down (it lands even if ATTACK is let go); PLACE held
+    /// (by which touch, and when it places again); the stick as it last showed, and when
+    /// the thumb lifted.
+    attack: Option<Attack>,
+    chop_lands: Option<Instant>,
+    placing: Option<(u64, Instant)>,
+    joy_last: Option<(Joy, Instant)>,
     /// The character (he stands where he was left while the camera flies).
     pub player: Player,
     /// Whether the last frame was in walk mode (to notice the switch).
@@ -171,13 +226,17 @@ pub struct Game {
 impl Game {
     /// Opens `world`, taking over the app's `ui` (with its settings) until `close`.
     pub fn new(world: WorldSpec, mut ui: Ui, registry: Arc<BlockRegistry>) -> Game {
-        let stone = registry.state("stone").expect("stone block");
 
         // Pick up where the last session in this world stopped: camera, player and time.
         let state_path = world.dir.as_ref().map(|d| d.join(STATE_FILE));
         let saved = state_path.as_ref().and_then(|p| std::fs::read_to_string(p).ok()).unwrap_or_default();
         let clock = Clock::from_text(&saved);
         ui.hours = clock.hours();
+        if ui.blocks.is_empty() {
+            ui.blocks = block_items(&registry);
+        }
+        (ui.hotbar, ui.slot) = saved_hotbar(&saved, &registry, &ui.blocks);
+        ui.inventory_open = false;
         // A camera saved in a world from an older generator would be over different ground:
         // start over at the spawn (that world's save is kept, under its own name).
         let same_world = saved_generator(&saved) == WORLDGEN_VERSION;
@@ -223,9 +282,12 @@ impl Game {
             size: (1, 1),
             ui,
             clock,
-            ui_touches: HashSet::new(),
+            ui_touches: HashMap::new(),
             touches: HashMap::new(),
-            stone,
+            attack: None,
+            chop_lands: None,
+            placing: None,
+            joy_last: None,
             player,
             walking: ui_walk,
             held: HashMap::new(),
@@ -250,10 +312,23 @@ impl Game {
             write_atomically(path, &self.ui.settings.to_text());
         }
         let Some(path) = &self.state_path else { return };
+        write_atomically(path, &self.state_text());
+    }
+
+    /// The world's `state.txt`: camera, time of day, the character, the hotbar.
+    fn state_text(&self) -> String {
         let p = self.player.position();
-        let text =
-            format!("{}{}player={},{},{}\ngen={WORLDGEN_VERSION}\n", self.cam.to_text(), self.clock.to_text(), p[0], p[1], p[2]);
-        write_atomically(path, &text);
+        let bar: Vec<&str> = self.ui.hotbar.iter().map(|&id| if id == 0 { "" } else { self.registry.def(id).name.as_str() }).collect();
+        format!(
+            "{}{}player={},{},{}\ngen={WORLDGEN_VERSION}\nhotbar={}\nslot={}\n",
+            self.cam.to_text(),
+            self.clock.to_text(),
+            p[0],
+            p[1],
+            p[2],
+            bar.join(","),
+            self.ui.slot
+        )
     }
 
     /// Saves everything and shuts the world down; hands back the app's `ui`.
@@ -310,13 +385,18 @@ impl Game {
         self.ui.set_surface(w, h, scale_factor);
     }
 
-    /// (strafe, forward), each in -1..1, from the virtual stick.
+    /// The stick's radius in pixels.
+    fn stick_radius(&self) -> f32 {
+        JOY_RADII[self.ui.settings.joy_size as usize % JOY_RADII.len()] * self.ui.dp_scale()
+    }
+
+    /// (strafe, forward), each in -1..1, from the stick.
     fn stick(&self) -> (f32, f32) {
-        let radius = 0.12 * (self.size.0.min(self.size.1) as f32).max(1.0);
+        let r = self.stick_radius();
         for t in self.touches.values() {
             if t.stick {
-                let mut x = (t.last.0 - t.start.0) / radius;
-                let mut y = (t.last.1 - t.start.1) / radius;
+                let mut x = (t.last.0 - t.base.0) / r;
+                let mut y = (t.last.1 - t.base.1) / r;
                 let len = (x * x + y * y).sqrt();
                 if len > 1.0 {
                     x /= len;
@@ -326,6 +406,69 @@ impl Game {
             }
         }
         (0.0, 0.0)
+    }
+
+    /// The stick as the HUD draws it: while a thumb is on it, then fading out.
+    fn update_joystick(&mut self, now: Instant) {
+        let r = self.stick_radius();
+        let live = self.touches.values().find(|t| t.stick).map(|t| {
+            let (dx, dy) = (t.last.0 - t.base.0, t.last.1 - t.base.1);
+            let len = dx.hypot(dy).max(1e-6);
+            let k = (r / len).min(1.0);
+            Joy { base: [t.base.0, t.base.1], knob: [t.base.0 + dx * k, t.base.1 + dy * k], radius: r, alpha: 1.0 }
+        });
+        self.ui.joystick = match live {
+            Some(j) => {
+                self.joy_last = Some((j, now));
+                Some(j)
+            }
+            None => self.joy_last.and_then(|(j, t)| {
+                let a = 1.0 - now.duration_since(t).as_secs_f32() / JOY_FADE;
+                (a > 0.0).then_some(Joy { knob: j.base, alpha: a, ..j })
+            }),
+        };
+    }
+
+    /// ATTACK and PLACE while held: chops that keep landing, blocks that keep coming.
+    fn update_buttons(&mut self, now: Instant) {
+        if let Some(a) = &mut self.attack {
+            if now.duration_since(a.since) >= HEAVY_AFTER && a.next_chop.map_or(true, |t| now >= t) {
+                a.next_chop = Some(now + CHOP_EVERY);
+                self.chop_lands = Some(now + CHOP_LANDS);
+                if self.ui.settings.walk {
+                    self.player.press("chop");
+                }
+            }
+        }
+        if self.chop_lands.is_some_and(|t| now >= t) {
+            self.chop_lands = None;
+            if let Some(hit) = self.target() {
+                self.client.break_block(hit.pos);
+            }
+        }
+        if let Some((touch, next)) = self.placing {
+            if now >= next {
+                self.place_target();
+                self.placing = Some((touch, now + PLACE_EVERY));
+            }
+        }
+        self.ui.touching = self.ui_touches.values().copied().collect();
+    }
+
+    /// A finger left a HUD button.
+    fn button_released(&mut self, id: u64) {
+        self.ui_touches.remove(&id);
+        self.held.remove(&id);
+        if self.attack.as_ref().is_some_and(|a| a.touch == id) {
+            let a = self.attack.take().unwrap();
+            if a.next_chop.is_none() {
+                // Let go before it became a heavy attack: a punch.
+                self.break_target();
+            }
+        }
+        if self.placing.is_some_and(|(t, _)| t == id) {
+            self.placing = None;
+        }
     }
 
     /// Once per frame, before rendering.
@@ -361,6 +504,8 @@ impl Game {
         // The controller's yaw 0 faces +Z; the camera's faces -Z.
         let look = (self.cam.yaw as f64 + std::f64::consts::PI, self.cam.pitch as f64);
         let aspect = self.size.0 as f64 / self.size.1 as f64;
+        self.update_joystick(now);
+        self.update_buttons(now);
         self.player.jump = self.held.values().any(|b| *b == "jump");
         self.player.roll = self.held.values().any(|b| *b == "roll");
         let eye = self.player.update(&self.client, dt as f64, (strafe, forward), look, aspect, walk, cam_view == CamView::Front);
@@ -381,6 +526,13 @@ impl Game {
     /// Does what a HUD button asks (`id` is the touch that pressed it).
     fn ui_action(&mut self, id: u64, action: Action) {
         match action {
+            Action::Hold("attack") => {
+                self.attack = Some(Attack { touch: id, since: Instant::now(), next_chop: None });
+            }
+            Action::Hold("place") => {
+                self.place_target();
+                self.placing = Some((id, Instant::now() + PLACE_FIRST));
+            }
             Action::Hold(button) => {
                 self.held.insert(id, button);
             }
@@ -405,6 +557,8 @@ impl Game {
             self.touches.clear();
             self.held.clear();
             self.ui_touches.clear();
+            self.attack = None;
+            self.placing = None;
             if screen_before == Screen::Settings {
                 self.save_state(); // keeps what was applied
             }
@@ -419,7 +573,10 @@ impl Game {
                 TouchPhase::Started => self.ui.press(id, x, y),
                 TouchPhase::Ended => self.ui.release(id, x, y),
                 TouchPhase::Cancelled => self.ui.release(id, f32::NAN, f32::NAN),
-                TouchPhase::Moved => None,
+                TouchPhase::Moved => {
+                    self.ui.moved(id, x, y);
+                    None
+                }
             };
             if let Some(a) = action {
                 self.ui_action(id, a);
@@ -430,60 +587,56 @@ impl Game {
         match phase {
             TouchPhase::Started => {
                 if let Some(action) = self.ui.press(id, x, y) {
-                    self.ui_touches.insert(id);
+                    self.ui_touches.insert(id, action);
                     self.ui_action(id, action);
                     return;
                 }
             }
             _ => {
-                if self.ui_touches.contains(&id) {
+                if self.ui_touches.contains_key(&id) {
                     if matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled) {
-                        self.ui_touches.remove(&id);
-                        self.held.remove(&id);
+                        self.button_released(id);
                     }
                     return;
                 }
             }
         }
 
-        let width = self.size.0 as f32;
+        let (w, h) = (self.size.0 as f32, self.size.1 as f32);
         match phase {
             TouchPhase::Started => {
-                self.touches.insert(
-                    id,
-                    TouchInfo {
-                        start: (x, y),
-                        last: (x, y),
-                        t0: Instant::now(),
-                        stick: x < width * 0.4,
-                        moved: false,
-                    },
-                );
+                // One stick at a time; its ring appears where the thumb lands (kept on screen).
+                let stick = x < w * STICK_ZONE && !self.touches.values().any(|t| t.stick);
+                let r = self.stick_radius();
+                let base = if stick { (x.clamp(r, (w - r).max(r)), y.clamp(r, (h - r).max(r))) } else { (x, y) };
+                self.touches.insert(id, TouchInfo { last: (x, y), base, stick });
+                // A touch elsewhere closes the action grid and the block picker.
+                self.ui.acts_open = false;
+                self.ui.inventory_open = false;
             }
             TouchPhase::Moved => {
+                let r = self.stick_radius();
+                let look = LOOK_SENS * (0.25 + 0.15 * self.ui.settings.look_speed as f32);
                 if let Some(t) = self.touches.get_mut(&id) {
                     let dx = x - t.last.0;
                     let dy = y - t.last.1;
                     t.last = (x, y);
-                    if (x - t.start.0).hypot(y - t.start.1) > DRAG_PIXELS {
-                        t.moved = true;
-                    }
-                    if !t.stick {
-                        self.cam.yaw -= dx * LOOK_SENS;
-                        self.cam.pitch = (self.cam.pitch - dy * LOOK_SENS).clamp(-1.5, 1.5);
+                    if t.stick {
+                        // Past the ring's edge, the ring follows the thumb.
+                        let (ox, oy) = (x - t.base.0, y - t.base.1);
+                        let len = ox.hypot(oy);
+                        if len > r {
+                            let k = 1.0 - r / len;
+                            t.base = (t.base.0 + ox * k, t.base.1 + oy * k);
+                        }
+                    } else {
+                        self.cam.yaw -= dx * look;
+                        self.cam.pitch = (self.cam.pitch - dy * look).clamp(-1.5, 1.5);
                     }
                 }
             }
             TouchPhase::Ended | TouchPhase::Cancelled => {
-                if let Some(t) = self.touches.remove(&id) {
-                    if !t.stick && !t.moved && phase == TouchPhase::Ended {
-                        if t.t0.elapsed() < TAP_MAX {
-                            self.break_target();
-                        } else {
-                            self.place_target();
-                        }
-                    }
-                }
+                self.touches.remove(&id);
             }
         }
     }
@@ -521,11 +674,15 @@ impl Game {
     }
 
     fn place_target(&mut self) {
+        let block = self.ui.held_block();
+        if block == 0 {
+            return;
+        }
         if let Some(hit) = self.target() {
             let cell = hit.pos.neighbor(hit.face);
             // Don't entomb the camera or the character.
             if cell != BlockPos::from_f32(self.cam.pos) && !self.player.occupies(cell) {
-                self.client.place_block(cell, self.stone);
+                self.client.place_block(cell, BlockState::full(block));
                 if self.ui.settings.walk {
                     self.player.press("interact");
                 }
@@ -590,6 +747,112 @@ mod tests {
         assert!(!g.ui.settings.fog);
         drop(g);
         std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn place_puts_the_hotbars_block_tap_attack_punches_and_held_attack_chops() {
+        let reg = Arc::new(BlockRegistry::builtin());
+        let mut ui = Ui::new();
+        ui.settings.render_chunks = 2;
+        ui.settings.walk = false; // the fly camera: no body to get in the way
+        let mut g = Game::new(WorldSpec { dir: None, seed: 1337, settings_path: None }, ui, reg.clone());
+        g.set_surface(2400, 1080, 2.75);
+        let names: Vec<&str> = g.ui.hotbar.iter().map(|&id| reg.def(id).name.as_str()).collect();
+        assert_eq!(names, DEFAULT_HOTBAR);
+        let wait = |g: &mut Game, what: &str, done: &dyn Fn(&Game) -> bool| {
+            let t = Instant::now();
+            while !done(g) {
+                assert!(t.elapsed() < Duration::from_secs(20), "timed out waiting for {what}");
+                g.update();
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        };
+        // Look straight down from a little above the ground, away from where he stands.
+        let [x, _, z] = g.gen.find_spawn();
+        let (x, z) = (x.floor() as i32 + 6, z.floor() as i32);
+        let ground = g.gen.describe(x, z).height;
+        g.cam = CameraView { pos: [x as f32 + 0.5, ground + 4.0, z as f32 + 0.5], yaw: 0.0, pitch: -std::f32::consts::FRAC_PI_2 + 0.001 };
+        wait(&mut g, "the ground below", &|g| g.target().is_some());
+        let hit = g.target().unwrap();
+        let cell = hit.pos.neighbor(hit.face);
+        assert!(!g.client.is_solid(cell));
+        // PLACE with the hotbar on GLOWSTONE.
+        let glow = g.ui.blocks.iter().position(|b| b.name == "Glowstone").unwrap();
+        g.ui.apply(Action::Slot(3));
+        g.ui.apply(Action::PickBlock(glow as u16));
+        g.ui_touches.insert(1, Action::Hold("place"));
+        g.ui_action(1, Action::Hold("place"));
+        g.button_released(1);
+        wait(&mut g, "the placed block", &|g| g.client.is_solid(cell));
+        assert_eq!(g.target().map(|h| h.pos), Some(cell));
+        // A quick tap on ATTACK: a punch, which breaks it.
+        g.ui_touches.insert(2, Action::Hold("attack"));
+        g.ui_action(2, Action::Hold("attack"));
+        g.button_released(2);
+        wait(&mut g, "the punch", &|g| !g.client.is_solid(cell));
+        // Held: nothing for a moment, then a chop lands and breaks the ground, then another.
+        let first = g.target().unwrap().pos;
+        g.ui_touches.insert(3, Action::Hold("attack"));
+        g.ui_action(3, Action::Hold("attack"));
+        let t = Instant::now();
+        wait(&mut g, "the first chop", &|g| !g.client.is_solid(first));
+        assert!(t.elapsed() >= HEAVY_AFTER + CHOP_LANDS, "a chop takes its time: {:?}", t.elapsed());
+        wait(&mut g, "the ground under it", &|g| g.target().is_some_and(|h| h.pos != first));
+        let second = g.target().unwrap().pos;
+        wait(&mut g, "the second chop", &|g| !g.client.is_solid(second));
+        g.button_released(3);
+        assert!(g.attack.is_none());
+        // The hotbar is saved with the world's state.
+        assert!(g.state_text().contains("hotbar=stone,dirt,grass,glowstone,"), "{}", g.state_text());
+        let (bar, slot) = saved_hotbar(&g.state_text(), &reg, &g.ui.blocks);
+        assert_eq!((bar, slot), (g.ui.hotbar, 3));
+    }
+
+    #[test]
+    fn the_stick_appears_under_the_thumb_and_follows_it() {
+        let reg = Arc::new(BlockRegistry::builtin());
+        let mut ui = Ui::new();
+        ui.screen = Screen::Playing;
+        ui.settings.render_chunks = 2;
+        let mut g = Game::new(WorldSpec { dir: None, seed: 7, settings_path: None }, ui, reg);
+        g.set_surface(2400, 1080, 2.75);
+        g.ui.build(&crate::perf::Perf::new(), &mut Vec::new());
+        let r = g.stick_radius();
+        assert!((r - 56.0 * 2.75).abs() < 0.01);
+        g.update();
+        assert_eq!(g.ui.joystick, None, "no stick until a thumb lands");
+        g.touch(1, TouchPhase::Started, 500.0, 600.0);
+        g.update();
+        let j = g.ui.joystick.expect("the stick under the thumb");
+        assert_eq!((j.base, j.knob, j.alpha), ([500.0, 600.0], [500.0, 600.0], 1.0));
+        // Half way out: half speed, the ring stays.
+        g.touch(1, TouchPhase::Moved, 500.0 + r * 0.5, 600.0);
+        assert!((g.stick().0 - 0.5).abs() < 0.01);
+        // Past the edge: full speed, and the ring is pulled along.
+        g.touch(1, TouchPhase::Moved, 500.0 + r * 3.0, 600.0);
+        g.update();
+        let j = g.ui.joystick.unwrap();
+        assert!((g.stick().0 - 1.0).abs() < 0.01);
+        assert!((j.base[0] - (500.0 + r * 2.0)).abs() < 0.5 && (j.knob[0] - (500.0 + r * 3.0)).abs() < 0.5, "{j:?}");
+        // Let go: it fades, then is gone; the character stops.
+        g.touch(1, TouchPhase::Ended, 500.0 + r * 3.0, 600.0);
+        g.update();
+        assert!(g.ui.joystick.is_some_and(|j| j.alpha < 1.0));
+        assert_eq!(g.stick(), (0.0, 0.0));
+        std::thread::sleep(Duration::from_secs_f32(JOY_FADE + 0.05));
+        g.update();
+        assert_eq!(g.ui.joystick, None);
+        // Near the edge the ring is kept on screen; on the right a drag looks around instead.
+        g.touch(2, TouchPhase::Started, 10.0, 1070.0);
+        g.update();
+        let j = g.ui.joystick.unwrap();
+        assert_eq!(j.base, [r, 1080.0 - r]);
+        g.touch(2, TouchPhase::Ended, 10.0, 1070.0);
+        let yaw = g.cam.yaw;
+        g.touch(3, TouchPhase::Started, 1500.0, 400.0);
+        g.touch(3, TouchPhase::Moved, 1600.0, 400.0);
+        assert!(g.cam.yaw < yaw);
+        assert_eq!(g.stick(), (0.0, 0.0));
     }
 
     #[test]

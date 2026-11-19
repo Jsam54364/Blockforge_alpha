@@ -14,6 +14,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub const WORLDS_DIR: &str = "worlds";
 pub const LEVEL_FILE: &str = "level.txt";
 pub const SETTINGS_FILE: &str = "settings.txt";
+/// Where the game's buttons are (the controls editor's layout), beside the settings.
+pub const CONTROLS_FILE: &str = "controls.txt";
 /// Where a world's player, camera and clock are kept (in its folder).
 pub const STATE_FILE: &str = "state.txt";
 /// The seed of the world everyone had before there were several.
