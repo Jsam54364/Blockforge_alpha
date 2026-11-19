@@ -192,7 +192,7 @@ impl Ui {
     /// The natural width of a bar button with this label and icon at height `h`.
     fn bar_width(&self, label: &str, icon: bool, h: f32) -> f32 {
         let size = (h * 0.42).min(26.0 * self.dp);
-        draw::width(Serif, label, size) + if icon { h * 0.7 } else { 0.0 } + h * 1.3
+        draw::width(Serif, label, size) + if icon { h * 1.0 } else { 0.0 } + h * 1.3
     }
 
     /// The logo at the top left, small; returns its bottom right corner.
