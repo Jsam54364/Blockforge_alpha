@@ -286,7 +286,7 @@ pub fn quad_indices(quads: usize) -> Vec<u32> {
 }
 
 /// Unit-cube corners per face, counter-clockwise seen from outside. Index = `Face::index()`.
-pub(crate) const FACE_CORNERS: [[[i32; 3]; 4]; 6] = [
+pub const FACE_CORNERS: [[[i32; 3]; 4]; 6] = [
     [[1, 0, 1], [1, 0, 0], [1, 1, 0], [1, 1, 1]], // +X
     [[0, 0, 0], [0, 0, 1], [0, 1, 1], [0, 1, 0]], // -X
     [[0, 1, 1], [1, 1, 1], [1, 1, 0], [0, 1, 0]], // +Y

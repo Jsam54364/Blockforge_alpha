@@ -542,7 +542,9 @@ fn cloud_pipeline(
                 write_mask: wgpu::ColorWrites::ALL,
             })],
         }),
-        primitive: wgpu::PrimitiveState::default(),
+        // Faces turned away are skipped: the far walls of a cloud would only be blended over
+        // by its near ones (and inside a cloud there is nothing to see of it).
+        primitive: wgpu::PrimitiveState { cull_mode: Some(wgpu::Face::Back), ..Default::default() },
         depth_stencil: Some(wgpu::DepthStencilState {
             format: DEPTH_FORMAT,
             depth_write_enabled: true,

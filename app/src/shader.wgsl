@@ -507,8 +507,8 @@ fn fs_sky(f: SkyOut) -> @location(0) vec4<f32> {
 }
 
 // ---- Clouds (see app/src/clouds.rs): boxes on a grid of 32-block tiles ----
-// Vertex: a = x(8) | z(8)<<8 | y(10)<<16 | face(3)<<26 (x, z in tiles, y in blocks above the
-//         cloud base), b = opacity(8)
+// Vertex: a = x(9) | z(9)<<9 | y(10)<<18 | face(3)<<28 (x, z in 32-block tiles from the set's
+//         corner, y in blocks above the cloud base), b = opacity(8)
 struct CloudOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) world: vec3<f32>,
@@ -519,11 +519,11 @@ struct CloudOut {
 @vertex
 fn vs_cloud(@location(0) packed: vec2<u32>) -> CloudOut {
     let a = packed.x;
-    let face = min((a >> 26u) & 7u, 5u);
+    let face = min((a >> 28u) & 7u, 5u);
     let world = vec3<f32>(
-        g.cloud.x + f32(a & 255u) * 32.0,
-        g.cloud.z + f32((a >> 16u) & 1023u),
-        g.cloud.y + f32((a >> 8u) & 255u) * 32.0
+        g.cloud.x + f32(a & 511u) * 32.0,
+        g.cloud.z + f32((a >> 18u) & 1023u),
+        g.cloud.y + f32((a >> 9u) & 511u) * 32.0
     );
     // Clouds scatter light inside themselves: every side gets half of what the top gets, plus
     // its own share of sky and sun. Dimmer at night than the moonlit ground.
@@ -546,9 +546,12 @@ fn fs_cloud(f: CloudOut) -> @location(0) vec4<f32> {
     // Looking toward the sun, clouds light up (silver linings by day, fire at sunset).
     let through = pow(max(dot(dir, g.sun.xyz), 0.0), 6.0) * g.sun.w;
     var col = f.light * 0.95 + g.sun_color.rgb * (through * 0.9);
-    // Far clouds sink into the haze of the sky behind them and thin out to nothing.
-    let fade = smoothstep(g.cloud.w * 0.3, g.cloud.w, length(to.xz));
-    col = mix(col, sky_radiance(dir, 2.0), fade * 0.8);
+    // Far clouds sink into the haze of the sky behind them and thin out to nothing. (The
+    // sky's colour is only looked up where there is haze: most cloud pixels are near.)
+    let fade = smoothstep(g.cloud.w * 0.25, g.cloud.w, length(to.xz));
+    if (fade > 0.0) {
+        col = mix(col, sky_radiance(dir, 2.0), fade * 0.8);
+    }
     return vec4<f32>(display(col), f.alpha * (1.0 - fade));
 }
 

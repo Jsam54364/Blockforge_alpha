@@ -607,12 +607,18 @@ Next: trees and plants per biome, rivers, rain shadows behind mountains.
 * **Clouds** as Vintage Story draws them: the sky is divided into 32-block tiles, and each tile
   holding cloud is a flat-bottomed box (base at y 290) as tall as the cloud is dense there, a
   little see-through. Density is noise fixed in "cloud space", which drifts with the wind; a
-  broad second noise leaves some regions clear and others overcast. A 4 km window around the
-  camera is meshed on a background thread (about 10 000 quads, a few milliseconds: tiles of
-  one height share faces) and drawn in one call, bottoms and tops first and sides far to near,
-  so each pixel of cloud is shaded once or twice; it is rebuilt only when the
-  camera has moved 10 tiles in cloud space. They are lit by the sky and the sun, glow toward
-  the sun at sunset, and fade into the horizon haze.
+  broad second noise leaves some regions clear and others overcast.
+* **Cloud levels of detail:** 32-block tiles around the camera, then rings of 64, 128 and
+  256-block tiles, each ring 40 cells across with the finer level in its middle half, so every
+  ring costs the same. Clouds reach 4.8 km (they used to stop at 1.7 km) with about 4 000-6 000
+  quads (one 32-block grid took 10 000 for 1.7 km); far away a big tile is a few pixels, and
+  coarse tiles drop the fine detail noise so they don't flicker. The set is meshed on a
+  background thread in about 1.5 ms (tiles of one height share faces) when the camera crosses
+  a 256-block line in cloud space, and drifts with the wind in between. One draw call:
+  bottoms and tops first and sides far to near, so each pixel of cloud is shaded once or
+  twice; faces turned away from the camera are culled, and the sky's haze colour is only
+  looked up for distant clouds. They are lit by the sky and the sun, glow toward the sun at
+  sunset, and fade into the horizon haze.
 * **God rays** in screen space (the method of GPU Gems 3, chapter 13): after a frame, a
   quarter-resolution pass writes a mask of open sky near the sun, read from the depth buffer
   (terrain and clouds block it); the next frame smears that mask away from the sun's place on
