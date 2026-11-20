@@ -382,8 +382,14 @@ impl LodSettings {
 ///
 /// ```text
 ///   a: x(6) | z(6)<<6 | face(3)<<12 | in_x(2)<<15 | in_z(2)<<17 | top(1)<<19 | texture(8)<<20
-///   b: y in quarter blocks, as an i32
+///      | smooth(1)<<28
+///   b: y in quarter blocks, as an i16 | normal x(8)<<16 | normal z(8)<<24
 /// ```
+///
+/// With `smooth` set (distant levels, see `SMOOTH_FROM_CELL`) the vertex carries the
+/// terrain's slope where it stands: the ground's normal, its x and z mapped from -1..1 to
+/// 0..254 (y is the rest, always up). The shader lights the face by that instead of the
+/// way the face points, so the boxes shade as the smooth hillside they stand for.
 ///
 /// `x` and `z` are corners in cells (0..=32) from the section origin. `in_x`/`in_z` point
 /// from the corner into the quad's own cell (0 = -1, 1 = 0, 2 = +1): the shader steps half
@@ -417,7 +423,15 @@ impl LodVertex {
         (self.a >> 20) & 255
     }
     pub fn y_q(self) -> i32 {
-        self.b as i32
+        self.b as u16 as i16 as i32
+    }
+    /// The slope normal a smooth vertex carries (`None`: lit by its face).
+    pub fn normal(self) -> Option<[f32; 3]> {
+        if (self.a >> 28) & 1 == 0 {
+            return None;
+        }
+        let (x, z) = (unpack_unit((self.b >> 16) & 255), unpack_unit(self.b >> 24));
+        Some([x, (1.0 - x * x - z * z).max(0.0).sqrt(), z])
     }
 }
 
@@ -440,9 +454,24 @@ impl LodMesh {
 /// Side length of the sampled grid: the section plus a one-cell ring of neighbours.
 const GRID: i32 = CELLS + 2;
 
+/// From this cell width on, LOD terrain is shaded as smooth slopes (vertex normals from the
+/// terrain's own heights), and low steps take the top texture: far off it reads as hills,
+/// not stairs. Finer levels, next to the real chunks, stay blocky like them.
+pub const SMOOTH_FROM_CELL: i32 = 4;
+
+fn pack_unit(v: f32) -> u32 {
+    ((v.clamp(-1.0, 1.0) + 1.0) * 127.0).round() as u32
+}
+
+fn unpack_unit(b: u32) -> f32 {
+    b as f32 / 127.0 - 1.0
+}
+
 struct Grid {
     surf: Vec<i32>,
     block: Vec<u16>,
+    /// Heights before rounding (quarter blocks), ring included: the slopes come from these.
+    raw: Vec<i32>,
 }
 
 impl Grid {
@@ -454,6 +483,17 @@ impl Grid {
     }
     fn block(&self, i: i32, j: i32) -> u16 {
         self.block[Self::idx(i, j)]
+    }
+
+    /// The ground's normal at corner (x, z) of the section (0..=CELLS), from the four cells
+    /// around it, packed for `LodVertex::b`'s top half.
+    fn corner_normal(&self, x: i32, z: i32, cell: i32) -> u32 {
+        let h = |i: i32, j: i32| self.raw[Self::idx(i, j)] as f32 * 0.25;
+        let w = cell as f32;
+        let dx = (h(x, z - 1) + h(x, z) - h(x - 1, z - 1) - h(x - 1, z)) / (2.0 * w);
+        let dz = (h(x - 1, z) + h(x, z) - h(x - 1, z - 1) - h(x, z - 1)) / (2.0 * w);
+        let l = (dx * dx + 1.0 + dz * dz).sqrt();
+        pack_unit(-dx / l) | (pack_unit(-dz / l) << 8)
     }
 }
 
@@ -480,6 +520,12 @@ pub fn cell_surface(gen: &WorldGen, key: SectionKey, i: i32, j: i32) -> (i32, u1
 
 /// `cell_surface`, with the edits in the cell (see `SurfaceEdits`).
 fn cell_surface_edited(gen: &WorldGen, key: SectionKey, i: i32, j: i32, edits: Option<&CellEdits>) -> (i32, u16) {
+    let (q, b, _) = cell_surface_raw(gen, key, i, j, edits);
+    (q, b)
+}
+
+/// `cell_surface_edited`, and the height before rounding.
+fn cell_surface_raw(gen: &WorldGen, key: SectionKey, i: i32, j: i32, edits: Option<&CellEdits>) -> (i32, u16, i32) {
     let cell = key.cell();
     let (ox, oz) = key.origin();
     let (mut s, mut b) = gen.lod_surface(sample_at(ox + i * cell, cell), sample_at(oz + j * cell, cell), cell);
@@ -490,7 +536,7 @@ fn cell_surface_edited(gen: &WorldGen, key: SectionKey, i: i32, j: i32, edits: O
             (s, b) = (t.top_q, t.block);
         }
     }
-    (quantize(s, b, gen.water_id(), cell), b)
+    (quantize(s, b, gen.water_id(), cell), b, s)
 }
 
 /// Where a level-`cell` cell starting at block `b` is sampled: its centre (whole blocks).
@@ -547,6 +593,8 @@ struct Emit {
     verts: Vec<LodVertex>,
     min_q: i32,
     max_q: i32,
+    /// Smooth sections: the packed normal at each corner, (CELLS + 1)^2.
+    normals: Option<Vec<u32>>,
 }
 
 impl Emit {
@@ -574,7 +622,11 @@ impl Emit {
                 | (((inz + 1) as u32) << 17)
                 | ((top as u32) << 19)
                 | ((texture & 255) << 20);
-            self.verts.push(LodVertex { a, b: y as u32 });
+            let (a, b) = match &self.normals {
+                Some(n) => (a | 1 << 28, (y as i16 as u16 as u32) | (n[(z * (CELLS + 1) + x) as usize] << 16)),
+                None => (a, y as i16 as u16 as u32),
+            };
+            self.verts.push(LodVertex { a, b });
             self.min_q = self.min_q.min(y);
             self.max_q = self.max_q.max(y);
         }
@@ -589,19 +641,27 @@ pub fn build_section(gen: &WorldGen, reg: &BlockRegistry, key: SectionKey) -> Lo
 /// `build_section` over the terrain as edits left it.
 pub fn build_section_edited(gen: &WorldGen, reg: &BlockRegistry, edits: &SurfaceEdits, key: SectionKey) -> LodMesh {
     let edited = edits.cells(key);
-    let mut grid = Grid { surf: vec![0; (GRID * GRID) as usize], block: vec![0; (GRID * GRID) as usize] };
+    let n = (GRID * GRID) as usize;
+    let mut grid = Grid { surf: vec![0; n], block: vec![0; n], raw: vec![0; n] };
     for j in -1..=CELLS {
         for i in -1..=CELLS {
             let corner = (i == -1 || i == CELLS) && (j == -1 || j == CELLS);
             if corner {
                 continue; // never a neighbour of a face
             }
-            let (s, b) = cell_surface_edited(gen, key, i, j, edited.get(&(i, j)));
+            let (s, b, raw) = cell_surface_raw(gen, key, i, j, edited.get(&(i, j)));
             let k = Grid::idx(i, j);
             grid.surf[k] = s;
             grid.block[k] = b;
+            grid.raw[k] = raw;
         }
     }
+    // The ring's corners only shape the slope at the section's corners: their two
+    // neighbours' average does.
+    for (i, j, a, b) in [(-1, -1, (0, -1), (-1, 0)), (CELLS, -1, (CELLS - 1, -1), (CELLS, 0)), (-1, CELLS, (0, CELLS), (-1, CELLS - 1)), (CELLS, CELLS, (CELLS - 1, CELLS), (CELLS, CELLS - 1))] {
+        grid.raw[Grid::idx(i, j)] = (grid.raw[Grid::idx(a.0, a.1)] + grid.raw[Grid::idx(b.0, b.1)]) / 2;
+    }
+    let smooth = key.cell() >= SMOOTH_FROM_CELL;
     // Neighbour heights for border sides: the lowest any neighbouring level can show.
     for t in 0..CELLS {
         for (i, j) in [(-1, t), (CELLS, t), (t, -1), (t, CELLS)] {
@@ -617,7 +677,11 @@ pub fn build_section_edited(gen: &WorldGen, reg: &BlockRegistry, edits: &Surface
     // Faces are merged only inside a tile. For sections that can meet loaded chunks a tile
     // is one chunk column, so the renderer can hide every quad by its column.
     let tile = if key.level <= MASKED_MAX_LEVEL { (CHUNK_SIZE >> key.level).max(1) } else { CELLS };
-    let mut e = Emit { verts: Vec::new(), min_q: i32::MAX, max_q: i32::MIN };
+    let normals = smooth.then(|| {
+        let cell = key.cell();
+        (0..=CELLS).flat_map(|z| (0..=CELLS).map(move |x| (x, z))).map(|(x, z)| grid.corner_normal(x, z, cell)).collect()
+    });
+    let mut e = Emit { verts: Vec::new(), min_q: i32::MAX, max_q: i32::MIN, normals };
 
     // Tops: greedy rectangles of equal height and texture.
     let top_key = |i: i32, j: i32| (grid.surf(i, j), tex(reg, grid.block(i, j), Face::PosY));
@@ -705,12 +769,16 @@ pub fn build_section_edited(gen: &WorldGen, reg: &BlockRegistry, edits: &Surface
                     b += 1;
                     continue;
                 }
-                let t = tex(reg, grid.block(i, j), face);
+                // Far off, a low step (no steeper than the cell is wide) is the hillside
+                // itself: it takes the top's texture, not the striped side.
+                let gentle = |own: i32, bottom: i32| smooth && own - bottom <= 4 * cell;
+                let side_tex = |i: i32, j: i32, own: i32, bottom: i32| tex(reg, grid.block(i, j), if gentle(own, bottom) { Face::PosY } else { face });
+                let t = side_tex(i, j, own, bottom);
                 let end = (b / tile + 1) * tile;
                 let mut len = 1;
                 while b + len < end {
                     let (i2, j2) = if dx != 0 { (a, b + len) } else { (b + len, a) };
-                    if grid.surf(i2, j2) != own || bottom_at(i2, j2) != bottom || tex(reg, grid.block(i2, j2), face) != t {
+                    if grid.surf(i2, j2) != own || bottom_at(i2, j2) != bottom || side_tex(i2, j2, own, bottom) != t {
                         break;
                     }
                     len += 1;
@@ -1308,6 +1376,35 @@ mod tests {
             assert!(cover.iter().all(|&c| c == 1), "{key:?}");
             assert!(m.min_y <= m.max_y);
         }
+    }
+
+    #[test]
+    fn distant_sections_carry_the_slope_and_near_ones_stay_blocky() {
+        let (reg, gen) = world();
+        // Near (2-block cells): lit by their faces, like real blocks.
+        let near = build_section(&gen, &reg, SectionKey::new(1, 3, -2));
+        assert!(near.vertices.iter().all(|v| v.normal().is_none()));
+        // Far (16-block cells, over hills): every vertex has the ground's normal at its
+        // corner, pointing up and downhill: it agrees with the heights around the corner.
+        let key = SectionKey::new(4, 1, 2);
+        let far = build_section(&gen, &reg, key);
+        assert!(far.vertices.iter().all(|v| v.normal().is_some_and(|n| n[1] > 0.2)));
+        let cell = key.cell();
+        let (ox, oz) = key.origin();
+        let h = |i: i32, j: i32| gen.lod_surface(ox + i * cell + cell / 2, oz + j * cell + cell / 2, cell).0 as f32 / 4.0;
+        let mut checked = 0;
+        for v in far.vertices.iter().filter(|v| v.x() > 0 && v.z() > 0 && v.x() < 32 && v.z() < 32) {
+            let (x, z) = (v.x() as i32, v.z() as i32);
+            let dx = h(x, z) + h(x, z - 1) - h(x - 1, z) - h(x - 1, z - 1);
+            let n = v.normal().unwrap();
+            if dx.abs() > cell as f32 * 0.5 {
+                assert!(n[0] * dx < 0.0, "the normal leans away from the rise ({dx}, {n:?})");
+                checked += 1;
+            }
+        }
+        assert!(checked > 10, "only {checked} sloped corners");
+        // Heights still read back (16 bits now share the word with the normal).
+        assert!(far.vertices.iter().all(|v| (v.y_q() as f32 / 4.0 - far.min_y) > -0.01));
     }
 
     #[test]

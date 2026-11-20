@@ -369,6 +369,13 @@ phones; no code was copied from it or from other LOD mods.
   detail). Octaves of the height noise finer than a cell are faded to their average instead of
   aliasing, and heights are rounded to steps that grow with the cell (a quarter of its width),
   which roughly halves the quads.
+* **Smooth far terrain at no extra cost:** from 4-block cells outward every vertex carries the
+  ground's slope at its corner (the normal from the four unrounded heights around it, packed in
+  the spare 16 bits of its 8-byte vertex), and the shader lights it by that slope instead of
+  by the way its face points. The tops and steps of a hillside then shade as one smooth
+  surface, and steps no steeper than the cell is wide take the top's texture instead of the
+  striped side. Same quads, same memory. The 2-block cells next to the real chunks stay
+  blocky like them.
 * **Blocky meshes like Distant Horizons':** a box per column, sides only where the neighbour is
   lower, equal faces merged. Border sides reach down to the lowest height a neighbour one level
   finer or coarser can have, so there are no cracks between levels (the quadtree keeps

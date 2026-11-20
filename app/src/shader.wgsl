@@ -152,7 +152,7 @@ fn vs_lod(v: VsIn) -> VsOut {
     let tex = (a >> 20u) & 255u;
     let base = vec3<f32>(
         v.origin.x + f32(a & 63u) * cell,
-        f32(bitcast<i32>(v.packed.y)) * 0.25,
+        f32(bitcast<i32>(v.packed.y << 16u) >> 16u) * 0.25, // an i16 of quarter blocks
         v.origin.y + f32((a >> 6u) & 63u) * cell
     );
 
@@ -193,6 +193,17 @@ fn vs_lod(v: VsIn) -> VsOut {
 
     o.clip = g.view_proj * vec4<f32>(world, 1.0);
     o.color = g.face_light[min(face, 5u)].rgb;
+    if (((a >> 28u) & 1u) == 1u && tex != u32(g.flags.z + 0.5)) {
+        // Distant land: lit as the smooth slope the vertex stands on (lod::SMOOTH_FROM_CELL),
+        // each axis's face light by how much the slope's normal points along it, as the
+        // character is lit. Tops and steps of one hillside then shade as one surface.
+        let nx = f32((v.packed.y >> 16u) & 255u) / 127.0 - 1.0;
+        let nz = f32(v.packed.y >> 24u) / 127.0 - 1.0;
+        let n = vec3<f32>(nx, sqrt(max(1.0 - nx * nx - nz * nz, 0.0)), nz);
+        let n2 = n * n;
+        o.color = g.face_light[select(1, 0, n.x > 0.0)].rgb * n2.x + g.face_light[2].rgb * n2.y
+            + g.face_light[select(5, 4, n.z > 0.0)].rgb * n2.z;
+    }
     o.world = world;
     o.uv = face_uv(face, world - vec3<f32>(v.origin.x, 0.0, v.origin.y));
     o.layer = tex;
