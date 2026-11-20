@@ -130,6 +130,9 @@ impl Showcase {
             look_pitch: 0.0,
             jump: false,
             roll: false,
+            down: false,
+            punch: false,
+            mine: false,
             actions: Vec::new(),
         };
         let out = self.ctl.update(&self.world, dt.clamp(0.0, 0.1) as f64, &input);

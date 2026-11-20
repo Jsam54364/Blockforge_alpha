@@ -53,6 +53,8 @@ pub const CONTROLS: [Control; 18] = [
     ctl("attack", "Attack", Look::Round, (82.0, 82.0), "", Some("@pickaxe"), Action::Hold("attack"), false, true),
     ctl("place", "Place", Look::Round, (64.0, 64.0), "", Some("@block"), Action::Hold("place"), false, true),
     ctl("jump", "Jump", Look::Round, (72.0, 72.0), "", Some("keyboard_double_arrow_up"), Action::Hold("jump"), true, true),
+    // Flying: held, sinks (JUMP rises).
+    ctl("down", "Down", Look::Round, (60.0, 60.0), "", Some("keyboard_double_arrow_down"), Action::Hold("down"), false, true),
     ctl("roll", "Roll", Look::Square, (64.0, 40.0), "Roll", None, Action::Hold("roll"), true, true),
     ctl("crouch", "Crouch", Look::Square, (64.0, 40.0), "Crouch", None, Action::Press("crouch"), true, true),
     ctl("crawl", "Crawl", Look::Square, (64.0, 40.0), "Crawl", None, Action::Press("crawl"), true, true),
@@ -68,7 +70,6 @@ pub const CONTROLS: [Control; 18] = [
     ctl("eat", "Eat", Look::Square, (64.0, 40.0), "Eat", None, Action::Press("eat"), true, false),
     ctl("wave", "Wave", Look::Square, (64.0, 40.0), "Wave", None, Action::Press("wave"), true, false),
     ctl("sit", "Sit", Look::Square, (64.0, 40.0), "Sit", None, Action::Press("sit"), true, false),
-    ctl("carry", "Carry", Look::Square, (64.0, 40.0), "Carry", None, Action::Press("two_handed_item"), true, false),
     ctl("stats", "Stats", Look::Square, (64.0, 40.0), "", Some("speed"), Action::ToggleStats, false, false),
 ];
 
@@ -166,6 +167,7 @@ impl Ui {
             "pause" => (r - 24.0 * dp, t + 24.0 * dp, 1.0),
             "act" => (r - (48.0 + 8.0 + 38.0) * dp, t + 24.0 * dp, 1.0),
             "jump" => at(36.0, 36.0),
+            "down" => at(198.0, 102.0),
             "attack" => at(123.0, 47.0),
             "place" => at(36.0, 118.0),
             "roll" | "stance" => at(123.0, 118.0),
@@ -206,7 +208,17 @@ impl Ui {
 
     /// Whether control `i` is on screen now (walk-only ones need the character).
     fn control_visible(&self, i: usize) -> bool {
-        self.layout.places[i].shown && (!CONTROLS[i].walk || self.settings.walk) && self.stance_fits(i)
+        self.layout.places[i].shown && self.mode_fits(i) && self.stance_fits(i)
+    }
+
+    /// Whether control `i` belongs to the mode he is in: walking-only buttons, JUMP (which
+    /// also rises in flight) and DOWN (flight only).
+    fn mode_fits(&self, i: usize) -> bool {
+        match CONTROLS[i].key {
+            "jump" => true,
+            "down" => !self.settings.walk,
+            _ => !CONTROLS[i].walk || self.settings.walk,
+        }
     }
 
     /// Whether control `i` belongs to the stance setting in force: the three buttons, or the

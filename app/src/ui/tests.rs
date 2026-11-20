@@ -406,7 +406,8 @@ fn on_top(u: &Ui, pick: impl Fn(Action) -> bool) -> usize {
 fn the_hud_has_its_controls_and_they_act_on_the_touch() {
     for (w, h) in SIZES {
         let (wf, hf) = (w as f32, h as f32);
-        // Flying: attack, place, the hotbar and pause; nothing that needs the body.
+        // Flying: attack, place, the hotbar and pause, and JUMP and DOWN to rise and sink;
+        // not the rest of the character's buttons.
         let mut u = hud(w, h, false);
         u.settings.show_stats = true;
         check_layout(&mut u, wf, hf);
@@ -417,10 +418,13 @@ fn the_hud_has_its_controls_and_they_act_on_the_touch() {
             let b = find(&u, Action::Slot(n));
             assert!(b.w >= 26.0 * 2.75 && b.h >= 26.0 * 2.75, "{w}x{h}: slot {n} is {}x{}", b.w, b.h);
         }
-        assert!(!has(&u, Action::Hold("jump")) && !has(&u, Action::ToggleActs));
-        // Walking: the character's too, none on top of another.
+        find(&u, Action::Hold("jump"));
+        find(&u, Action::Hold("down"));
+        assert!(!has(&u, Action::ToggleActs) && !has(&u, Action::Hold("roll")) && !has(&u, Action::Press("crouch")));
+        // Walking: the character's too, none on top of another; no DOWN.
         let mut u = hud(w, h, true);
         check_layout(&mut u, wf, hf);
+        assert!(!has(&u, Action::Hold("down")));
         for a in [Action::Hold("attack"), Action::Hold("place"), Action::Hold("jump"), Action::Hold("roll"), Action::Press("crouch"), Action::Press("crawl"), Action::ToggleActs] {
             let b = find(&u, a);
             assert!(b.w >= 40.0 * 2.75 && b.h >= 40.0 * 2.75, "{w}x{h}: {a:?} is {}x{}", b.w, b.h);

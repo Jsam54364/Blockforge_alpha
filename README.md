@@ -219,12 +219,13 @@ and quads drawn. The HUD and menus are drawn by a small immediate-mode layer (`u
   hotbar's picked slot; tap a hotbar slot there to choose which; Clear Slot empties it. The hotbar is saved with each world (`state.txt`). The block pictures are little
   cubes drawn on the CPU from each block's own textures when the renderer starts, kept in
   the bottom of the world-thumbnails texture.
-* **Jump, Roll, Crouch, Crawl, Act** (walking only), and **Pause**.
+* **Jump** (also rises in flight), **Down** (flight only: sinks), **Roll, Crouch, Crawl, Act**
+  (walking only), and **Pause**.
 * **Building by touch** (optional, Settings > Controls > Building: Touch + Buttons): on the
   look side of the screen, a quick tap that doesn't drag places the hotbar's block where you
   look, or uses the block if it can be used (a block whose behaviour says `usable()`; the server
   gets `UseBlock` and the behaviour's `on_used` runs; no built-in block is usable yet). Pressing
-  and holding still for 0.35 s digs, the same as holding Attack (chop after chop), until the
+  and holding still for 0.35 s digs with the mining swing (see the character section) until the
   finger lifts; a drag is only looking. The Attack and Place buttons still work.
 * **One stance button** (optional, Settings > Controls > Crouch, Crawl, Roll: One Button):
   Crouch, Crawl and Roll become one button. A tap crouches (or stands up), holding it for
@@ -233,7 +234,7 @@ and quads drawn. The HUD and menus are drawn by a small immediate-mode layer (`u
 * **Layout editor** (Settings > Controls > Button Layout): every control is outlined and can be
   dragged anywhere on screen; tap one to pick it, then make it smaller or bigger (50-200%) or
   hide it. Add puts hidden controls back, including extras that start hidden: Camera, Use,
-  Swing, Eat, Wave, Sit, Carry and Stats. Pause can't be hidden. Reset puts everything back.
+  Swing, Eat, Wave, Sit and Stats. Pause can't be hidden. Reset puts everything back.
   Done saves the layout to `controls.txt` beside the settings. Positions are kept as fractions
   of the screen, so a layout moves to another phone; a control in its default spot follows the
   default layout for that screen (the hotbar shrinks to fit between the stick and Attack).
@@ -539,33 +540,58 @@ Next: trees and plants per biome, rivers, rain shadows behind mountains.
 
 ## The character (`app/src/hyrig`, `app/src/player.rs`, `assets/hyrig`)
 
-* **Walk mode** (the default; Settings > General > Mode switches to the flying camera and back): you are
-  the HyRig character, seen from behind. Camera (in Settings, or Act > View) cycles like
+* **Walk mode** (the default): you are the HyRig character, seen from behind. Camera (in Settings, or Act > View) cycles like
   Minecraft's F5: behind, in front looking back at him (the camera sits 3.7 blocks out along
   where you look; blocks are still aimed from his eyes), then first person. The
   stick walks, jogs or sprints by how far it is pushed; JUMP and ROLL repeat while held;
   CROUCH and CRAWL toggle; ACT opens everything else: punch, swing, chop, hit, use with either
-  hand, eat, wave, sit, die and revive, and the four carry states. Attack punches (tap) or
-  chops (hold); placing a block reaches out.
+  hand, eat, wave, sit, die and revive. Attack punches (tap; the jabs alternate right and
+  left hands) or chops (hold).
+* **Fly mode** (Settings > General > Mode, or two quick taps on JUMP, as in Minecraft's
+  creative mode): he takes off with a small lift and the camera goes with him. The stick flies
+  along where you look (6 m/s, 11 at full stick), JUMP held rises and DOWN (a button shown only
+  in flight) sinks. His arms and legs trail behind and swing with momentum from the kit's seven
+  flight clips, and his body tilts into the way he is going. Flying down onto the ground lands
+  him and ends the flight, as do two more quick taps on JUMP; the Mode setting follows.
+* **Carrying blocks:** the block picked in the hotbar is in his hands, held out in front of
+  him with both (the kit's two-handed carry pose; the block is drawn between his hands with the
+  terrain's own textures and biome colours). PLACE puts it down with both hands reaching out
+  (the kit's interact for the right hand and its left-hand twin for the left). Punching,
+  chopping and digging put it away for a moment; an empty hotbar slot leaves his hands empty.
+* **Water:** waist-deep water (0.6 to 1.3 blocks) is waded through, arms held out over it;
+  deeper water is swum in at the surface (DOWN dives; underwater the stick follows where you
+  look, JUMP rises and he floats back up when let go; JUMP by a ledge climbs out). Falling in
+  fast goes under first.
+* **Digging by touch** (building by touch on) uses the kit's mining swing: about three strikes
+  a second, and a block breaks after one strike per half point of hardness (dirt 1, stone 3,
+  granite 4).
 * **Block rules** (Minecraft's, where the kit has none): half slabs are walked up and down
   (a step is 0.6); a full block needs a jump (1.05 high); the body is 0.6 wide and 1.8 tall, so
   a two-block-high opening is walked through; a two-block wall is climbed by jumping at it
   (the kit's ledge climb, 1.4 to 2.55 blocks). Collisions move him onto a slab at once, but the
   body and the camera ease the rest of the way (most of it in a sixth of a second), so steps up
-  and down look smooth. Water is walked through: there is no swimming
-  yet. The follow camera stops short of walls and ground.
+  and down look smooth. The follow camera stops short of walls and ground.
 * **The state machine** is the kit's controller ported to Rust function for function
   (`hyrig/controller.rs`): gaits blended in step, jumps from either foot chained on touchdown,
   falls and landings, linked rolls, ledge climbs, crouch, prone, upper-body actions over any
-  movement, carry poses over everything, sitting, death, idle fidgets, blinking and glancing
-  eyes and expressions. `tests/hyrig_parity.rs` replays the kit's recorded reference run
-  (7 194 frames covering every state) and the port matches it on every frame.
-* **The model** is a tree of 25 rigid parts with 51 clips. `tools/convert_hyrig.py` turns the
-  kit's glTF into `assets/hyrig/hyrig.bin` (nodes, triangles, key frames; 0.8 MB), so the game
+  movement, carry poses over everything, creative flight, wading, swimming and diving (each a
+  blend of up to seven clips driven by a momentum spring, with a whole-body lean), held
+  punching and mining, sitting, death, idle fidgets, blinking and glancing eyes and
+  expressions. `tests/hyrig_parity.rs` replays the kit's recorded reference run (13 008
+  frames covering every state, on foot, flying and in water) and the port matches it on every
+  frame. The game adds three things, off in the kit: `snap_down` (half slabs are walked down,
+  not dropped off), `fly_follow_pitch` (in flight the stick goes where you look) and the
+  "interact_both" press. The block world answers the kit's water question from its water
+  blocks (`BlockWorld::water_level`: the top of the water the feet are in).
+* **The model** is a tree of 25 rigid parts with 77 clips (kit version 1.6: the character is
+  right-handed and its bones are named for its own sides). `tools/convert_hyrig.py` turns the
+  kit's glTF into `assets/hyrig/hyrig.bin` (nodes, triangles, key frames; 1.3 MB), so the game
   needs no glTF reader. Each frame `hyrig/rig.rs` blends the clips the controller asks for
-  into a pose (legs from the body clips, upper body faded against the action, carry pose on
-  its arm bones, head turn, face) and hands the renderer 768 world-space vertices; the shader
-  lights them with the terrain's per-direction light.
+  into a pose (legs from the body clips; upper body faded against the wading pose and then the
+  action, the left arm against the other hand's clip when both hands interact; carry pose on
+  its arm bones; head turn; face), tilts the whole body by the lean about a point at the
+  hips, and hands the renderer 768 world-space vertices (36 more for a carried block); the
+  shader lights them with the terrain's per-direction light.
 * The model is by Powerbyte7, **CC BY-NC 4.0: credit required, no commercial use**
   (`assets/hyrig/CREDITS.md`).
 

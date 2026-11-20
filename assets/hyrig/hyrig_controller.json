@@ -56,12 +56,12 @@
    "loop": true,
    "use": "stick back, above 80%"
   },
-  "strafe_left": {
+  "strafe_right": {
    "duration": 0.9,
    "loop": true,
    "use": "spare (side-step)"
   },
-  "strafe_right": {
+  "strafe_left": {
    "duration": 0.9,
    "loop": true,
    "use": "spare (side-step)"
@@ -142,9 +142,14 @@
    "use": "mantle onto a 1.5-2.5 m ledge"
   },
   "punch": {
-   "duration": 0.8,
+   "duration": 0.42,
    "loop": false,
-   "use": "attack (upper body; legs carry on)"
+   "use": "a single jab with the right hand (alternates with punch_l on each press; upper body)"
+  },
+  "punch_l": {
+   "duration": 0.42,
+   "loop": false,
+   "use": "a single jab with the left hand"
   },
   "swing": {
    "duration": 0.7,
@@ -216,15 +221,15 @@
    "loop": true,
    "use": "prone, backward"
   },
-  "crawl_right": {
-   "duration": 0.6,
-   "loop": true,
-   "use": "prone, toward the character's right"
-  },
   "crawl_left": {
    "duration": 0.6,
    "loop": true,
    "use": "prone, toward the character's left"
+  },
+  "crawl_right": {
+   "duration": 0.6,
+   "loop": true,
+   "use": "prone, toward the character's right"
   },
   "hold_2h": {
    "duration": 4.0,
@@ -251,10 +256,135 @@
    "loop": false,
    "use": "one-handed chop, other hand (upper body; legs carry on)"
   },
+  "mine": {
+   "duration": 0.36,
+   "loop": false,
+   "use": "breaking blocks: repeating strike while held (upper body; legs carry on)"
+  },
+  "mine_l": {
+   "duration": 0.36,
+   "loop": false,
+   "use": "breaking blocks with the other hand"
+  },
+  "mine_2h": {
+   "duration": 0.48,
+   "loop": false,
+   "use": "breaking blocks two-handed"
+  },
   "hold_item": {
    "duration": 4.0,
    "loop": true,
    "use": "carrying a chest or block in both hands (arm layers over everything)"
+  },
+  "fly_idle": {
+   "duration": 3.0,
+   "loop": true,
+   "use": "flight: hovering (blended with the six directions)"
+  },
+  "fly_forward": {
+   "duration": 3.0,
+   "loop": true,
+   "use": "flight: moving forward, limbs trailing behind"
+  },
+  "fly_back": {
+   "duration": 3.0,
+   "loop": true,
+   "use": "flight: moving backward, limbs carried forward"
+  },
+  "fly_left": {
+   "duration": 3.0,
+   "loop": true,
+   "use": "flight: moving toward the character's left"
+  },
+  "fly_up": {
+   "duration": 3.0,
+   "loop": true,
+   "use": "flight: rising, legs dangling"
+  },
+  "fly_down": {
+   "duration": 3.0,
+   "loop": true,
+   "use": "flight: descending, arms floating up"
+  },
+  "fly_right": {
+   "duration": 3.0,
+   "loop": true,
+   "use": "flight: moving toward the character's right"
+  },
+  "wade": {
+   "duration": 0.84,
+   "loop": true,
+   "use": "spare (slow wading walk)"
+  },
+  "wade_back": {
+   "duration": 0.9,
+   "loop": true,
+   "use": "spare (slow wading walk backward)"
+  },
+  "wade_idle": {
+   "duration": 4.0,
+   "loop": true,
+   "use": "waist-deep water: upper-body layer, arms held out over the surface, over any movement"
+  },
+  "swim_idle": {
+   "duration": 1.2,
+   "loop": true,
+   "use": "swimming at the surface: treading water"
+  },
+  "swim_forward": {
+   "duration": 1.2,
+   "loop": true,
+   "use": "surface: front crawl (the controller lays the body out flat)"
+  },
+  "swim_back": {
+   "duration": 1.2,
+   "loop": true,
+   "use": "surface: moving backward"
+  },
+  "swim_left": {
+   "duration": 1.2,
+   "loop": true,
+   "use": "surface: sidestroke toward the character's left"
+  },
+  "dive_idle": {
+   "duration": 1.4,
+   "loop": true,
+   "use": "underwater: hovering"
+  },
+  "dive_forward": {
+   "duration": 1.4,
+   "loop": true,
+   "use": "underwater: breaststroke (body laid out flat)"
+  },
+  "dive_back": {
+   "duration": 1.4,
+   "loop": true,
+   "use": "underwater: backing up"
+  },
+  "dive_left": {
+   "duration": 1.4,
+   "loop": true,
+   "use": "underwater: sculling toward the character's left"
+  },
+  "dive_up": {
+   "duration": 1.4,
+   "loop": true,
+   "use": "underwater: rising"
+  },
+  "dive_down": {
+   "duration": 1.4,
+   "loop": true,
+   "use": "underwater: heading down (body tipped head first)"
+  },
+  "swim_right": {
+   "duration": 1.2,
+   "loop": true,
+   "use": "surface: sidestroke toward the character's right"
+  },
+  "dive_right": {
+   "duration": 1.4,
+   "loop": true,
+   "use": "underwater: sculling toward the character's right"
   },
   "prone_enter": {
    "duration": 0.8,
@@ -308,7 +438,10 @@
   "crawlLeft": "crawl_left",
   "crawlRight": "crawl_right",
   "proneIn": "prone_enter",
-  "proneOut": "prone_exit"
+  "proneOut": "prone_exit",
+  "wadeArms": "wade_idle",
+  "mine": "mine",
+  "punchLeft": "punch_l"
  },
  "speeds": {
   "walk": 1.25,
@@ -519,6 +652,7 @@
  },
  "upperBodyActions": [
   "punch",
+  "punch_l",
   "swing",
   "hit_take",
   "chop",
@@ -529,17 +663,139 @@
   "swing_2h",
   "chop_2h",
   "swing_l",
-  "chop_l"
+  "chop_l",
+  "mine",
+  "mine_l",
+  "mine_2h"
  ],
  "attackClips": [
   "punch",
+  "punch_l",
   "swing",
   "chop",
   "swing_2h",
   "chop_2h",
   "swing_l",
-  "chop_l"
+  "chop_l",
+  "mine",
+  "mine_l",
+  "mine_2h"
  ],
+ "punch": {
+  "repeatAt": 0.24,
+  "note": "Held punch input: the next jab (other hand) starts once the current one is this many seconds in, and the upper-body layer stays at full weight between jabs."
+ },
+ "mine": {
+  "hitAt": {
+   "mine": 0.44,
+   "mine_l": 0.44,
+   "mine_2h": 0.36
+  },
+  "note": "Held mine input: the clip loops on the upper body for as long as it is held, and a mineHit event fires at hitAt (fraction of the clip) each strike; on release the strike finishes and fades out. Which clip depends on the carry state (hold.states[...].actions.mine); a carry state can block it."
+ },
+ "fly": {
+  "clips": {
+   "idle": "fly_idle",
+   "forward": "fly_forward",
+   "back": "fly_back",
+   "right": "fly_right",
+   "left": "fly_left",
+   "up": "fly_up",
+   "down": "fly_down"
+  },
+  "cycle": 3.0,
+  "speed": 6.0,
+  "fastSpeed": 11.0,
+  "vertical": 4.5,
+  "accel": 3.0,
+  "turnRate": 8.0,
+  "takeoff": 3.0,
+  "inertia": 0.45,
+  "maxAccel": 20.0,
+  "limbStiffness": 30.0,
+  "limbDamping": 7.0,
+  "leanForward": 0.19,
+  "leanBack": 0.14,
+  "leanSide": 0.16,
+  "leanMax": 1.3,
+  "pivot": 0.95,
+  "fade": 0.35,
+  "doubleTapJump": 0.3,
+  "landOnGround": true,
+  "landBelow": 0.5,
+  "landImpact": 3.0,
+  "note": "Creative flight. speed: at stick sprintAt (fastSpeed beyond it); vertical: Jump held rises, down held descends. accel: velocity easing rate (momentum). The seven clips share one cycle and are blended by a spring that chases the flight velocity plus inertia x acceleration (limbStiffness, limbDamping), so limbs whip back on take-off and swing past on stopping. lean*: radians of whole-body tilt at full speed, around a pivot this high above the feet. doubleTapJump: seconds between two Jump presses that toggle flight (0 = off). landOnGround: descending faster than landBelow onto ground ends flight; above landImpact the landing clip plays."
+ },
+ "water": {
+  "wadeDepth": 0.6,
+  "wadeFade": 0.3,
+  "swimDepth": 1.3,
+  "exitMargin": 0.05,
+  "diveEntry": 4.0,
+  "entryKeep": 0.35,
+  "sinkSpeed": 1.2,
+  "swim": {
+   "clips": {
+    "idle": "swim_idle",
+    "forward": "swim_forward",
+    "back": "swim_back",
+    "right": "swim_right",
+    "left": "swim_left"
+   },
+   "cycle": 1.2,
+   "speed": 3.6,
+   "fastSpeed": 5.64,
+   "strokeRate": 1.6,
+   "backScale": 0.65,
+   "vertical": 1.0,
+   "accel": 3.0,
+   "turnRate": 6.0,
+   "floatRate": 3.0,
+   "planeLift": 0.3,
+   "inertia": 0.35,
+   "maxAccel": 10.0,
+   "limbStiffness": 22.0,
+   "limbDamping": 7.0,
+   "leanForward": 1.2,
+   "leanBack": 0.35,
+   "leanSide": 0.35,
+   "leanMax": 1.0,
+   "fade": 0.4
+  },
+  "dive": {
+   "clips": {
+    "idle": "dive_idle",
+    "forward": "dive_forward",
+    "back": "dive_back",
+    "right": "dive_right",
+    "left": "dive_left",
+    "up": "dive_up",
+    "down": "dive_down"
+   },
+   "cycle": 1.4,
+   "speed": 2.8,
+   "fastSpeed": 4.4,
+   "strokeRate": 1.5,
+   "backScale": 0.6,
+   "vertical": 2.2,
+   "buoyancy": 0.6,
+   "accel": 3.0,
+   "turnRate": 6.0,
+   "followPitch": true,
+   "inertia": 0.35,
+   "maxAccel": 10.0,
+   "limbStiffness": 22.0,
+   "limbDamping": 7.0,
+   "leanForward": 1.45,
+   "leanBack": 0.4,
+   "leanSide": 0.35,
+   "leanMax": 1.0,
+   "leanDown": 1.0,
+   "leanLimit": 1.75,
+   "fade": 0.5
+  },
+  "note": "Depths are water surface minus the ground under the character. wadeDepth..swimDepth: wading (the wadeArms clip fades in over the upper body in wadeFade s; the legs keep their normal gaits and speeds). swimDepth or more: swimming, floating with the feet swimDepth below the surface (planeLift higher at speed). Down held dives; underwater, forward follows the look pitch, Jump/Down move straight up/down, and with no input the body drifts up at buoyancy m/s until it surfaces. Falling in faster than diveEntry m/s goes straight under, keeping entryKeep of the speed. Ground shallower than swimDepth - exitMargin ends swimming. A body that dies in deep water sinks at sinkSpeed. strokeRate: the clips play up to this many times faster as speed rises above speed. swim and dive take the same settings as fly (speeds, momentum spring, lean); leanDown tips the body head-first when going down, leanLimit caps the total."
+ },
  "hold": {
   "fade": 0.18,
   "states": {
@@ -553,9 +809,12 @@
     "keepDuring": [
      "interact_l",
      "wave",
-     "hit_take"
+     "hit_take",
+     "punch_l"
     ],
-    "actions": {},
+    "actions": {
+     "punch": "punch_l"
+    },
     "block": []
    },
    "one_handed_left": {
@@ -568,11 +827,14 @@
     "keepDuring": [
      "interact",
      "eat",
-     "hit_take"
+     "hit_take",
+     "punch"
     ],
     "actions": {
      "swing": "swing_l",
-     "chop": "chop_l"
+     "chop": "chop_l",
+     "mine": "mine_l",
+     "punch": "punch"
     },
     "block": []
    },
@@ -591,7 +853,8 @@
     ],
     "actions": {
      "swing": "swing_2h",
-     "chop": "chop_2h"
+     "chop": "chop_2h",
+     "mine": "mine_2h"
     },
     "block": []
    },
@@ -616,14 +879,16 @@
      "interact",
      "interactLeft",
      "eat",
-     "wave"
+     "wave",
+     "mine"
     ]
    }
   },
   "suspend": [
    "climb",
    "prone",
-   "dead"
+   "dead",
+   "swim"
   ],
   "note": "Carry poses layered over every other animation, on the listed arm bones only. keepDuring: upper-body actions the pose stays up through (they use the other hand); any other action takes the arms for its length. actions: which clip a role plays while this pose is on (two-handed swing and chop, mirrored ones for the other hand). block: roles ignored while it is on (hands full). suspend: situations where the hands are needed and the pose lets go."
  },

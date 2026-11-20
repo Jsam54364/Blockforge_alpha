@@ -20,12 +20,21 @@ const STEP_EASE: f64 = 14.0;
 const FRONT_DISTANCE: f64 = 3.74;
 /// Falling out of the world (through unloaded or dug-out ground) puts him back on top.
 const VOID_Y: f64 = -300.0;
+/// The side of a block he carries in both hands, in metres (his hands hold it at its sides).
+const CARRIED: f32 = 0.3;
+/// Below this much of the carry pose the block is out of his hands (put away while they are
+/// busy: punching, climbing, swimming).
+const CARRY_SHOWN: f64 = 0.35;
 
 struct ClientBlocks<'a>(&'a Client);
 
 impl Blocks for ClientBlocks<'_> {
     fn solid(&self, x: i32, y: i32, z: i32) -> Option<Option<(f32, f32)>> {
         self.0.solid_span(BlockPos { x, y, z })
+    }
+
+    fn liquid(&self, x: i32, y: i32, z: i32) -> bool {
+        self.0.is_liquid(BlockPos { x, y, z })
     }
 }
 
@@ -39,7 +48,21 @@ pub struct Player {
     /// Buttons held down, and presses since the last frame.
     pub jump: bool,
     pub roll: bool,
+    /// Held: sink while flying, dive from the surface, go down underwater.
+    pub down: bool,
+    /// Held: the mining swing, over and over ("mineHit" events as each strike lands).
+    pub mine: bool,
     presses: Vec<String>,
+    /// Flight to be switched on (true) or off, next frame.
+    fly_want: Option<bool>,
+    /// The carry pose to be in: "none" or one of the kit's hold states.
+    pub hold: &'static str,
+    /// The block in his hands: its faces' texture layers (by `Face::index()`).
+    carry: Option<[u16; 6]>,
+    /// Whether the block shows in his hands (as of the last frame).
+    pub carrying: bool,
+    /// The controller's output for the last frame (what he is doing, his events).
+    pub last: Option<crate::hyrig::Output>,
     /// The camera's place as of the last frame.
     eye: [f32; 3],
     /// Stepping onto or off a half slab moves him at once (so collisions stay exact); this is
@@ -68,6 +91,9 @@ impl Player {
         let rig = Rig::builtin(&cfg);
         let mut ctl = Controller::new(cfg, view);
         ctl.snap_down = STEP;
+        // No buttons to rise and sink on a touch screen but Jump and Down: forward goes where
+        // you look, as the free camera used to.
+        ctl.fly_follow_pitch = true;
         Player {
             ctl,
             rig,
@@ -75,7 +101,14 @@ impl Player {
             waiting: Some(at),
             jump: false,
             roll: false,
+            down: false,
+            mine: false,
             presses: Vec::new(),
+            fly_want: None,
+            hold: "none",
+            carry: None,
+            carrying: false,
+            last: None,
             eye: [at[0] as f32, (at[1] + EYE) as f32, at[2] as f32],
             lift: 0.0,
             last_y: at[1],
@@ -91,6 +124,23 @@ impl Player {
     /// A one-shot action (see `Controller::press`).
     pub fn press(&mut self, name: &str) {
         self.presses.push(name.to_string());
+    }
+
+    /// Fly (true) or walk, from the next frame (taking off lifts him a little; landing on the
+    /// ground while flying down also ends the flight, see `Controller::is_flying`).
+    pub fn set_fly(&mut self, on: bool) {
+        self.fly_want = Some(on);
+    }
+
+    /// Whether he is flying (as of the last frame, or about to).
+    pub fn flying(&self) -> bool {
+        self.fly_want.unwrap_or(self.ctl.is_flying())
+    }
+
+    /// The block he carries, by its faces' texture layers, or None for empty hands. It shows
+    /// while the carry pose is on (`hold`).
+    pub fn set_carry(&mut self, faces: Option<[u16; 6]>) {
+        self.carry = faces;
     }
 
     /// Whether he is still waiting for the ground under him to load.
@@ -122,7 +172,7 @@ impl Player {
     #[allow(clippy::too_many_arguments)]
     pub fn update(&mut self, client: &Client, dt: f64, stick: (f32, f32), look: (f64, f64), aspect: f64, control: bool, front: bool) -> [f32; 3] {
         let blocks = ClientBlocks(client);
-        let world = BlockWorld { step_height: STEP, ..BlockWorld::new(&blocks) };
+        let world = BlockWorld { step_height: STEP, feet: self.ctl.pos[1], ..BlockWorld::new(&blocks) };
         if let Some(at) = self.waiting {
             if !world.loaded(at[0], at[1], at[2]) {
                 self.eye = [at[0] as f32, (at[1] + EYE) as f32, at[2] as f32];
@@ -140,6 +190,10 @@ impl Player {
             let top = world.ground_height(p[0], p[2], 1.0e4);
             self.ctl.teleport(&world, p[0], Some(if top > VOID_Y { top } else { 200.0 }), p[2], None);
         }
+        if let Some(on) = self.fly_want.take() {
+            self.ctl.set_fly(&world, on);
+        }
+        self.ctl.set_hold(self.hold);
         let input = Input {
             move_x: if control { stick.0 as f64 } else { 0.0 },
             move_y: if control { stick.1 as f64 } else { 0.0 },
@@ -147,6 +201,9 @@ impl Player {
             look_pitch: look.1,
             jump: control && self.jump,
             roll: control && self.roll,
+            down: control && self.down,
+            punch: false,
+            mine: control && self.mine,
             actions: std::mem::take(&mut self.presses),
         };
         let mut out = self.ctl.update(&world, dt, &input);
@@ -162,6 +219,17 @@ impl Player {
         let pose = self.rig.pose(&out, [0.0; 3]);
         self.verts.clear();
         self.rig.triangles(&pose, &mut self.verts);
+        // The block in his hands: between them, square to his chest.
+        let carried = self.ctl.hold() == "two_handed_item" && (out.hold.as_ref().is_some_and(|h| h.0.weight > CARRY_SHOWN) || out.upper_left.is_some());
+        self.carrying = carried && self.carry.is_some();
+        if let (Some(faces), true) = (self.carry, carried) {
+            let at = |name: &str| self.rig.node(name);
+            if let (Some(l), Some(r), Some(c)) = (at("left_hand"), at("right_hand"), at("chest")) {
+                let (lc, rc) = (self.rig.centre(&pose, l), self.rig.centre(&pose, r));
+                let mid = [(lc[0] + rc[0]) * 0.5, (lc[1] + rc[1]) * 0.5, (lc[2] + rc[2]) * 0.5];
+                block_mesh(mid, [lc[0] - rc[0], lc[1] - rc[1], lc[2] - rc[2]], pose.frame(c).1[1], faces, &mut self.verts);
+            }
+        }
 
         let head = pose.head_position().unwrap_or([out.position[0], out.position[1] + EYE, out.position[2]]);
         let cam = self.ctl.camera(dt, head, aspect);
@@ -203,7 +271,43 @@ impl Player {
             at = [from[0] + d[0] * free, from[1] + d[1] * free, from[2] + d[2] * free];
         }
         self.eye = [at[0] as f32, at[1] as f32, at[2] as f32];
+        self.last = Some(out);
         self.eye
+    }
+}
+
+fn normalize(v: [f32; 3]) -> [f32; 3] {
+    let l = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt().max(1e-6);
+    [v[0] / l, v[1] / l, v[2] / l]
+}
+
+fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
+}
+
+/// A carried block: a cube `CARRIED` across centred at `mid`, its sides facing `across` (from
+/// one hand to the other) and its top `up`, as character triangles whose texture
+/// coordinates mark them as a block's: u + 8, and v + 2 x the face's texture layer (see
+/// `fs_char` in the shader).
+fn block_mesh(mid: [f32; 3], across: [f32; 3], up: [f32; 3], faces: [u16; 6], out: &mut Vec<Vertex>) {
+    let x = normalize(across);
+    let z = normalize(cross(x, up));
+    let y = cross(z, x);
+    let h = CARRIED * 0.5;
+    let world = |l: [f32; 3]| -> [f32; 3] { std::array::from_fn(|k| mid[k] + (x[k] * l[0] + y[k] * l[1] + z[k] * l[2]) * h) };
+    let dir = |l: [f32; 3]| -> [f32; 3] { std::array::from_fn(|k| x[k] * l[0] + y[k] * l[1] + z[k] * l[2]) };
+    for face in blockforge::coords::Face::ALL {
+        let (nx, ny, nz) = face.normal();
+        let n = [nx as f32, ny as f32, nz as f32];
+        // Across the face (u) and down it (v; for the top and bottom, along z).
+        let (u, v) = if ny != 0 { ([1.0, 0.0, 0.0], [0.0, 0.0, ny as f32]) } else { (cross([0.0, 1.0, 0.0], n), [0.0, -1.0, 0.0]) };
+        let layer = faces[face.index()] as f32;
+        let corner = |a: f32, b: f32| -> Vertex {
+            let l: [f32; 3] = std::array::from_fn(|k| n[k] + u[k] * (a * 2.0 - 1.0) + v[k] * (b * 2.0 - 1.0));
+            Vertex { pos: world(l), normal: dir(n), uv: [8.0 + a, layer * 2.0 + b] }
+        };
+        let q = [corner(0.0, 0.0), corner(1.0, 0.0), corner(1.0, 1.0), corner(0.0, 1.0)];
+        out.extend([q[0], q[1], q[2], q[0], q[2], q[3]]);
     }
 }
 

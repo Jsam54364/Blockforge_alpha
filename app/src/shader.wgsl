@@ -612,11 +612,22 @@ fn vs_char(@location(0) pos: vec3<f32>, @location(1) normal: vec3<f32>, @locatio
 
 @fragment
 fn fs_char(f: CharOut) -> @location(0) vec4<f32> {
+    // A block he carries comes with the character, its texture coordinates marked: u past
+    // 8, and the texture's layer in v (v + 2 x layer). Both textures are looked up first
+    // (that needs uniform control flow), then one is used.
+    let held = f.uv.x >= 8.0;
+    let layer = floor(f.uv.y * 0.5);
+    let bt = textureSample(blocks, blocks_sampler, vec2<f32>(f.uv.x - 8.0, f.uv.y - layer * 2.0), i32(layer));
     let t = textureSample(char_tex, char_sampler, f.uv);
-    if (t.a < 0.64) { // the model's cut-out threshold (rig::ALPHA_CUTOFF)
+    var base = t.rgb;
+    if (held) {
+        // Tinted like the terrain where it stands (alpha 0 = all of the biome colour).
+        let tn = tint_at(f.world.xz);
+        base = mix(bt.rgb * tn.rgb, bt.rgb, bt.a) * mix(0.86, 1.14, tn.a);
+    } else if (t.a < 0.64) { // the model's cut-out threshold (rig::ALPHA_CUTOFF)
         discard;
     }
-    var col = t.rgb * f.light;
+    var col = base * f.light;
     let d = distance(f.world, g.cam_pos.xyz);
     let fog = clamp((d - g.fog_params.x) / (g.fog_params.y - g.fog_params.x), 0.0, 1.0) * g.flags.x;
     if (fog > 0.0) {

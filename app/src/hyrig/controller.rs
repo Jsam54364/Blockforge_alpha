@@ -3,15 +3,37 @@
 //! rendering and no physics of its own: input and three world queries go in; position, facing,
 //! which clips to show, head turn, face and camera come out.
 //!
-//! `tests/hyrig_parity.rs` replays the kit's recorded reference run (7 194 frames covering
-//! every state) and checks this gives the same result on every frame.
+//! `tests/hyrig_parity.rs` replays the kit's recorded reference run (13 008 frames covering
+//! every state: on foot, flying, wading, swimming and diving) and checks this gives the same
+//! result on every frame.
 //!
-//! One addition for block worlds, off unless set: `snap_down` (see the field).
+//! Additions for the game, off unless set: `snap_down` and `fly_follow_pitch` (see the
+//! fields), and the "interact_both" press (both hands reach out together, even with them
+//! full: putting down a carried block).
 
 use std::collections::{HashMap, HashSet};
 
-use super::config::Config;
-use super::world::{LedgeQuery, World};
+use super::config::{self, Config};
+use super::world::{LedgeQuery, World, NO_WATER};
+
+/// The blended modes: flight, swimming at the surface and underwater. Each plays as one
+/// pseudo clip on the body (its name below), expanded into real clips in the output.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Medium {
+    Fly,
+    Swim,
+    Dive,
+}
+
+impl Medium {
+    pub fn clip(self) -> &'static str {
+        match self {
+            Medium::Fly => "__fly",
+            Medium::Swim => "__swim",
+            Medium::Dive => "__dive",
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum View {
@@ -98,6 +120,12 @@ pub struct Input {
     /// Held: holding repeats.
     pub jump: bool,
     pub roll: bool,
+    /// Held: descend while flying, dive from the surface, go down underwater.
+    pub down: bool,
+    /// Held: keep throwing jabs, alternating hands.
+    pub punch: bool,
+    /// Held: break blocks (a repeating strike; a "mineHit" event as each one lands).
+    pub mine: bool,
     /// One-shot presses this frame (same names as `Controller::press`).
     pub actions: Vec<String>,
 }
@@ -113,14 +141,28 @@ pub struct Output {
     pub upper: Option<Layer>,
     /// The carry pose: last, over the listed arm bones only.
     pub hold: Option<(Layer, Vec<String>)>,
+    /// Wading: over the upper-body bones, after `body` and before `upper`.
+    pub wade: Option<Layer>,
+    /// With "interact_both": the other hand's half of the action, over the left arm.
+    pub upper_left: Option<Layer>,
+    /// Whole-body tilt (forward, right) in radians about a point `Config::fly` `pivot` above
+    /// the feet: top toward its front, and toward its right. Zero on foot.
+    pub lean: [f64; 2],
     /// Extra head turn (yaw, pitch) toward the view, after the animation.
     pub head_look: Option<[f64; 2]>,
     pub face: Face,
     /// "footstep", "takeoff", "land", "rollStart", "climbStart", ... in order.
     pub events: Vec<&'static str>,
     pub view: View,
-    /// "dead", "climb" or the body's current clip.
+    /// "dead", "climb", "fly", "swim", "dive" or the body's current clip.
     pub state: String,
+    /// The clip shown most (in a blended mode, its strongest clip).
+    pub clip: String,
+    pub flying: bool,
+    pub swimming: bool,
+    pub underwater: bool,
+    pub wading: bool,
+    pub velocity: [f64; 3],
     pub clip_time: f64,
     pub grounded: bool,
     pub speed: f64,
@@ -145,6 +187,9 @@ pub struct Controller {
     /// keeps the feet on the ground instead of starting a fall, so going down half slabs is
     /// walking, not a string of little drops.
     pub snap_down: f64,
+    /// For touch screens with no buttons to rise and sink (false = the kit's behaviour): in
+    /// flight, forward follows the look pitch, as it does underwater.
+    pub fly_follow_pitch: bool,
     dur: HashMap<String, f64>,
     gait_f: HashSet<String>,
     gait_b: HashSet<String>,
@@ -203,6 +248,27 @@ pub struct Controller {
     fidget_t: f64,
     head_look: Option<[f64; 2]>,
     f: FaceState,
+
+    mode: Option<Medium>,
+    flying: bool,
+    /// The last mode active (its settings drive the limb spring and the lean).
+    mode_cfg: Option<Medium>,
+    wading: bool,
+    wade_w: f64,
+    wade_t: f64,
+    stick_vy: f64,
+    stick_in: bool,
+    /// The limb momentum spring (world space): position, velocity, and last frame's velocity.
+    mom: [f64; 9],
+    jump_prev: bool,
+    jump_latch: bool,
+    last_jump_tap: f64,
+    punch_alt: bool,
+    held_down: bool,
+    held_mine: bool,
+    held_punch: bool,
+    /// "interact_both" is playing: the left arm takes its half from the left-hand clip.
+    both_hands: bool,
 }
 
 fn ang(a: f64, b: f64) -> f64 {
@@ -234,7 +300,21 @@ impl Controller {
     }
 
     pub fn with_random(cfg: Config, view: View, rand: Box<dyn FnMut() -> f64 + Send>) -> Controller {
-        let dur: HashMap<String, f64> = cfg.clips.iter().map(|(k, c)| (k.clone(), c.duration)).collect();
+        let mut dur: HashMap<String, f64> = cfg.clips.iter().map(|(k, c)| (k.clone(), c.duration)).collect();
+        if let Some(f) = &cfg.fly {
+            dur.insert(Medium::Fly.clip().into(), f.cycle);
+        }
+        if let Some(w) = &cfg.water {
+            dur.insert(Medium::Swim.clip().into(), w.swim.cycle);
+            dur.insert(Medium::Dive.clip().into(), w.dive.cycle);
+        }
+        let mode_cfg = if cfg.fly.is_some() {
+            Some(Medium::Fly)
+        } else if cfg.water.is_some() {
+            Some(Medium::Swim)
+        } else {
+            None
+        };
         let set = |names: &[&str]| names.iter().filter(|n| !n.is_empty()).map(|n| n.to_string()).collect::<HashSet<String>>();
         let gait_f = set(&[cfg.role("walk"), cfg.role("jog"), cfg.role("sprint"), cfg.role("crouchWalk"), "run"]);
         let gait_b = set(&[cfg.role("walkBack"), cfg.role("runBack"), cfg.role("crouchBack")]);
@@ -244,6 +324,7 @@ impl Controller {
             view,
             time_scale: 1.0,
             snap_down: 0.0,
+            fly_follow_pitch: false,
             dur,
             gait_f,
             gait_b,
@@ -300,6 +381,23 @@ impl Controller {
             fidget_t: 0.0,
             head_look: None,
             f: FaceState { blink_t: 0.0, bp: -1.0, dbl: false, gx: 0.0, gy: 0.0, tx: 0.0, ty: 0.0, sac_t: 0.5, sq: 0.0, br: 0.0, br_r: 0.0, air: 0.0 },
+            mode: None,
+            flying: false,
+            mode_cfg,
+            wading: false,
+            wade_w: 0.0,
+            wade_t: 0.0,
+            stick_vy: 0.0,
+            stick_in: false,
+            mom: [0.0; 9],
+            jump_prev: false,
+            jump_latch: false,
+            last_jump_tap: -9.0,
+            punch_alt: false,
+            held_down: false,
+            held_mine: false,
+            held_punch: false,
+            both_hands: false,
             cfg,
         };
         c.fidget_t = c.fidget_wait();
@@ -338,7 +436,7 @@ impl Controller {
         self.vy = 0.0;
         self.vel_x = 0.0;
         self.vel_z = 0.0;
-        self.grounded = true;
+        self.grounded = self.mode.is_none();
         self.last_ground_y = self.pos[1];
         self.climbing = None;
         self.falling = false;
@@ -362,6 +460,62 @@ impl Controller {
         &self.hold_want
     }
 
+    /// Creative flight on (true) or off (false). Returns true if the change went ahead.
+    /// Taking off from the ground gives a small lift; switching off in the air falls.
+    pub fn set_fly(&mut self, world: &dyn World, v: bool) -> bool {
+        self.set_fly_q(world, v, false)
+    }
+
+    fn set_fly_q(&mut self, world: &dyn World, v: bool, quiet: bool) -> bool {
+        if v == self.flying {
+            return true;
+        }
+        if v {
+            let Some(f) = self.cfg.fly.as_ref() else { return false };
+            let (takeoff, vertical) = (f.takeoff, f.vertical);
+            if self.dead || self.is_n("death", &self.one_shot) || self.climbing.is_some() || self.prone || self.in_prone_move() {
+                return false;
+            }
+            self.crouching = false;
+            self.sitting = false;
+            self.falling = false;
+            self.one_shot.clear();
+            // From the ground or the water: a small lift.
+            self.vy = if self.grounded || self.mode.is_some() { takeoff } else { self.vy.max(-vertical) };
+            self.grounded = false;
+            self.set_mode(Some(Medium::Fly));
+            self.play(Medium::Fly.clip(), true, false);
+            self.events.push("flyStart");
+            return true;
+        }
+        self.set_mode(None);
+        self.events.push("flyEnd");
+        let fall = self.n("fall");
+        if !quiet && !fall.is_empty() && self.pos[1] - world.ground_height(self.pos[0], self.pos[2], self.pos[1]) > 0.3 {
+            self.falling = true;
+            self.one_shot = fall.clone();
+            self.play(&fall, true, false);
+        }
+        true
+    }
+
+    fn set_mode(&mut self, m: Option<Medium>) {
+        self.mode = m;
+        self.flying = m == Some(Medium::Fly);
+        if m.is_some() {
+            self.mode_cfg = m;
+        }
+    }
+
+    pub fn is_flying(&self) -> bool {
+        self.flying
+    }
+
+    /// Flying, swimming or diving.
+    pub fn medium(&self) -> Option<Medium> {
+        self.mode
+    }
+
     pub fn revive(&mut self) {
         if !self.dead && self.one_shot != self.n("death") {
             return;
@@ -379,7 +533,7 @@ impl Controller {
         if v == self.prone {
             return true;
         }
-        if self.climbing.is_some() || !self.grounded || !self.one_shot.is_empty() {
+        if self.climbing.is_some() || !self.grounded || !self.one_shot.is_empty() || self.mode.is_some() || (v && self.wading) {
             return false;
         }
         self.stop_overlay();
@@ -475,6 +629,7 @@ impl Controller {
             "air" => !self.grounded,
             "crouch" => self.crouching,
             "sit" => self.sitting,
+            "swim" => matches!(self.mode, Some(Medium::Swim | Medium::Dive)),
             _ => false,
         })
     }
@@ -493,7 +648,9 @@ impl Controller {
             let pd = self.d(pn);
             let c = &self.cfg;
             let window_end = |clip: &str| c.windows.get(clip).map_or(0.0, |w| w[1]);
-            if (self.gait_f.contains(pn) && self.gait_f.contains(name)) || (self.gait_b.contains(pn) && self.gait_b.contains(name)) {
+            if let Some(m) = self.mode_named(name).or(self.mode_named(pn)) {
+                fade = self.mode_settings(m).fade;
+            } else if (self.gait_f.contains(pn) && self.gait_f.contains(name)) || (self.gait_b.contains(pn) && self.gait_b.contains(name)) {
                 ph = (pt.time / pd).rem_euclid(1.0);
                 fade = c.fade("gait");
                 sync = true;
@@ -595,6 +752,7 @@ impl Controller {
             return;
         }
         self.overlay = Some((name.to_string(), t));
+        self.both_hands = false;
         self.events.push("upper");
     }
 
@@ -604,6 +762,7 @@ impl Controller {
         }
         self.overlay = None;
         self.ov_w = 0.0;
+        self.both_hands = false;
     }
 
     fn advance(&mut self, dt: f64) {
@@ -658,8 +817,25 @@ impl Controller {
         }
         let cur = self.cur.clone();
         self.tracks.retain(|t| cur.as_deref() == Some(t.clip.as_str()) || t.w > 0.0);
-        if let Some((clip, time)) = self.overlay.as_mut() {
-            *time = (*time + dt).min(self.dur.get(clip.as_str()).copied().unwrap_or(0.0));
+        if let Some((clip, ot)) = self.overlay.clone() {
+            let odu = self.d(&clip);
+            let mut nt = ot + dt;
+            if let Some(&hit) = self.cfg.mine_hit_at.get(&clip) {
+                // Mining loops while held; each strike reports when it lands.
+                let ha = hit * odu;
+                if ot < ha && nt >= ha {
+                    self.events.push("mineHit");
+                }
+                if self.held_mine && nt >= odu {
+                    nt -= odu;
+                    if nt >= ha {
+                        self.events.push("mineHit");
+                    }
+                }
+            }
+            if let Some((_, t)) = self.overlay.as_mut() {
+                *t = nt.min(odu);
+            }
         }
         if fin {
             if self.is_n("death", &self.one_shot) {
@@ -707,7 +883,7 @@ impl Controller {
 
     fn try_climb(&mut self, world: &dyn World) -> bool {
         let climb = self.n("climb");
-        if climb.is_empty() || self.climbing.is_some() || self.dead || self.prone || self.in_prone_move() {
+        if climb.is_empty() || self.climbing.is_some() || self.dead || self.prone || self.in_prone_move() || matches!(self.mode, Some(Medium::Fly | Medium::Dive)) {
             return false;
         }
         let c = &self.cfg;
@@ -723,7 +899,7 @@ impl Controller {
             hang_out: c.hang_out,
             radius: c.radius,
         };
-        let base = if self.grounded { self.pos[1] } else { self.last_ground_y };
+        let base = if self.grounded || self.mode == Some(Medium::Swim) { self.pos[1] } else { self.last_ground_y };
         let Some(l) = world.find_ledge(self.pos[0], self.pos[2], self.pos[1], base, dx, dz, &query) else { return false };
         let big_h = l.top_y - self.pos[1];
         let h = &c.climb_hand;
@@ -759,6 +935,11 @@ impl Controller {
             tz: l.stand_z,
             yaw: l.nx.atan2(l.nz),
         });
+        if self.mode.is_some() {
+            // Climbing out of the water.
+            self.set_mode(None);
+            self.events.push("exitWater");
+        }
         self.stop_overlay();
         self.crouching = false;
         self.sitting = false;
@@ -822,6 +1003,18 @@ impl Controller {
             return;
         }
         let name = if name == "interact_left" { "interactLeft" } else { name };
+        if name == "fly" {
+            let v = !self.flying;
+            self.set_fly(world, v);
+            return;
+        }
+        if (self.mode.is_some() || self.wading) && matches!(name, "crouch" | "crawl" | "sit") {
+            return;
+        }
+        if name == "interact_both" {
+            self.interact_both();
+            return;
+        }
         match name {
             "crawl" => {
                 self.set_prone(!self.prone);
@@ -871,6 +1064,23 @@ impl Controller {
             }
         }
         if self.climbing.is_some() || self.dead || self.is_n("death", &self.one_shot) {
+            return;
+        }
+        if self.mode.is_some() {
+            // Flying or swimming, Jump and Roll are not actions (Jump rises); dying ends the
+            // mode.
+            if role == "jump" || role == "roll" {
+                return;
+            }
+            if role == "death" {
+                if self.mode == Some(Medium::Fly) {
+                    self.set_fly_q(world, false, true);
+                } else {
+                    self.leave_water(world);
+                }
+            }
+        }
+        if role == "roll" && self.wading {
             return;
         }
         if self.prone || self.in_prone_move() {
@@ -970,6 +1180,14 @@ impl Controller {
             }
             self.sitting = false;
         }
+        let punch_left = self.n("punchLeft");
+        let tool_punch = self.cfg.hold_states.get(&self.hold_want).is_some_and(|hs| hs.actions.contains_key("punch"));
+        if role == "punch" && !tool_punch && !punch_left.is_empty() && self.dur.contains_key(&punch_left) {
+            if self.punch_alt {
+                name = punch_left; // bare hands: each press throws one jab, alternating right and left
+            }
+            self.punch_alt = !self.punch_alt;
+        }
         if self.is_upper(&name) {
             // Upper body only: the legs carry on with whatever they are doing, idle included.
             self.start_overlay(&name, 0.0);
@@ -990,6 +1208,357 @@ impl Controller {
         if role == "death" {
             self.events.push("dying");
         }
+    }
+
+    /// Both hands reach out together: the main hand's interact on the upper body, the other
+    /// hand's over the left arm. Unlike "interact" it goes ahead with the hands full (it is
+    /// how a carried block is put down).
+    fn interact_both(&mut self) {
+        let (name, left) = (self.n("interact"), self.n("interactLeft"));
+        if name.is_empty() || !self.dur.contains_key(&name) || self.climbing.is_some() || self.dead || self.is_n("death", &self.one_shot) || self.prone || self.in_prone_move() {
+            return;
+        }
+        self.start_overlay(&name, 0.0);
+        self.both_hands = !left.is_empty() && self.dur.contains_key(&left);
+    }
+
+    fn is_punch(&self, n: &str) -> bool {
+        self.is_n("punch", n) || self.is_n("punchLeft", n)
+    }
+
+    /// Breaking blocks: a strike that repeats on the upper body while held.
+    fn mine(&mut self) {
+        let mut name = self.n("mine");
+        if name.is_empty() || !self.dur.contains_key(&name) {
+            return;
+        }
+        if let Some(hs) = self.cfg.hold_states.get(&self.hold_want) {
+            // What is carried picks the strike (other hand, two-handed) or rules it out.
+            if hs.block.iter().any(|b| b == "mine") {
+                return;
+            }
+            if let Some(alt) = hs.actions.get("mine").filter(|a| self.dur.contains_key(*a)) {
+                name = alt.clone();
+            }
+        }
+        if self.climbing.is_some() || self.prone || self.in_prone_move() || self.is_n("death", &self.one_shot) {
+            return;
+        }
+        if self.overlay.as_ref().map_or(true, |(c, _)| *c != name) {
+            self.start_overlay(&name, 0.0);
+            self.events.push("mineStart");
+        }
+    }
+
+    // ---------------------------------------------------------------- flight and water
+
+    fn mode_named(&self, clip: &str) -> Option<Medium> {
+        [Medium::Fly, Medium::Swim, Medium::Dive].into_iter().find(|m| m.clip() == clip && self.has_mode(*m))
+    }
+
+    fn has_mode(&self, m: Medium) -> bool {
+        match m {
+            Medium::Fly => self.cfg.fly.is_some(),
+            _ => self.cfg.water.is_some(),
+        }
+    }
+
+    fn mode_settings(&self, m: Medium) -> &config::Mode {
+        match m {
+            Medium::Fly => self.cfg.fly.as_ref().unwrap(),
+            Medium::Swim => &self.cfg.water.as_ref().unwrap().swim,
+            Medium::Dive => &self.cfg.water.as_ref().unwrap().dive,
+        }
+    }
+
+    /// Moving in a mode: the view sets the heading; past sprintAt the stick gives the fast
+    /// speed.
+    fn fly_move(&mut self, world: &dyn World, dt: f64, jx: f64, jy: f64, mag: f64, locked: bool) {
+        let m = self.mode.unwrap();
+        let f = self.mode_settings(m).clone();
+        let (deadzone, sprint_at) = (self.cfg.deadzone, self.cfg.sprint_at);
+        let ly = self.look_yaw;
+        let (mut tx, mut tz) = (0.0, 0.0);
+        self.stick_vy = 0.0;
+        self.stick_in = !locked && mag > deadzone;
+        if self.stick_in {
+            let (fx, fz, rx, rz) = (ly.sin(), ly.cos(), -ly.cos(), ly.sin());
+            let mut sp = if mag > sprint_at { f.fast_speed } else { f.speed * mag / sprint_at };
+            sp *= 1.0 - (1.0 - f.back_scale) * (jy / mag).max(0.0); // some modes are slower going backward
+            // Underwater (and, for the game, in flight), forward follows the look pitch.
+            let follow = f.follow_pitch || (m == Medium::Fly && self.fly_follow_pitch);
+            let cp = if follow { self.look_pitch.cos() } else { 1.0 };
+            if follow {
+                self.stick_vy = -jy * self.look_pitch.sin() / mag * sp;
+            }
+            tx = (fx * -jy * cp + rx * jx) / mag * sp;
+            tz = (fz * -jy * cp + rz * jx) / mag * sp;
+        }
+        let kv = (dt * f.accel).min(1.0); // slow easing: flight carries momentum
+        self.vel_x += (tx - self.vel_x) * kv;
+        self.vel_z += (tz - self.vel_z) * kv;
+        if self.vel_x * self.vel_x + self.vel_z * self.vel_z > 1e-5 {
+            self.pos[0] += self.vel_x * dt;
+            self.pos[2] += self.vel_z * dt;
+            self.collide(world);
+        }
+        if !locked {
+            self.yaw += ang(ly, self.yaw) * (dt * f.turn_rate).min(1.0); // the body faces the view; the limbs show the travel direction
+        }
+        self.last_tier = -1;
+        self.last_back = false;
+        self.sitting = false;
+        self.fidget_t = self.fidget_wait();
+        if self.one_shot.is_empty() {
+            self.play(m.clip(), true, false);
+        }
+        if f.stroke_rate != 0.0 && self.cur.as_deref() == Some(m.clip()) {
+            // Strokes quicken with speed.
+            let hs = (self.vel_x * self.vel_x + self.vel_z * self.vel_z).sqrt();
+            if let Some(t) = self.cur_mut() {
+                t.speed = (hs / f.speed).clamp(1.0, f.stroke_rate);
+            }
+        }
+    }
+
+    fn fly_vertical(&mut self, world: &dyn World, dt: f64) {
+        let f = self.cfg.fly.as_ref().unwrap();
+        let (vertical, accel, land, land_below) = (f.vertical, f.accel, f.land_on_ground, f.land_below);
+        let mut tv = (if self.held_jump { vertical } else { 0.0 }) - (if self.held_down { vertical } else { 0.0 });
+        if self.fly_follow_pitch {
+            tv += self.stick_vy;
+        }
+        self.vy += (tv - self.vy) * (dt * accel).min(1.0);
+        self.pos[1] += self.vy * dt;
+        let gh = world.ground_height(self.pos[0], self.pos[2], self.pos[1]);
+        if self.pos[1] <= gh {
+            if land && self.vy < -land_below {
+                self.fly_land(gh); // flying down onto the ground ends the flight
+                return;
+            }
+            self.pos[1] = gh;
+            if self.vy < 0.0 {
+                self.vy = 0.0;
+            }
+        }
+        self.grounded = false;
+    }
+
+    fn fly_land(&mut self, gh: f64) {
+        let impact = -self.vy;
+        let land_impact = self.cfg.fly.as_ref().map_or(f64::MAX, |f| f.land_impact);
+        self.set_mode(None);
+        self.pos[1] = gh;
+        self.vy = 0.0;
+        self.grounded = true;
+        self.last_ground_y = gh;
+        self.falling = false;
+        self.events.push("flyEnd");
+        self.events.push("land");
+        let land = self.n("land");
+        if impact > land_impact && !land.is_empty() {
+            if self.stick_mag > self.cfg.deadzone {
+                self.start_overlay(&land, 0.05);
+            } else {
+                self.vel_x *= self.cfg.land_keep;
+                self.vel_z *= self.cfg.land_keep;
+                self.one_shot = land.clone();
+                self.play(&land, false, true);
+            }
+        }
+    }
+
+    /// Limb momentum: a spring chases the velocity plus a share of its acceleration, so the
+    /// limbs whip back on take-off, trail at speed, and swing past when you stop or turn. Not
+    /// in a mode, it settles back to rest.
+    fn fly_momentum(&mut self, dt: f64) {
+        let Some(mc) = self.mode_cfg else { return };
+        if dt <= 0.0 {
+            return;
+        }
+        let (inertia, max_accel, stiff, damp) = {
+            let f = self.mode_settings(mc);
+            (f.inertia, f.max_accel, f.limb_stiffness, f.limb_damping)
+        };
+        let v = match self.mode {
+            Some(Medium::Fly | Medium::Dive) => [self.vel_x, self.vy, self.vel_z],
+            Some(Medium::Swim) => [self.vel_x, 0.0, self.vel_z],
+            None => [0.0; 3],
+        };
+        let m = &mut self.mom;
+        for i in 0..3 {
+            let a = ((v[i] - m[6 + i]) / dt).clamp(-max_accel, max_accel);
+            let g = v[i] + inertia * a;
+            m[3 + i] += (stiff * (g - m[i]) - damp * m[3 + i]) * dt;
+            m[i] += m[3 + i] * dt;
+            m[6 + i] = v[i];
+        }
+    }
+
+    /// The momentum spring in body space, scaled so 1 = full speed: forward, toward the
+    /// character's right, up.
+    fn fly_mix(&self, m: Option<Medium>) -> [f64; 3] {
+        let Some(m) = m else { return [0.0; 3] };
+        let f = self.mode_settings(m);
+        let (sy, cy) = (self.yaw.sin(), self.yaw.cos());
+        let fv = self.mom[0] * sy + self.mom[2] * cy;
+        [fv / if fv < 0.0 { f.speed * f.back_scale } else { f.speed }, (-self.mom[0] * cy + self.mom[2] * sy) / f.speed, self.mom[1] / f.vertical]
+    }
+
+    /// A blended mode's clips and weights: its still clip plus the directions the limbs are
+    /// being carried.
+    fn fly_weights(&self, mix: [f64; 3], m: Medium) -> Vec<(String, f64)> {
+        let k = &self.mode_settings(m).clips;
+        let [f, r, u] = mix;
+        let c = [f.max(0.0), (-f).max(0.0), r.max(0.0), (-r).max(0.0), u.max(0.0), (-u).max(0.0)];
+        let n = [&k.forward, &k.back, &k.right, &k.left, &k.up, &k.down];
+        let sum: f64 = c.iter().sum();
+        let tot = (f * f + r * r + u * u).sqrt().min(1.0);
+        let mut out = vec![(k.idle.clone(), 1.0 - tot)];
+        for i in 0..6 {
+            let wi = if sum > 1e-9 { tot * c[i] / sum } else { 0.0 };
+            if n[i].is_empty() {
+                out[0].1 += wi; // a mode without that direction (no up or down at the surface) holds still instead
+            } else {
+                out.push((n[i].clone(), wi));
+            }
+        }
+        out
+    }
+
+    fn water_level(&self, world: &dyn World) -> f64 {
+        world.water_level(self.pos[0], self.pos[2])
+    }
+
+    /// On foot or in the air: wading in waist-deep water, or getting into deep water.
+    fn water_step(&mut self, world: &dyn World) {
+        self.wading = false;
+        let Some(w) = self.cfg.water.as_ref() else { return };
+        let (wade_depth, swim_depth, dive_entry) = (w.wade_depth, w.swim_depth, w.dive_entry);
+        let s = self.water_level(world);
+        if s <= NO_WATER {
+            return;
+        }
+        let p = self.pos;
+        let gh = world.ground_height(p[0], p[2], p[1]);
+        let dg = s - gh;
+        if dg >= swim_depth && p[1] <= s - swim_depth && !self.dead && !self.is_n("death", &self.one_shot) {
+            // Falling in fast goes under.
+            let m = if !self.grounded && self.vy < -dive_entry { Medium::Dive } else { Medium::Swim };
+            self.enter_water(m);
+            return;
+        }
+        // Feet well under the surface, on the ground or hopping.
+        self.wading = dg >= wade_depth && p[1] < s - wade_depth * 0.6 && !self.dead;
+        if self.wading {
+            self.crouching = false;
+            self.sitting = false;
+            if self.prone && !self.in_prone_move() {
+                self.set_prone(false);
+            }
+        }
+    }
+
+    fn enter_water(&mut self, m: Medium) {
+        let keep = self.cfg.water.as_ref().map_or(0.0, |w| w.entry_keep);
+        self.crouching = false;
+        self.sitting = false;
+        self.falling = false;
+        self.prone = false;
+        self.wading = false;
+        if !self.is_n("death", &self.one_shot) {
+            self.one_shot.clear();
+        }
+        self.vy = if m == Medium::Dive { self.vy * keep } else { 0.0 };
+        self.grounded = false;
+        self.set_mode(Some(m));
+        self.play(m.clip(), true, false);
+        self.events.push("enterWater");
+    }
+
+    fn leave_water(&mut self, world: &dyn World) {
+        let gh = world.ground_height(self.pos[0], self.pos[2], self.pos[1]);
+        self.set_mode(None);
+        self.stick_vy = 0.0;
+        if self.pos[1] <= gh + 1e-6 {
+            self.pos[1] = gh;
+            self.grounded = true;
+            self.last_ground_y = gh;
+            self.vy = 0.0;
+        } else {
+            self.grounded = false;
+        }
+        self.events.push("exitWater");
+    }
+
+    /// At the surface: float at swimming depth, riding a little higher at speed; Down dives;
+    /// shallower water stands you up.
+    fn swim_vertical(&mut self, world: &dyn World, dt: f64) {
+        let w = self.cfg.water.as_ref().unwrap();
+        let (swim_depth, exit_margin, dive_v) = (w.swim_depth, w.exit_margin, w.dive.vertical);
+        let (speed, plane_lift, float_rate) = (w.swim.speed, w.swim.plane_lift, w.swim.float_rate);
+        let s = self.water_level(world);
+        if s <= NO_WATER {
+            self.leave_water(world);
+            return;
+        }
+        let gh = world.ground_height(self.pos[0], self.pos[2], self.pos[1]);
+        if s - gh < swim_depth - exit_margin {
+            self.leave_water(world);
+            return;
+        }
+        if self.held_down {
+            self.set_mode(Some(Medium::Dive));
+            self.vy = -dive_v * 0.6;
+            self.play(Medium::Dive.clip(), true, false);
+            self.events.push("dive");
+            self.grounded = false;
+            return;
+        }
+        let hs = (self.vel_x * self.vel_x + self.vel_z * self.vel_z).sqrt();
+        let tgt = s - swim_depth + plane_lift * (hs / speed).min(1.0);
+        let mut ny = self.pos[1] + (tgt - self.pos[1]) * (dt * float_rate).min(1.0);
+        if ny < gh {
+            ny = gh;
+        }
+        self.vy = if dt > 0.0 { (ny - self.pos[1]) / dt } else { 0.0 };
+        self.pos[1] = ny;
+        self.grounded = false;
+    }
+
+    /// Underwater: free movement (forward follows the look pitch), Jump up, Down down,
+    /// drifting up when idle; reaching the surface swims.
+    fn dive_vertical(&mut self, world: &dyn World, dt: f64) {
+        let w = self.cfg.water.as_ref().unwrap();
+        let (swim_depth, exit_margin) = (w.swim_depth, w.exit_margin);
+        let (vertical, buoyancy, accel) = (w.dive.vertical, w.dive.buoyancy, w.dive.accel);
+        let vin = (if self.held_jump { vertical } else { 0.0 }) - (if self.held_down { vertical } else { 0.0 });
+        let mut tv = self.stick_vy + vin;
+        if vin == 0.0 && !self.stick_in {
+            tv = buoyancy;
+        }
+        self.vy += (tv - self.vy) * (dt * accel).min(1.0);
+        self.pos[1] += self.vy * dt;
+        let s = self.water_level(world);
+        let gh = world.ground_height(self.pos[0], self.pos[2], self.pos[1]);
+        if s <= NO_WATER || s - gh < swim_depth - exit_margin {
+            self.leave_water(world);
+            return;
+        }
+        if self.pos[1] < gh {
+            self.pos[1] = gh;
+            if self.vy < 0.0 {
+                self.vy = 0.0;
+            }
+        }
+        if self.pos[1] >= s - swim_depth && self.vy >= 0.0 {
+            self.pos[1] = s - swim_depth;
+            self.vy = 0.0;
+            self.set_mode(Some(Medium::Swim));
+            self.play(Medium::Swim.clip(), true, false);
+            self.events.push("surface");
+        }
+        self.grounded = false;
     }
 
     // ---------------------------------------------------------------- the frame
@@ -1020,14 +1589,30 @@ impl Controller {
             self.stick_z = (fz * -jy + rz * jx) / mag;
             self.stick_back = (-jy / mag) < self.cfg.back_at;
         }
-        self.held_jump = input.jump;
+        let jump_in = input.jump;
+        if jump_in && !self.jump_prev {
+            // Double-tap Jump toggles flight.
+            let tap = self.cfg.fly.as_ref().map_or(0.0, |f| f.double_tap_jump);
+            if tap > 0.0 && self.gt - self.last_jump_tap <= tap && self.set_fly(world, !self.flying) {
+                self.last_jump_tap = -9.0;
+                self.jump_latch = !self.flying;
+            } else {
+                self.last_jump_tap = self.gt;
+            }
+        }
+        self.jump_prev = jump_in;
+        if !jump_in {
+            self.jump_latch = false;
+        }
+        self.held_jump = jump_in && !self.jump_latch;
         self.held_roll = input.roll;
+        self.held_down = input.down;
         let mut q = std::mem::take(&mut self.queue);
         q.extend(input.actions.iter().cloned());
         for name in &q {
             self.do_press(world, name);
         }
-        if !self.dead {
+        if !self.dead && self.mode.is_none() {
             // Held buttons keep firing.
             if self.held_roll {
                 self.act(world, "roll");
@@ -1035,6 +1620,25 @@ impl Controller {
             if self.held_jump {
                 self.act(world, "jump");
             }
+        } else if !self.dead && self.mode == Some(Medium::Swim) && self.held_jump {
+            self.try_climb(world); // Jump at the surface climbs out onto a ledge in reach
+        }
+        self.held_punch = input.punch;
+        if self.held_punch && !self.dead {
+            if let Some(repeat_at) = self.cfg.punch_repeat_at {
+                // Holding punch keeps throwing jabs, alternating hands.
+                let again = match &self.overlay {
+                    None => true,
+                    Some((clip, time)) => !self.is_punch(clip) || *time >= repeat_at,
+                };
+                if again {
+                    self.act(world, "punch");
+                }
+            }
+        }
+        self.held_mine = input.mine;
+        if self.held_mine && !self.dead {
+            self.mine(); // breaking blocks: a strike that repeats while held
         }
 
         if self.is_roll(&self.one_shot) {
@@ -1068,140 +1672,146 @@ impl Controller {
 
         let locked = self.dead || (!self.one_shot.is_empty() && !self.is_air(&self.one_shot));
         let moving = mag > dz && !locked;
-        let (mut dvx, mut dvz) = (0.0, 0.0);
-        if moving {
-            self.sitting = false;
-            let c = &self.cfg;
-            let mut tier: i32 = if mag > c.sprint_at { 2 } else if mag > c.jog_at { 1 } else { 0 };
-            let mut sp = c.speed(match tier {
-                2 => "sprint",
-                1 => "jog",
-                _ => "walk",
-            });
-            let mut mx = (fx * -jy + rx * jx) / mag;
-            let mut mz = (fz * -jy + rz * jx) / mag;
-            // The view sets the heading; the body turns up to bodyTurnLimit under it toward
-            // the travel direction.
-            let fa = -jy / mag;
-            let sa = jx / mag;
-            let mut back = fa < c.back_at && !c.role("walkBack").is_empty();
-            let mut back_clip = "";
-            let off = (if back { (-sa).atan2(-fa) } else { sa.atan2(fa) }).clamp(-c.body_turn_limit, c.body_turn_limit);
-            let mut want = (fx * off.cos() + rx * off.sin()).atan2(fz * off.cos() + rz * off.sin());
-            if back {
-                let rb = mag > c.back_run_at && !c.role("runBack").is_empty();
-                back_clip = c.role(if rb { "runBack" } else { "walkBack" });
-                sp = c.speed(if rb { "runBack" } else { "walkBack" });
-                tier = -1;
-            }
-            let mut cclip = "";
-            if self.crouching && !c.role("crouchWalk").is_empty() {
-                // Crouched: one gait each way.
-                let cb = back && !c.role("crouchBack").is_empty();
-                cclip = c.role(if cb { "crouchBack" } else { "crouchWalk" });
-                sp = c.speed(if back { "crouchBack" } else { "crouch" });
-                tier = -1;
-                back = false;
-            }
-            if self.prone && !c.role("crawl").is_empty() {
-                // Lying down: the body keeps facing where you look; the stick picks forward,
-                // back or sideways.
-                cclip = c.role("crawl");
-                sp = c.speed("crawl");
-                tier = -1;
-                back = false;
-                want = fx.atan2(fz);
-                if sa.abs() > fa.abs() && !c.role("crawlRight").is_empty() && !c.role("crawlLeft").is_empty() {
-                    let sg = if sa > 0.0 { 1.0 } else { -1.0 };
-                    cclip = c.role(if sg > 0.0 { "crawlRight" } else { "crawlLeft" });
-                    sp = c.speed("crawlSide");
-                    mx = rx * sg;
-                    mz = rz * sg;
-                } else if fa < 0.0 && !c.role("crawlBack").is_empty() {
-                    cclip = c.role("crawlBack");
-                    sp = c.speed("crawlBack");
-                    mx = -fx;
-                    mz = -fz;
-                } else {
-                    mx = fx;
-                    mz = fz;
-                }
-            }
-            dvx = mx * sp;
-            dvz = mz * sp;
-            let rate = if self.prone { c.prone_turn_rate } else { c.turn_rate };
-            let clip = if !cclip.is_empty() {
-                cclip
-            } else if back {
-                back_clip
-            } else {
-                c.role(match tier {
+        if self.mode.is_some() {
+            self.fly_move(world, dt, jx, jy, mag, locked);
+        } else {
+            let (mut dvx, mut dvz) = (0.0, 0.0);
+            if moving {
+                self.sitting = false;
+                let c = &self.cfg;
+                let mut tier: i32 = if mag > c.sprint_at { 2 } else if mag > c.jog_at { 1 } else { 0 };
+                let mut sp = c.speed(match tier {
                     2 => "sprint",
                     1 => "jog",
                     _ => "walk",
-                })
-            }
-            .to_string();
-            self.yaw += ang(want, self.yaw) * (dt * rate).min(1.0);
-            self.last_tier = tier;
-            self.last_back = back;
-            if self.one_shot.is_empty() {
-                self.play(&clip, true, false);
-            }
-            self.fidget_t = self.fidget_wait();
-        } else {
-            self.last_tier = -1;
-            if self.one_shot.is_empty() {
-                self.last_back = false;
-            }
-            if !locked {
-                // Standing: the body follows once the view turns past the limit.
-                let dd = ang(ly, self.yaw);
-                let limit = self.cfg.body_turn_limit;
-                if dd > limit {
-                    self.yaw = ly - limit;
-                } else if dd < -limit {
-                    self.yaw = ly + limit;
+                });
+                let mut mx = (fx * -jy + rx * jx) / mag;
+                let mut mz = (fz * -jy + rz * jx) / mag;
+                // The view sets the heading; the body turns up to bodyTurnLimit under it toward
+                // the travel direction.
+                let fa = -jy / mag;
+                let sa = jx / mag;
+                let mut back = fa < c.back_at && !c.role("walkBack").is_empty();
+                let mut back_clip = "";
+                let off = (if back { (-sa).atan2(-fa) } else { sa.atan2(fa) }).clamp(-c.body_turn_limit, c.body_turn_limit);
+                let mut want = (fx * off.cos() + rx * off.sin()).atan2(fz * off.cos() + rz * off.sin());
+                if back {
+                    let rb = mag > c.back_run_at && !c.role("runBack").is_empty();
+                    back_clip = c.role(if rb { "runBack" } else { "walkBack" });
+                    sp = c.speed(if rb { "runBack" } else { "walkBack" });
+                    tier = -1;
                 }
-            }
-        }
-        if !moving && self.one_shot.is_empty() && !self.dead {
-            let idle = self.n("idle");
-            let pick = |role: &str, on: bool| Some(self.n(role)).filter(|n| on && !n.is_empty());
-            let idle_clip = pick("proneIdle", self.prone).or(pick("crouch", self.crouching)).or(pick("sit", self.sitting)).unwrap_or_else(|| idle.clone());
-            self.play(&idle_clip, true, false);
-            let fidget = self.n("fidget");
-            if idle_clip == idle && !fidget.is_empty() && self.grounded && self.overlay.is_none() {
-                self.fidget_t -= dt;
-                if self.fidget_t <= 0.0 {
-                    self.fidget_t = self.fidget_wait();
-                    self.one_shot = fidget.clone();
-                    self.play(&fidget, false, true);
+                let mut cclip = "";
+                if self.crouching && !c.role("crouchWalk").is_empty() {
+                    // Crouched: one gait each way.
+                    let cb = back && !c.role("crouchBack").is_empty();
+                    cclip = c.role(if cb { "crouchBack" } else { "crouchWalk" });
+                    sp = c.speed(if back { "crouchBack" } else { "crouch" });
+                    tier = -1;
+                    back = false;
                 }
-            } else {
+                if self.prone && !c.role("crawl").is_empty() {
+                    // Lying down: the body keeps facing where you look; the stick picks forward,
+                    // back or sideways.
+                    cclip = c.role("crawl");
+                    sp = c.speed("crawl");
+                    tier = -1;
+                    back = false;
+                    want = fx.atan2(fz);
+                    if sa.abs() > fa.abs() && !c.role("crawlRight").is_empty() && !c.role("crawlLeft").is_empty() {
+                        let sg = if sa > 0.0 { 1.0 } else { -1.0 };
+                        cclip = c.role(if sg > 0.0 { "crawlRight" } else { "crawlLeft" });
+                        sp = c.speed("crawlSide");
+                        mx = rx * sg;
+                        mz = rz * sg;
+                    } else if fa < 0.0 && !c.role("crawlBack").is_empty() {
+                        cclip = c.role("crawlBack");
+                        sp = c.speed("crawlBack");
+                        mx = -fx;
+                        mz = -fz;
+                    } else {
+                        mx = fx;
+                        mz = fz;
+                    }
+                }
+                dvx = mx * sp;
+                dvz = mz * sp;
+                let rate = if self.prone { c.prone_turn_rate } else { c.turn_rate };
+                let clip = if !cclip.is_empty() {
+                    cclip
+                } else if back {
+                    back_clip
+                } else {
+                    c.role(match tier {
+                        2 => "sprint",
+                        1 => "jog",
+                        _ => "walk",
+                    })
+                }
+                .to_string();
+                self.yaw += ang(want, self.yaw) * (dt * rate).min(1.0);
+                self.last_tier = tier;
+                self.last_back = back;
+                if self.one_shot.is_empty() {
+                    self.play(&clip, true, false);
+                }
                 self.fidget_t = self.fidget_wait();
+            } else {
+                self.last_tier = -1;
+                if self.one_shot.is_empty() {
+                    self.last_back = false;
+                }
+                if !locked {
+                    // Standing: the body follows once the view turns past the limit.
+                    let dd = ang(ly, self.yaw);
+                    let limit = self.cfg.body_turn_limit;
+                    if dd > limit {
+                        self.yaw = ly - limit;
+                    } else if dd < -limit {
+                        self.yaw = ly + limit;
+                    }
+                }
             }
-        }
-        // Ease speed in and out so starts, stops and gear changes are not instant.
-        if locked {
-            self.vel_x = 0.0;
-            self.vel_z = 0.0;
-        } else {
-            let on_ground = self.grounded && !self.is_jump(&self.one_shot);
-            let kv = (dt * if on_ground { self.cfg.accel } else { self.cfg.air_accel }).min(1.0); // little steering in the air
-            self.vel_x += (dvx - self.vel_x) * kv;
-            self.vel_z += (dvz - self.vel_z) * kv;
-            if self.vel_x * self.vel_x + self.vel_z * self.vel_z > 1e-5 {
-                self.pos[0] += self.vel_x * dt;
-                self.pos[2] += self.vel_z * dt;
-                self.collide(world);
+            if !moving && self.one_shot.is_empty() && !self.dead {
+                let idle = self.n("idle");
+                let pick = |role: &str, on: bool| Some(self.n(role)).filter(|n| on && !n.is_empty());
+                let idle_clip = pick("proneIdle", self.prone).or(pick("crouch", self.crouching)).or(pick("sit", self.sitting)).unwrap_or_else(|| idle.clone());
+                self.play(&idle_clip, true, false);
+                let fidget = self.n("fidget");
+                if idle_clip == idle && !fidget.is_empty() && self.grounded && self.overlay.is_none() {
+                    self.fidget_t -= dt;
+                    if self.fidget_t <= 0.0 {
+                        self.fidget_t = self.fidget_wait();
+                        self.one_shot = fidget.clone();
+                        self.play(&fidget, false, true);
+                    }
+                } else {
+                    self.fidget_t = self.fidget_wait();
+                }
+            }
+            // Ease speed in and out so starts, stops and gear changes are not instant.
+            if locked {
+                self.vel_x = 0.0;
+                self.vel_z = 0.0;
+            } else {
+                let on_ground = self.grounded && !self.is_jump(&self.one_shot);
+                let kv = (dt * if on_ground { self.cfg.accel } else { self.cfg.air_accel }).min(1.0); // little steering in the air
+                self.vel_x += (dvx - self.vel_x) * kv;
+                self.vel_z += (dvz - self.vel_z) * kv;
+                if self.vel_x * self.vel_x + self.vel_z * self.vel_z > 1e-5 {
+                    self.pos[0] += self.vel_x * dt;
+                    self.pos[2] += self.vel_z * dt;
+                    self.collide(world);
+                }
             }
         }
         // Upper-body action layer weight.
         if let Some((clip, time)) = self.overlay.clone() {
             let od = self.d(&clip);
             let (fade_in, fade_out) = (self.cfg.fade("upperIn"), self.cfg.fade("upperOut"));
-            let otgt = if time < od - fade_out { 1.0 } else { 0.0 };
+            let mining = self.cfg.mine_hit_at.contains_key(&clip) && self.held_mine;
+            let punching = self.held_punch && self.is_punch(&clip);
+            let otgt = if time < od - fade_out || mining || punching { 1.0 } else { 0.0 };
             let step = (otgt - self.ov_w).abs().min(dt / if otgt > 0.0 { fade_in } else { fade_out });
             self.ov_w += if otgt > self.ov_w { step } else { -step };
             if otgt == 0.0 && self.ov_w <= 0.001 {
@@ -1222,131 +1832,159 @@ impl Controller {
                 self.hold_t = (self.hold_t + dt) % self.d(&clip);
             }
         }
+        // Wading: the arms-out-over-the-water pose fades in over the upper body while the legs
+        // keep their normal gait.
+        let wade = self.n("wadeArms");
+        if !wade.is_empty() && self.dur.contains_key(&wade) {
+            let fade = self.cfg.water.as_ref().map_or(0.3, |w| w.wade_fade);
+            let wtg = if self.wading { 1.0 } else { 0.0 };
+            let step = (wtg - self.wade_w).abs().min(dt / fade);
+            self.wade_w += if wtg > self.wade_w { step } else { -step };
+            self.wade_t = (self.wade_t + dt) % self.d(&wade);
+        }
         self.advance(dt);
 
-        // ---- vertical: climbing, ground, jumping, falling ----
-        let climb_clip = self.n("climb");
-        if let (Some(cl), Some(ct), true) = (self.climbing, self.cur_time(), self.one_shot == climb_clip && !climb_clip.is_empty()) {
-            let c = &self.cfg;
-            let yr = if cl.t0 == 0.0 && ct < cl.tg {
-                (cl.h - cl.top) * smooth(ct / cl.tg) // small hop up to the edge
-            } else if ct < c.grab_until {
-                self.grab(&cl, ct) // fingertips stay on the edge while the body rises
-            } else {
-                let u2 = smoother(((ct - c.grab_until) / (c.top_at - c.grab_until)).min(1.0));
-                let g = self.grab(&cl, c.grab_until);
-                g + (cl.h - g) * u2 // ease up onto the top
-            };
-            // Hang out from the face so arms and knees stay clear of it; move in once the feet
-            // are nearly level with the top.
-            let uh = smooth(((ct - cl.t0) / 0.1).clamp(0.0, 1.0));
-            let uf = smoother(((ct - c.move_in[0]) / (c.move_in[1] - c.move_in[0])).clamp(0.0, 1.0));
-            let bx = cl.sx + (cl.hx - cl.sx) * uh;
-            let bz = cl.sz + (cl.hz - cl.sz) * uh;
-            self.pos[0] = bx + (cl.tx - bx) * uf;
-            self.pos[2] = bz + (cl.tz - bz) * uf;
-            self.pos[1] = cl.y0 + yr;
-            self.vy = 0.0;
-            self.grounded = true;
-            self.yaw += ang(cl.yaw, self.yaw) * (dt * 18.0).min(1.0);
-        } else if let Some(cl) = self.climbing {
-            self.pos = [cl.tx, cl.y0 + cl.h, cl.tz];
-            self.climbing = None;
-            self.grounded = true;
-            self.vy = 0.0;
-            self.events.push("climbEnd");
-        }
-        let mut gh = world.ground_height(self.pos[0], self.pos[2], self.pos[1]);
-        if self.grounded && self.climbing.is_none() {
-            if self.pos[1] > gh + 0.02 && self.pos[1] - gh > self.snap_down {
-                self.grounded = false;
-                if gh > self.pos[1] - 0.35 {
-                    self.last_ground_y = gh;
-                }
-            } else {
-                self.pos[1] = gh;
-                self.last_ground_y = gh;
-            }
-        }
-        if !self.grounded && self.climbing.is_none() && self.vy < self.cfg.air_grab_max_rise && self.held_jump {
-            self.try_climb(world); // holding Jump in the air grabs a ledge in reach
-        }
-        let cn = self.cur.clone().unwrap_or_default();
-        let window = self.cfg.windows.get(&cn).copied();
-        let owns = window.is_some() && self.one_shot == cn;
-        let (jw0, jw1) = window.map_or((0.0, 0.0), |w| (w[0], w[1]));
-        if owns && self.grounded && !self.jump_fired && self.cur_time().is_some_and(|t| t >= jw0) {
-            self.last_ground_y = self.pos[1];
-            self.vy = self.jump_v;
-            self.grounded = false;
-            self.jump_fired = true;
-            self.events.push("takeoff");
-        }
-        if !self.grounded && self.climbing.is_none() {
-            self.pos[1] += self.vy * dt - 0.5 * self.grav * dt * dt;
-            self.vy -= self.grav * dt;
-            gh = world.ground_height(self.pos[0], self.pos[2], self.pos[1]);
-            if self.vy <= 0.0 && self.pos[1] <= gh {
-                self.pos[1] = gh;
-                self.vy = 0.0;
-                self.grounded = true;
-                self.events.push("land");
-                let land = self.n("land");
-                if owns {
-                    if self.cur_time().is_some_and(|t| t < jw1) {
-                        self.seek(jw1); // touched down early: skip to the landing
-                    }
-                    if self.gt - self.jump_buf < self.cfg.buffer_time {
-                        self.jump_buf = -9.0;
-                        self.chain_jump(); // jump was pressed just before touchdown
-                    } else if self.stick_mag > dz {
-                        // Landing on the move: legs go straight back into the stride on the
-                        // landing foot; the rest of the landing plays on the upper body.
-                        self.start_overlay(&cn, jw1);
-                        self.ov_w = 1.0;
-                        self.one_shot.clear();
+        // ---- vertical: flying, swimming, diving; or climbing, ground, jumping, falling ----
+        match self.mode {
+            Some(Medium::Fly) => self.fly_vertical(world, dt),
+            Some(Medium::Swim) => self.swim_vertical(world, dt),
+            Some(Medium::Dive) => self.dive_vertical(world, dt),
+            None => {
+                let climb_clip = self.n("climb");
+                if let (Some(cl), Some(ct), true) = (self.climbing, self.cur_time(), self.one_shot == climb_clip && !climb_clip.is_empty()) {
+                    let c = &self.cfg;
+                    let yr = if cl.t0 == 0.0 && ct < cl.tg {
+                        (cl.h - cl.top) * smooth(ct / cl.tg) // small hop up to the edge
+                    } else if ct < c.grab_until {
+                        self.grab(&cl, ct) // fingertips stay on the edge while the body rises
                     } else {
-                        // Landing still: shed leftover drift so planted feet do not skate.
-                        self.vel_x *= self.cfg.land_keep;
-                        self.vel_z *= self.cfg.land_keep;
-                    }
-                } else if self.falling {
-                    self.falling = false;
-                    if self.stick_mag > dz {
-                        self.one_shot.clear();
-                        if !land.is_empty() {
-                            self.start_overlay(&land, 0.05);
+                        let u2 = smoother(((ct - c.grab_until) / (c.top_at - c.grab_until)).min(1.0));
+                        let g = self.grab(&cl, c.grab_until);
+                        g + (cl.h - g) * u2 // ease up onto the top
+                    };
+                    // Hang out from the face so arms and knees stay clear of it; move in once the feet
+                    // are nearly level with the top.
+                    let uh = smooth(((ct - cl.t0) / 0.1).clamp(0.0, 1.0));
+                    let uf = smoother(((ct - c.move_in[0]) / (c.move_in[1] - c.move_in[0])).clamp(0.0, 1.0));
+                    let bx = cl.sx + (cl.hx - cl.sx) * uh;
+                    let bz = cl.sz + (cl.hz - cl.sz) * uh;
+                    self.pos[0] = bx + (cl.tx - bx) * uf;
+                    self.pos[2] = bz + (cl.tz - bz) * uf;
+                    self.pos[1] = cl.y0 + yr;
+                    self.vy = 0.0;
+                    self.grounded = true;
+                    self.yaw += ang(cl.yaw, self.yaw) * (dt * 18.0).min(1.0);
+                } else if let Some(cl) = self.climbing {
+                    self.pos = [cl.tx, cl.y0 + cl.h, cl.tz];
+                    self.climbing = None;
+                    self.grounded = true;
+                    self.vy = 0.0;
+                    self.events.push("climbEnd");
+                }
+                let mut gh = world.ground_height(self.pos[0], self.pos[2], self.pos[1]);
+                if self.grounded && self.climbing.is_none() {
+                    if self.pos[1] > gh + 0.02 && self.pos[1] - gh > self.snap_down {
+                        self.grounded = false;
+                        if gh > self.pos[1] - 0.35 {
+                            self.last_ground_y = gh;
                         }
                     } else {
-                        self.vel_x *= self.cfg.land_keep;
-                        self.vel_z *= self.cfg.land_keep;
-                        if !land.is_empty() {
-                            self.one_shot = land.clone();
-                            self.play(&land, false, true);
-                        } else {
-                            self.one_shot.clear();
+                        self.pos[1] = gh;
+                        self.last_ground_y = gh;
+                    }
+                }
+                if !self.grounded && self.climbing.is_none() && self.vy < self.cfg.air_grab_max_rise && self.held_jump {
+                    self.try_climb(world); // holding Jump in the air grabs a ledge in reach
+                }
+                let cn = self.cur.clone().unwrap_or_default();
+                let window = self.cfg.windows.get(&cn).copied();
+                let owns = window.is_some() && self.one_shot == cn;
+                let (jw0, jw1) = window.map_or((0.0, 0.0), |w| (w[0], w[1]));
+                if owns && self.grounded && !self.jump_fired && self.cur_time().is_some_and(|t| t >= jw0) {
+                    self.last_ground_y = self.pos[1];
+                    self.vy = self.jump_v;
+                    self.grounded = false;
+                    self.jump_fired = true;
+                    self.events.push("takeoff");
+                }
+                if !self.grounded && self.climbing.is_none() {
+                    let sinking = self.cfg.water.as_ref().filter(|w| (self.dead || self.is_n("death", &self.one_shot)) && self.water_level(world) > self.pos[1] + w.swim_depth * 0.5).map(|w| w.sink_speed);
+                    if let Some(sink) = sinking {
+                        // A body in deep water sinks slowly.
+                        self.vy += (-sink - self.vy) * (dt * 3.0).min(1.0);
+                        self.pos[1] += self.vy * dt;
+                    } else {
+                        self.pos[1] += self.vy * dt - 0.5 * self.grav * dt * dt;
+                        self.vy -= self.grav * dt;
+                    }
+                    gh = world.ground_height(self.pos[0], self.pos[2], self.pos[1]);
+                    if self.vy <= 0.0 && self.pos[1] <= gh {
+                        self.pos[1] = gh;
+                        self.vy = 0.0;
+                        self.grounded = true;
+                        self.events.push("land");
+                        let land = self.n("land");
+                        if owns {
+                            if self.cur_time().is_some_and(|t| t < jw1) {
+                                self.seek(jw1); // touched down early: skip to the landing
+                            }
+                            if self.gt - self.jump_buf < self.cfg.buffer_time {
+                                self.jump_buf = -9.0;
+                                self.chain_jump(); // jump was pressed just before touchdown
+                            } else if self.stick_mag > dz {
+                                // Landing on the move: legs go straight back into the stride on the
+                                // landing foot; the rest of the landing plays on the upper body.
+                                self.start_overlay(&cn, jw1);
+                                self.ov_w = 1.0;
+                                self.one_shot.clear();
+                            } else {
+                                // Landing still: shed leftover drift so planted feet do not skate.
+                                self.vel_x *= self.cfg.land_keep;
+                                self.vel_z *= self.cfg.land_keep;
+                            }
+                        } else if self.falling {
+                            self.falling = false;
+                            if self.stick_mag > dz {
+                                self.one_shot.clear();
+                                if !land.is_empty() {
+                                    self.start_overlay(&land, 0.05);
+                                }
+                            } else {
+                                self.vel_x *= self.cfg.land_keep;
+                                self.vel_z *= self.cfg.land_keep;
+                                if !land.is_empty() {
+                                    self.one_shot = land.clone();
+                                    self.play(&land, false, true);
+                                } else {
+                                    self.one_shot.clear();
+                                }
+                            }
+                        }
+                    } else {
+                        if owns && self.jump_fired {
+                            if let Some(t) = self.cur_mut() {
+                                if t.time > jw1 - 0.04 {
+                                    t.time = jw1 - 0.04; // still in the air: hold the reach pose
+                                }
+                            }
+                        }
+                        let fall = self.n("fall");
+                        if !self.is_jump(&self.one_shot) && !self.falling && !self.dead && !self.is_n("death", &self.one_shot) && !fall.is_empty() && self.pos[1] - gh > 0.3 {
+                            self.falling = true;
+                            self.prone = false;
+                            self.sitting = false;
+                            self.stop_overlay();
+                            self.one_shot = fall.clone();
+                            self.play(&fall, true, false);
                         }
                     }
                 }
-            } else {
-                if owns && self.jump_fired {
-                    if let Some(t) = self.cur_mut() {
-                        if t.time > jw1 - 0.04 {
-                            t.time = jw1 - 0.04; // still in the air: hold the reach pose
-                        }
-                    }
-                }
-                let fall = self.n("fall");
-                if !self.is_jump(&self.one_shot) && !self.falling && !self.dead && !fall.is_empty() && self.pos[1] - gh > 0.3 {
-                    self.falling = true;
-                    self.prone = false;
-                    self.sitting = false;
-                    self.stop_overlay();
-                    self.one_shot = fall.clone();
-                    self.play(&fall, true, false);
+                if self.climbing.is_none() {
+                    self.water_step(world);
                 }
             }
         }
+        self.fly_momentum(dt);
         if self.is_roll(&self.one_shot) && self.cur_time().is_some_and(|t| t > self.cfg.roll_travel[0] && t < self.cfg.roll_travel[1]) {
             let s = self.cfg.speed("roll");
             self.pos[0] += self.roll_x * s * dt;
@@ -1370,15 +2008,37 @@ impl Controller {
         // ---- output ----
         let sum: f64 = self.tracks.iter().map(|t| t.w).sum();
         let cur = self.cur.clone().unwrap_or_default();
-        let body = self
-            .tracks
-            .iter()
-            .map(|t| Layer {
-                clip: t.clip.clone(),
-                time: t.time.min(self.d(&t.clip)),
-                weight: if sum > 0.0 { t.w / sum } else if t.clip == cur { 1.0 } else { 0.0 },
-            })
-            .collect();
+        let mix = self.fly_mix(self.mode_cfg);
+        let mut shown = cur.clone();
+        let mut best = -1.0;
+        let mut body = Vec::new();
+        for t in &self.tracks {
+            let tw = if sum > 0.0 { t.w / sum } else if t.clip == cur { 1.0 } else { 0.0 };
+            let Some(tm) = self.mode_named(&t.clip) else {
+                body.push(Layer { clip: t.clip.clone(), time: t.time.min(self.d(&t.clip)), weight: tw });
+                continue;
+            };
+            // A blended mode: its still clip plus the directions the limbs are being carried.
+            for (clip, w) in self.fly_weights(self.fly_mix(Some(tm)), tm) {
+                if w > 0.0 {
+                    if t.clip == cur && w > best {
+                        best = w;
+                        shown = clip.clone();
+                    }
+                    body.push(Layer { time: t.time.min(self.d(&clip)), clip, weight: tw * w });
+                }
+            }
+        }
+        // The whole body tilts into the direction of travel, around a pivot at the hips
+        // (swimming lays it out flat).
+        let mut lean = [0.0; 2];
+        if let Some(m) = self.mode_cfg {
+            let f = self.mode_settings(m);
+            let lf = mix[0].clamp(-f.lean_max, f.lean_max);
+            let lr = mix[1].clamp(-f.lean_max, f.lean_max);
+            let ld = (-mix[2]).clamp(0.0, f.lean_max);
+            lean = [(lf * if lf > 0.0 { f.lean_forward } else { f.lean_back } + ld * f.lean_down).clamp(-f.lean_limit, f.lean_limit), lr * f.lean_side];
+        }
         let upper = self.overlay.as_ref().map(|(clip, time)| Layer { clip: clip.clone(), time: *time, weight: self.ov_w });
         // Carry pose: an upper-body action takes the arms back unless it is one the pose is
         // kept during.
@@ -1391,17 +2051,43 @@ impl Controller {
             }
             (hw > 0.0).then(|| (Layer { clip: hst.clip.clone(), time: self.hold_t, weight: hw }, hst.bones.clone()))
         });
+        let wade = (self.wade_w > 0.0).then(|| Layer { clip: self.n("wadeArms"), time: self.wade_t, weight: self.wade_w });
+        let upper_left = match (&self.overlay, self.both_hands) {
+            (Some((_, time)), true) => Some(Layer { clip: self.n("interactLeft"), time: *time, weight: self.ov_w }),
+            _ => None,
+        };
+        let state = if self.dead {
+            "dead".to_string()
+        } else if self.climbing.is_some() {
+            "climb".to_string()
+        } else {
+            match self.mode {
+                Some(Medium::Fly) => "fly".to_string(),
+                Some(Medium::Swim) => "swim".to_string(),
+                Some(Medium::Dive) => "dive".to_string(),
+                None => shown.clone(),
+            }
+        };
         Output {
             position: self.pos,
             yaw: self.yaw,
             body,
             upper,
             hold,
+            wade,
+            upper_left,
+            lean,
+            clip: shown,
+            flying: self.flying,
+            swimming: matches!(self.mode, Some(Medium::Swim | Medium::Dive)),
+            underwater: self.mode == Some(Medium::Dive),
+            wading: self.wading,
+            velocity: [self.vel_x, self.vy, self.vel_z],
             head_look: self.head_look,
             face,
             events: self.events.clone(),
             view: self.view,
-            state: if self.dead { "dead".into() } else if self.climbing.is_some() { "climb".into() } else { cur },
+            state,
             clip_time: self.cur_time().unwrap_or(0.0),
             grounded: self.grounded,
             speed: (self.vel_x * self.vel_x + self.vel_z * self.vel_z).sqrt(),
@@ -1434,6 +2120,19 @@ impl Controller {
         } else if self.is_n("climb", &cn) {
             (sq, br, br_r, m) = (0.35, -0.5, 0.7, "grin");
             look = Some((0.0, 0.45));
+        } else if self.mode == Some(Medium::Dive) {
+            (sq, br, br_r, m) = (0.45, -0.15, 0.2, "closed"); // holding breath, eyes narrowed
+        } else if self.mode == Some(Medium::Swim) {
+            let sm = self.fly_mix(self.mode_cfg);
+            let shs = (sm[0] * sm[0] + sm[1] * sm[1]).sqrt().min(1.0);
+            (sq, br) = (0.15 + 0.2 * shs, 0.1);
+            m = if shs > 0.6 { "small" } else { "closed" };
+        } else if self.flying {
+            // Wind in the face at speed; brows up when dropping.
+            let fm = self.fly_mix(self.mode_cfg);
+            let hsp = (fm[0] * fm[0] + fm[1] * fm[1]).sqrt().min(1.0);
+            (sq, br, br_r) = (0.06 + 0.3 * hsp, 0.2 + 0.5 * (-fm[2]).max(0.0), -0.1);
+            m = if hsp > 0.75 || fm[2] < -0.6 { "small" } else { "closed" };
         } else if self.falling || self.is_n("fall", &cn) {
             (br, br_r) = (1.0, -0.5);
             m = if self.f.air > 0.45 { "wide" } else { "small" };

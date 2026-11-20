@@ -384,6 +384,14 @@ impl Client {
         Some(Some((lo as f32 / 4.0, hi as f32 / 4.0)))
     }
 
+    /// Whether the block at `pos` is a liquid (water): see-through and not solid. False where
+    /// the world is not loaded.
+    pub fn is_liquid(&self, pos: BlockPos) -> bool {
+        let (Some(state), Some(reg)) = (self.store.block(pos), self.registry.as_ref()) else { return false };
+        let def = reg.get(state);
+        def.render == crate::registry::RenderLayer::Translucent && !def.solid
+    }
+
     /// (chunks that have geometry, total quads)
     pub fn mesh_totals(&self) -> (usize, usize) {
         (self.meshes.len(), self.meshes.values().map(|m| m.quad_count()).sum())

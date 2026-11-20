@@ -179,6 +179,12 @@ pub struct Pose {
 }
 
 impl Pose {
+    /// Where a part is and how it is turned: its origin and its x, y, z axes, in the world.
+    pub fn frame(&self, i: usize) -> ([f32; 3], [[f32; 3]; 3]) {
+        let m = &self.world[i];
+        (m.t, m.c)
+    }
+
     /// The head's place in the world (for the first-person camera).
     pub fn head_position(&self) -> Option<[f64; 3]> {
         self.head.map(|h| {
@@ -203,6 +209,10 @@ pub struct Rig {
     /// Parts the first-person camera must not see: head, neck and the face.
     hidden_first: Vec<bool>,
     yaw_offset: f32,
+    /// The left arm: with both hands interacting it takes the other hand's clip.
+    left_arm: Vec<bool>,
+    /// How high above the feet the whole-body lean (flight, swimming) turns about.
+    pivot: f32,
 }
 
 struct Reader<'a> {
@@ -326,6 +336,8 @@ impl Rig {
             head,
             hidden_first,
             yaw_offset: cfg.yaw_offset as f32,
+            left_arm: nodes.iter().map(|n| n.name.starts_with("left_arm") || n.name == "left_hand").collect(),
+            pivot: cfg.fly.as_ref().map_or(0.0, |f| f.pivot as f32),
             nodes,
             vertices,
             clips,
@@ -339,6 +351,25 @@ impl Rig {
 
     pub fn clip_duration(&self, name: &str) -> Option<f32> {
         self.clips.get(name).map(|c| c.duration)
+    }
+
+    /// A part's index (for `Pose::frame`).
+    pub fn node(&self, name: &str) -> Option<usize> {
+        self.index.get(name).copied()
+    }
+
+    /// The middle of a part's triangles as posed.
+    pub fn centre(&self, pose: &Pose, i: usize) -> [f32; 3] {
+        let m = &pose.world[i];
+        let vs = &self.vertices[self.nodes[i].verts.clone()];
+        let mut c = [0.0f32; 3];
+        for v in vs {
+            let p = m.point(v.pos);
+            for k in 0..3 {
+                c[k] += p[k] / vs.len().max(1) as f32;
+            }
+        }
+        c
     }
 
     pub fn has_node(&self, name: &str) -> bool {
@@ -358,7 +389,7 @@ impl Rig {
         (c.pos.get(&node).map_or(n.t, |ch| ch.vec3(t)), c.rot.get(&node).map_or(n.r, |ch| ch.quat(t)))
     }
 
-    fn blend(&self, node: usize, body: &[Layer], upper: Option<&Layer>, hold: Option<&Layer>, look: Option<[f64; 2]>) -> (Vec3, Quat) {
+    fn blend(&self, node: usize, body: &[Layer], wade: Option<&Layer>, upper: Option<&Layer>, hold: Option<&Layer>, look: Option<[f64; 2]>) -> (Vec3, Quat) {
         let (mut p, mut q) = (self.nodes[node].t, self.nodes[node].r);
         let mut acc = 0.0f64;
         for b in body.iter().filter(|b| b.weight > 0.0) {
@@ -371,6 +402,12 @@ impl Rig {
                 q = q_slerp(q, sq, k);
                 p = lerp3(p, sp, k);
             }
+        }
+        if let Some(w) = wade.filter(|w| w.weight > 0.0) {
+            // Wading: the arms held out over the water, over whatever the body is doing.
+            let (sp, sq) = self.sample(&w.clip, node, w.time);
+            q = q_slerp(q, sq, w.weight as f32);
+            p = lerp3(p, sp, w.weight as f32);
         }
         if let Some(u) = upper.filter(|u| u.weight > 0.0) {
             // The upper-body action takes over from the movement clip.
@@ -395,13 +432,15 @@ impl Rig {
         let n = self.nodes.len();
         let mut local: Vec<(Vec3, Quat, Vec3)> = self.nodes.iter().map(|n| (n.t, n.r, n.s)).collect();
         for &i in &self.lower {
-            let (p, q) = self.blend(i, &out.body, None, None, None);
+            let (p, q) = self.blend(i, &out.body, None, None, None, None);
             (local[i].0, local[i].1) = (p, q);
         }
         for &i in &self.upper {
             let hold = out.hold.as_ref().filter(|(_, bones)| bones.iter().any(|b| *b == self.nodes[i].name)).map(|(l, _)| l);
             let look = out.head_look.filter(|_| Some(i) == self.head);
-            let (p, q) = self.blend(i, &out.body, out.upper.as_ref(), hold, look);
+            // Both hands interacting: the left arm does the other hand's half.
+            let upper = if self.left_arm[i] { out.upper_left.as_ref().or(out.upper.as_ref()) } else { out.upper.as_ref() };
+            let (p, q) = self.blend(i, &out.body, out.wade.as_ref(), upper, hold, look);
             (local[i].0, local[i].1) = (p, q);
         }
         // Face.
@@ -420,7 +459,15 @@ impl Rig {
         }
         // The model is authored facing -Z; turn it so yaw 0 faces +Z, then to the body's yaw.
         let at = [(out.position[0] - origin[0]) as f32, (out.position[1] - origin[1]) as f32, (out.position[2] - origin[2]) as f32];
-        let root = Mat::trs(at, q_axis([0.0, 1.0, 0.0], out.yaw as f32 + self.yaw_offset), [1.0; 3]);
+        // Flying and swimming, the whole body tilts about a point at the hips: forward (top
+        // toward its front, about x) and to its right (about z).
+        let up = |h: f32| Mat::trs([0.0, h, 0.0], [0.0, 0.0, 0.0, 1.0], [1.0; 3]);
+        let tilt = q_mul(q_axis([1.0, 0.0, 0.0], out.lean[0] as f32), q_axis([0.0, 0.0, 1.0], out.lean[1] as f32));
+        let root = Mat::trs(at, q_axis([0.0, 1.0, 0.0], out.yaw as f32), [1.0; 3])
+            .then(&up(self.pivot))
+            .then(&Mat::trs([0.0; 3], tilt, [1.0; 3]))
+            .then(&up(-self.pivot))
+            .then(&Mat::trs([0.0; 3], q_axis([0.0, 1.0, 0.0], self.yaw_offset), [1.0; 3]));
         let mut world: Vec<Option<Mat>> = vec![None; n];
         for i in 0..n {
             self.resolve(i, &local, &root, &mut world);
@@ -477,11 +524,20 @@ mod tests {
             body,
             upper: None,
             hold: None,
+            wade: None,
+            upper_left: None,
+            lean: [0.0; 2],
             head_look: None,
             face: Face { lid: 0.001, pupil: [0.0; 2], brow_lift: 0.0, brow_tilt: 0.0, mouth: "closed", mouth_uv: [0.0; 2] },
             events: Vec::new(),
             view: View::Follow,
             state: "idle".into(),
+            clip: "idle".into(),
+            flying: false,
+            swimming: false,
+            underwater: false,
+            wading: false,
+            velocity: [0.0; 3],
             clip_time: 0.0,
             grounded: true,
             speed: 0.0,
@@ -508,7 +564,15 @@ mod tests {
     fn the_model_and_every_clip_the_state_machine_names_are_there() {
         let cfg = Config::builtin();
         let rig = Rig::builtin(&cfg);
-        assert_eq!(rig.clip_names().count(), 51);
+        assert_eq!(rig.clip_names().count(), 77);
+        // ... including every clip the blended modes (flight, swimming, diving) mix.
+        let modes = cfg.fly.iter().chain(cfg.water.iter().flat_map(|w| [&w.swim, &w.dive]));
+        for m in modes {
+            let k = &m.clips;
+            for c in [&k.idle, &k.forward, &k.back, &k.right, &k.left, &k.up, &k.down].into_iter().filter(|c| !c.is_empty()) {
+                assert!(rig.clip_duration(c).is_some(), "mode clip {c}");
+            }
+        }
         for (name, clip) in &cfg.clips {
             let d = rig.clip_duration(name).unwrap_or_else(|| panic!("clip {name} is missing"));
             assert!((d as f64 - clip.duration).abs() < 0.02, "{name}: {d} vs {}", clip.duration);
@@ -599,6 +663,32 @@ mod tests {
         let h = tri(&hold);
         assert!(moved(&part(&base, "right_hand"), &part(&h, "right_hand")) > 0.05);
         assert!(moved(&part(&base, "left_hand"), &part(&h, "left_hand")) < 1e-5);
+        // He is right-handed: interact reaches with the right hand; with both hands, the left
+        // one reaches too, from its own clip.
+        let mut one = idle.clone();
+        one.upper = Some(layer("interact", 0.3, 1.0));
+        let i1 = tri(&one);
+        assert!(moved(&part(&base, "right_hand"), &part(&i1, "right_hand")) > 0.05);
+        let left_alone = moved(&part(&base, "left_hand"), &part(&i1, "left_hand"));
+        let mut both = one.clone();
+        both.upper_left = Some(layer("interact_l", 0.3, 1.0));
+        let i2 = tri(&both);
+        assert!(moved(&part(&base, "left_hand"), &part(&i2, "left_hand")) > left_alone.max(0.05), "the left hand reaches too");
+        assert!(moved(&part(&i1, "right_hand"), &part(&i2, "right_hand")) < 1e-5, "the right hand is as before");
+        // Wading holds the arms out, the legs keep walking.
+        let mut wade = output(vec![layer("walk", 0.3, 1.0)]);
+        wade.wade = Some(layer("wade_idle", 0.0, 1.0));
+        let wd = tri(&wade);
+        assert!(moved(&part(&walk, "left_hand"), &part(&wd, "left_hand")) > 0.05);
+        assert!(moved(&part(&walk, "left_foot"), &part(&wd, "left_foot")) < 1e-5);
+        // Leaning forward (flight) tips the head toward his front (+Z) and leaves the hips
+        // nearly where they were.
+        let mut lean = idle.clone();
+        lean.lean = [0.5, 0.0];
+        let ln = tri(&lean);
+        let mid_z = |v: &[Vertex]| v.iter().map(|p| p.pos[2]).sum::<f32>() / v.len() as f32;
+        assert!(mid_z(&part(&ln, "head")) > mid_z(&part(&base, "head")) + 0.3);
+        assert!(moved(&part(&base, "pelvis"), &part(&ln, "pelvis")) < 0.15);
         // Looking left turns the head and what is attached to it, not the chest.
         let mut look = idle.clone();
         look.head_look = Some([0.8, 0.0]);

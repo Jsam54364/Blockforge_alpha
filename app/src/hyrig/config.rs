@@ -56,6 +56,118 @@ pub struct HoldState {
     pub block: Vec<String>,
 }
 
+/// The clips a blended mode (flight, swimming, diving) mixes: one still, and one for each
+/// way the limbs can be carried ("" where the mode has none, e.g. no up or down at the
+/// surface).
+#[derive(Clone, Debug, Default)]
+pub struct ModeClips {
+    pub idle: String,
+    pub forward: String,
+    pub back: String,
+    pub right: String,
+    pub left: String,
+    pub up: String,
+    pub down: String,
+}
+
+/// A blended mode's settings: speeds, the momentum spring that carries the limbs, the lean.
+/// Flight, surface swimming and diving all take these (the ones a mode does not use are 0,
+/// or 1 for `back_scale`).
+#[derive(Clone, Debug, Default)]
+pub struct Mode {
+    pub clips: ModeClips,
+    pub cycle: f64,
+    pub speed: f64,
+    pub fast_speed: f64,
+    pub vertical: f64,
+    pub accel: f64,
+    pub turn_rate: f64,
+    pub inertia: f64,
+    pub max_accel: f64,
+    pub limb_stiffness: f64,
+    pub limb_damping: f64,
+    pub lean_forward: f64,
+    pub lean_back: f64,
+    pub lean_side: f64,
+    pub lean_max: f64,
+    /// Tips the body head first going down (diving); `lean_limit` caps the total.
+    pub lean_down: f64,
+    pub lean_limit: f64,
+    /// How high above the feet the body tilts about.
+    pub pivot: f64,
+    pub fade: f64,
+    pub back_scale: f64,
+    /// Strokes play up to this many times faster as speed rises above `speed` (0 = no).
+    pub stroke_rate: f64,
+    /// Forward follows the look pitch (underwater).
+    pub follow_pitch: bool,
+    // flight
+    pub takeoff: f64,
+    pub double_tap_jump: f64,
+    pub land_on_ground: bool,
+    pub land_below: f64,
+    pub land_impact: f64,
+    // swimming
+    pub float_rate: f64,
+    pub plane_lift: f64,
+    pub buoyancy: f64,
+}
+
+impl Mode {
+    fn parse(x: &Value) -> Mode {
+        let g = |k: &str, d: f64| x.get(k).and_then(Value::as_f64).unwrap_or(d);
+        let c = &x["clips"];
+        let clip = |k: &str| c.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+        Mode {
+            clips: ModeClips { idle: clip("idle"), forward: clip("forward"), back: clip("back"), right: clip("right"), left: clip("left"), up: clip("up"), down: clip("down") },
+            cycle: g("cycle", 1.0),
+            speed: g("speed", 1.0),
+            fast_speed: g("fastSpeed", 1.0),
+            vertical: g("vertical", 1.0),
+            accel: g("accel", 3.0),
+            turn_rate: g("turnRate", 6.0),
+            inertia: g("inertia", 0.0),
+            max_accel: g("maxAccel", 10.0),
+            limb_stiffness: g("limbStiffness", 20.0),
+            limb_damping: g("limbDamping", 7.0),
+            lean_forward: g("leanForward", 0.0),
+            lean_back: g("leanBack", 0.0),
+            lean_side: g("leanSide", 0.0),
+            lean_max: g("leanMax", 1.0),
+            lean_down: g("leanDown", 0.0),
+            lean_limit: g("leanLimit", 1e9),
+            pivot: g("pivot", 0.95),
+            fade: g("fade", 0.35),
+            // (the kit treats 0 as "not set" here)
+            back_scale: Some(g("backScale", 1.0)).filter(|b| *b != 0.0).unwrap_or(1.0),
+            stroke_rate: g("strokeRate", 0.0),
+            follow_pitch: x.get("followPitch").and_then(Value::as_bool).unwrap_or(false),
+            takeoff: g("takeoff", 0.0),
+            double_tap_jump: g("doubleTapJump", 0.0),
+            land_on_ground: x.get("landOnGround").and_then(Value::as_bool).unwrap_or(false),
+            land_below: g("landBelow", 0.0),
+            land_impact: g("landImpact", 0.0),
+            float_rate: g("floatRate", 3.0),
+            plane_lift: g("planeLift", 0.0),
+            buoyancy: g("buoyancy", 0.0),
+        }
+    }
+}
+
+/// Wading, swimming and diving.
+#[derive(Clone, Debug, Default)]
+pub struct Water {
+    pub wade_depth: f64,
+    pub wade_fade: f64,
+    pub swim_depth: f64,
+    pub exit_margin: f64,
+    pub dive_entry: f64,
+    pub entry_keep: f64,
+    pub sink_speed: f64,
+    pub swim: Mode,
+    pub dive: Mode,
+}
+
 #[derive(Clone, Debug)]
 pub struct Config {
     pub yaw_offset: f64,
@@ -114,6 +226,12 @@ pub struct Config {
     pub hold_fade: f64,
     pub hold_states: HashMap<String, HoldState>,
     pub hold_suspend: Vec<String>,
+    /// Held punch: the next jab starts this far into the current one.
+    pub punch_repeat_at: Option<f64>,
+    /// Mining clips and when (fraction of the clip) each strike lands.
+    pub mine_hit_at: HashMap<String, f64>,
+    pub fly: Option<Mode>,
+    pub water: Option<Water>,
     // face
     pub pupil_x: f64,
     pub pupil_up: f64,
@@ -231,6 +349,23 @@ impl Config {
                 block: strings(&x["block"]),
             }),
             hold_suspend: strings(at(v, "hold.suspend")),
+            punch_repeat_at: v.get("punch").and_then(|p| p.get("repeatAt")).and_then(Value::as_f64),
+            mine_hit_at: v.get("mine").map(|_| map(v, "mine.hitAt", f)).unwrap_or_default(),
+            fly: v.get("fly").map(Mode::parse),
+            water: v.get("water").map(|w| {
+                let g = |k: &str| w.get(k).and_then(Value::as_f64).unwrap_or(0.0);
+                Water {
+                    wade_depth: g("wadeDepth"),
+                    wade_fade: g("wadeFade"),
+                    swim_depth: g("swimDepth"),
+                    exit_margin: g("exitMargin"),
+                    dive_entry: g("diveEntry"),
+                    entry_keep: g("entryKeep"),
+                    sink_speed: g("sinkSpeed"),
+                    swim: Mode::parse(&w["swim"]),
+                    dive: Mode::parse(&w["dive"]),
+                }
+            }),
             pupil_x: num(v, "face.limits.pupilX"),
             pupil_up: num(v, "face.limits.pupilUp"),
             pupil_down: num(v, "face.limits.pupilDown"),

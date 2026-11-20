@@ -1,9 +1,9 @@
 //! Replays the HyRig kit's recorded reference run (tests/data/hyrig_reference_trace.json:
-//! 7 194 frames, about two minutes of scripted play covering every state, recorded from the
-//! kit's JavaScript controller) and checks the Rust port gives the same result on every frame.
+//! 13 008 frames, about three and a half minutes of scripted play covering every state, on
+//! foot, flying, wading, swimming and diving, recorded from the kit's JavaScript controller) and checks the Rust port gives the same result on every frame.
 //! The same check the kit runs on its GDScript port (godot/tests/parity.gd).
 
-use blockforge_app::hyrig::world::BoxShape;
+use blockforge_app::hyrig::world::{BoxShape, WaterBox};
 use blockforge_app::hyrig::{BoxWorld, Config, Controller, Input, View};
 use serde_json::Value;
 
@@ -12,7 +12,8 @@ fn the_port_matches_the_kits_reference_run_frame_for_frame() {
     let trace: Value = serde_json::from_str(include_str!("data/hyrig_reference_trace.json")).unwrap();
     let f = |v: &Value| v.as_f64().unwrap();
     let boxes = trace["boxes"].as_array().unwrap().iter().map(|b| BoxShape { x0: f(&b["x0"]), x1: f(&b["x1"]), z0: f(&b["z0"]), z1: f(&b["z1"]), h: f(&b["h"]) }).collect();
-    let world = BoxWorld::new(boxes, 100.0);
+    let water = trace["water"].as_array().unwrap().iter().map(|b| WaterBox { x0: f(&b["x0"]), x1: f(&b["x1"]), z0: f(&b["z0"]), z1: f(&b["z1"]), top: f(&b["top"]) }).collect();
+    let world = BoxWorld::with_water(boxes, 100.0, water);
     // The run's random numbers: a linear congruential generator from its seed.
     let mut s = trace["seed"].as_u64().unwrap();
     let rand = Box::new(move || {
@@ -36,6 +37,9 @@ fn the_port_matches_the_kits_reference_run_frame_for_frame() {
             look_pitch: f(&fr["pitch"]),
             jump: fr["jump"].as_bool().unwrap(),
             roll: fr["roll"].as_bool().unwrap(),
+            down: fr.get("dn").is_some_and(|v| v.as_bool() == Some(true)),
+            mine: fr.get("mn").is_some_and(|v| v.as_bool() == Some(true)),
+            punch: fr.get("pn").is_some_and(|v| v.as_bool() == Some(true)),
             actions: fr.get("press").and_then(Value::as_array).map(|a| a.iter().map(|x| x.as_str().unwrap().to_string()).collect()).unwrap_or_default(),
         };
         let o = c.update(&world, dt, &input);
@@ -63,6 +67,10 @@ fn the_port_matches_the_kits_reference_run_frame_for_frame() {
             Value::from(o.hold.as_ref().map_or(String::new(), |h| h.0.clip.clone())),
             num(o.hold.as_ref().map_or(0.0, |h| h.0.weight)),
             num(o.hold.as_ref().map_or(0.0, |h| h.0.time)),
+            num(o.lean[0]),
+            num(o.lean[1]),
+            Value::from(o.clip.clone()),
+            num(o.wade.as_ref().map_or(0.0, |w| w.weight)),
         ];
         let want = fr["o"].as_array().unwrap();
         let mut ok = want.len() == got.len();
@@ -85,5 +93,5 @@ fn the_port_matches_the_kits_reference_run_frame_for_frame() {
         }
     }
     assert_eq!(bad, 0, "{bad} of {} frames differ (largest numeric difference {worst})", frames.len());
-    assert_eq!(frames.len(), 7194);
+    assert_eq!(frames.len(), 13008);
 }

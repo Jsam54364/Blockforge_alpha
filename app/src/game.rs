@@ -1,9 +1,9 @@
-//! Player-facing state: the integrated server + client, the character (or a fly camera) and
-//! touch controls.
+//! Player-facing state: the integrated server + client, the character and touch controls.
 //!
 //! Controls (landscape; every button can be moved, resized or hidden in the controls editor):
 //!   left side         a stick appears where the thumb lands and follows it: walk, jog or
-//!                     sprint by how far it is pushed (or fly where you look, in fly mode)
+//!                     sprint by how far it is pushed (or fly where you look, in fly mode;
+//!                     JUMP rises, DOWN sinks; two quick JUMPs take off or drop out of it)
 //!   right side        drag = look around
 //!   ATTACK            tap = punch (breaks the block under the crosshair); hold = chop, a
 //!                     heavy swing that breaks a block each time it lands, again and again
@@ -34,10 +34,12 @@ use crate::sky::Clock;
 use crate::ui::{Action, BlockItem, CamView, Joy, Screen, Ui, JOY_RADII, LOD_DISTANCES, LOD_QUALITY};
 
 const LOOK_SENS: f32 = 0.0045;
-const FLY_SPEED: f32 = 14.0;
 const REACH: f32 = 8.0;
 /// Walking, the camera's pitch stays inside the character controller's limits.
 const WALK_PITCH: (f32, f32) = (-1.4, 1.35);
+/// How long a punch, and a chop, keep his hands from a block he carries.
+const PUNCH_HANDS: Duration = Duration::from_millis(500);
+const CHOP_HANDS: Duration = Duration::from_millis(950);
 /// ATTACK held this long is a heavy attack (a chop) rather than a punch.
 const HEAVY_AFTER: Duration = Duration::from_millis(300);
 /// A chop lands this far into its swing, and swings again this often while held (the
@@ -172,6 +174,20 @@ struct Attack {
     next_chop: Option<Instant>,
 }
 
+/// Digging by touch: which touch is held on the world, the block being hammered at and how
+/// many strikes have landed on it.
+struct Mining {
+    touch: u64,
+    block: Option<BlockPos>,
+    hits: u32,
+}
+
+/// How many strikes of the held mining swing (about three a second) break a block: by its
+/// hardness, as in Minecraft (dirt one, stone three, granite four).
+fn strikes_to_break(hardness: f32) -> u32 {
+    (hardness * 2.0).round().clamp(1.0, 8.0) as u32
+}
+
 /// The blocks the hotbar can hold (in `icons::placeable` order, the icons' order).
 pub fn block_items(reg: &BlockRegistry) -> Vec<BlockItem> {
     crate::icons::placeable(reg)
@@ -245,10 +261,14 @@ pub struct Game {
     roll_until: Option<Instant>,
     /// Which blocks do something when used (a tap uses them instead of building on them).
     behaviors: Option<BehaviorTable>,
-    /// The character (he stands where he was left while the camera flies).
+    /// The character; the camera goes with him, walking or flying.
     pub player: Player,
     /// Whether the last frame was in walk mode (to notice the switch).
     walking: bool,
+    /// His hands are busy (punching, chopping) until then: the block he carries is put away.
+    hands_busy: Option<Instant>,
+    /// A finger held still on the world while building by touch: digging.
+    mining: Option<Mining>,
     /// Touches holding JUMP or ROLL down.
     held: HashMap<u64, &'static str>,
     last_update: Instant,
@@ -285,7 +305,10 @@ impl Game {
             let [x, y, z] = gen.find_spawn();
             [x as f64 + 0.5, y as f64 + 1.5, z as f64 + 0.5]
         });
-        let player = Player::new(player_at, view);
+        let mut player = Player::new(player_at, view);
+        if !ui.settings.walk {
+            player.set_fly(true); // as soon as he is in the world
+        }
 
         let cfg = ServerConfig {
             seed: world.seed,
@@ -326,6 +349,8 @@ impl Game {
             behaviors,
             player,
             walking: ui_walk,
+            hands_busy: None,
+            mining: None,
             held: HashMap::new(),
             last_update: now,
             last_pos_sent: now,
@@ -471,9 +496,8 @@ impl Game {
             if now.duration_since(a.since) >= HEAVY_AFTER && a.next_chop.map_or(true, |t| now >= t) {
                 a.next_chop = Some(now + CHOP_EVERY);
                 self.chop_lands = Some(now + CHOP_LANDS);
-                if self.ui.settings.walk {
-                    self.player.press("chop");
-                }
+                self.hands_busy = Some(now + CHOP_HANDS);
+                self.player.press("chop");
             }
         }
         if self.chop_lands.is_some_and(|t| now >= t) {
@@ -497,12 +521,12 @@ impl Game {
         if self.roll_until.is_some_and(|t| now >= t) {
             self.roll_until = None;
         }
-        // Building by touch: a still finger on the world digs once held long enough.
-        if self.ui.settings.touch_build && self.attack.is_none() {
+        // Building by touch: a still finger on the world digs once held long enough, with the
+        // mining swing (see `count_strikes`).
+        if self.ui.settings.touch_build && self.attack.is_none() && self.mining.is_none() {
             if let Some((&id, t)) = self.touches.iter_mut().find(|(_, t)| !t.stick && !t.moved && !t.digging && now.duration_since(t.t0) >= DIG_AFTER) {
                 t.digging = true;
-                // As ATTACK held past a punch: a chop now, landing and repeating.
-                self.attack = Some(Attack { touch: id, since: now - HEAVY_AFTER, next_chop: None });
+                self.mining = Some(Mining { touch: id, block: None, hits: 0 });
             }
         }
         if let Some((touch, next)) = self.placing {
@@ -536,6 +560,24 @@ impl Game {
         }
     }
 
+    /// Digging: each strike of the mining swing that lands counts against the block looked
+    /// at; enough of them (by its hardness) break it. Looking at another block starts over.
+    fn count_strikes(&mut self) {
+        let landed = self.player.last.as_ref().map_or(0, |o| o.events.iter().filter(|e| **e == "mineHit").count() as u32);
+        let target = self.target().map(|h| h.pos);
+        let Some(m) = self.mining.as_mut() else { return };
+        if m.block != target {
+            (m.block, m.hits) = (target, 0);
+        }
+        let Some(pos) = target.filter(|_| landed > 0) else { return };
+        m.hits += landed;
+        let hardness = self.client.block_at(pos).map_or(1.0, |s| self.registry.def(s.id()).hardness);
+        if m.hits >= strikes_to_break(hardness) {
+            m.hits = 0;
+            self.client.break_block(pos);
+        }
+    }
+
     /// A tap on the world while building by touch: use the block if it can be used, else put
     /// the hotbar's block against it.
     fn tap_world(&mut self) {
@@ -545,9 +587,8 @@ impl Game {
         match self.target() {
             Some(hit) if usable(self, hit.pos) => {
                 self.client.use_block(hit.pos);
-                if self.ui.settings.walk {
-                    self.player.press("interact");
-                }
+                // With a block in his hands, both reach out.
+                self.player.press(if self.player.hold == "two_handed_item" { "interact_both" } else { "interact" });
             }
             Some(_) => self.place_target(),
             None => {}
@@ -564,10 +605,9 @@ impl Game {
 
         let (strafe, forward) = self.stick();
         let walk = self.ui.settings.walk;
-        if walk && !self.walking {
-            // Back from flying: he is put down where the camera is and drops to the ground.
-            let c = self.cam.pos;
-            self.player.place([c[0] as f64, c[1] as f64 - 1.6, c[2] as f64]);
+        if walk != self.walking {
+            // Walk or Fly picked in the settings: he takes off, or drops to the ground.
+            self.player.set_fly(!walk);
         }
         self.walking = walk;
         let cam_view = self.ui.settings.view;
@@ -575,15 +615,7 @@ impl Game {
         if self.player.ctl.view != view {
             self.player.ctl.set_view(view);
         }
-        if walk {
-            self.cam.pitch = self.cam.pitch.clamp(WALK_PITCH.0, WALK_PITCH.1);
-        } else {
-            let f = self.cam.forward();
-            let r = self.cam.right();
-            for i in 0..3 {
-                self.cam.pos[i] += (f[i] * forward + r[i] * strafe) * FLY_SPEED * dt;
-            }
-        }
+        self.cam.pitch = self.cam.pitch.clamp(WALK_PITCH.0, WALK_PITCH.1);
         // The controller's yaw 0 faces +Z; the camera's faces -Z.
         let look = (self.cam.yaw as f64 + std::f64::consts::PI, self.cam.pitch as f64);
         let aspect = self.size.0 as f64 / self.size.1 as f64;
@@ -591,9 +623,21 @@ impl Game {
         self.update_buttons(now);
         self.player.jump = self.held.values().any(|b| *b == "jump");
         self.player.roll = self.held.values().any(|b| *b == "roll") || self.roll_until.is_some_and(|t| now < t);
-        let eye = self.player.update(&self.client, dt as f64, (strafe, forward), look, aspect, walk, cam_view == CamView::Front);
-        if walk {
-            self.cam.pos = eye;
+        self.player.down = self.held.values().any(|b| *b == "down");
+        // A block picked in the hotbar is carried in both hands, put away while they are busy.
+        let block = self.ui.held_block();
+        let busy = self.attack.is_some() || self.chop_lands.is_some() || self.mining.is_some() || self.hands_busy.is_some_and(|t| now < t);
+        self.player.mine = self.mining.is_some();
+        self.player.hold = if block != 0 && !busy { "two_handed_item" } else { "none" };
+        self.player.set_carry((block != 0).then(|| std::array::from_fn(|f| self.registry.def(block).tex[f])));
+        let eye = self.player.update(&self.client, dt as f64, (strafe, forward), look, aspect, true, cam_view == CamView::Front);
+        self.cam.pos = eye;
+        self.count_strikes();
+        // Flight can start or end by itself (two quick jumps; flying down onto the ground):
+        // the setting follows.
+        if !self.player.is_waiting() && self.player.flying() == self.ui.settings.walk {
+            self.ui.settings.walk = !self.player.flying();
+            self.walking = self.ui.settings.walk;
         }
 
         if now.duration_since(self.last_pos_sent) > Duration::from_millis(250) {
@@ -726,9 +770,9 @@ impl Game {
             TouchPhase::Ended | TouchPhase::Cancelled => {
                 if let Some(t) = self.touches.remove(&id) {
                     if t.digging {
-                        // Stop digging (a chop already on its way still lands).
-                        if self.attack.as_ref().is_some_and(|a| a.touch == id) {
-                            self.attack = None;
+                        // Stop digging (the swing on its way finishes, but breaks nothing more).
+                        if self.mining.as_ref().is_some_and(|m| m.touch == id) {
+                            self.mining = None;
                         }
                     } else if self.ui.settings.touch_build && !t.stick && !t.moved && phase == TouchPhase::Ended && t.t0.elapsed() < DIG_AFTER {
                         self.tap_world();
@@ -741,7 +785,7 @@ impl Game {
     /// The camera to draw with. It is `cam` (where you look), except in the front view,
     /// where the camera is out in front of the character and looks back the other way.
     pub fn render_cam(&self) -> CameraView {
-        if self.ui.settings.walk && self.ui.settings.view == CamView::Front {
+        if self.ui.settings.view == CamView::Front {
             CameraView { pos: self.cam.pos, yaw: self.cam.yaw + std::f32::consts::PI, pitch: -self.cam.pitch }
         } else {
             self.cam
@@ -750,23 +794,22 @@ impl Game {
 
     fn target(&self) -> Option<RayHit> {
         let s = self.ui.settings;
-        if s.walk && s.view == CamView::Front {
+        if s.view == CamView::Front {
             // The camera is in front of him: reach from his own eyes instead.
             let p = self.player.position();
             let eyes = [p[0] as f32, p[1] as f32 + 1.6, p[2] as f32];
             return raycast(eyes, self.cam.forward(), REACH, |p| self.client.is_solid(p));
         }
         // Behind the character, the camera is further from what he can reach.
-        let behind = if s.walk && s.view == CamView::Back { 4.0 } else { 0.0 };
+        let behind = if s.view == CamView::Back { 4.0 } else { 0.0 };
         raycast(self.cam.pos, self.cam.forward(), REACH + behind, |p| self.client.is_solid(p))
     }
 
     fn break_target(&mut self) {
         if let Some(hit) = self.target() {
             self.client.break_block(hit.pos);
-            if self.ui.settings.walk {
-                self.player.press("punch");
-            }
+            self.hands_busy = Some(Instant::now() + PUNCH_HANDS);
+            self.player.press("punch");
         }
     }
 
@@ -780,9 +823,8 @@ impl Game {
             // Don't entomb the camera or the character.
             if cell != BlockPos::from_f32(self.cam.pos) && !self.player.occupies(cell) {
                 self.client.place_block(cell, BlockState::full(block));
-                if self.ui.settings.walk {
-                    self.player.press("interact");
-                }
+                // Put down with both hands (it is carried in both).
+                self.player.press("interact_both");
             }
         }
     }
@@ -791,6 +833,11 @@ impl Game {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn harder_blocks_take_more_strikes() {
+        assert_eq!([0.2, 0.5, 1.5, 1.8, 100.0].map(strikes_to_break), [1, 1, 3, 4, 8]);
+    }
 
     #[test]
     fn worlds_open_on_their_own_seed_and_keep_their_player_and_the_settings() {
@@ -851,7 +898,7 @@ mod tests {
         let reg = Arc::new(BlockRegistry::builtin());
         let mut ui = Ui::new();
         ui.settings.render_chunks = 2;
-        ui.settings.walk = false; // the fly camera: no body to get in the way
+        ui.settings.walk = false; // flying: he stays up where he is put
         let mut g = Game::new(WorldSpec { dir: None, seed: 1337, settings_path: None }, ui, reg.clone());
         g.set_surface(2400, 1080, 2.75);
         let names: Vec<&str> = g.ui.hotbar.iter().map(|&id| reg.def(id).name.as_str()).collect();
@@ -864,11 +911,9 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(5));
             }
         };
-        // Look straight down from a little above the ground, away from where he stands.
+        // Hover a little above the ground and look down at it.
         let [x, _, z] = g.gen.find_spawn();
-        let (x, z) = (x.floor() as i32 + 6, z.floor() as i32);
-        let ground = g.gen.describe(x, z).height;
-        g.cam = CameraView { pos: [x as f32 + 0.5, ground + 4.0, z as f32 + 0.5], yaw: 0.0, pitch: -std::f32::consts::FRAC_PI_2 + 0.001 };
+        hover(&mut g, x.floor() as i32 + 6, z.floor() as i32);
         wait(&mut g, "the ground below", &|g| g.target().is_some());
         let hit = g.target().unwrap();
         let cell = hit.pos.neighbor(hit.face);
@@ -903,6 +948,16 @@ mod tests {
         assert!(g.state_text().contains("hotbar=stone,dirt,grass,glowstone,"), "{}", g.state_text());
         let (bar, slot) = saved_hotbar(&g.state_text(), &reg, &g.ui.blocks);
         assert_eq!((bar, slot), (g.ui.hotbar, 3));
+    }
+
+    /// He flies over (x, z), three blocks above the ground, looking down at it in first
+    /// person.
+    fn hover(g: &mut Game, x: i32, z: i32) {
+        let ground = g.gen.describe(x, z).height;
+        g.ui.settings.view = CamView::First;
+        g.ui.settings.walk = false;
+        g.player.place([x as f64 + 0.5, ground as f64 + 3.0, z as f64 + 0.5]);
+        (g.cam.yaw, g.cam.pitch) = (0.0, WALK_PITCH.0);
     }
 
     /// A world in memory around seed 1337's spawn, loaded, with the HUD laid out.
@@ -940,9 +995,7 @@ mod tests {
         let mut g = loaded_game(false);
         g.ui.settings.touch_build = true;
         let [x, _, z] = g.gen.find_spawn();
-        let (x, z) = (x.floor() as i32 + 6, z.floor() as i32);
-        let ground = g.gen.describe(x, z).height;
-        g.cam = CameraView { pos: [x as f32 + 0.5, ground + 4.0, z as f32 + 0.5], yaw: 0.0, pitch: -std::f32::consts::FRAC_PI_2 + 0.001 };
+        hover(&mut g, x.floor() as i32 + 6, z.floor() as i32);
         run_until(&mut g, "the ground below", 20.0, &|g| g.target().is_some());
         let hit = g.target().unwrap();
         let cell = hit.pos.neighbor(hit.face);
@@ -966,6 +1019,10 @@ mod tests {
         run_for(&mut g, 0.2);
         assert!(g.client.is_solid(cell), "not yet");
         run_until(&mut g, "the dig", 5.0, &|g| !g.client.is_solid(cell));
+        // ... with the mining swing, hands free of the block he carries.
+        let swing = g.player.last.as_ref().and_then(|o| o.upper.clone()).map(|u| u.clip);
+        assert_eq!(swing.as_deref(), Some("mine"));
+        assert!(!g.player.carrying);
         run_until(&mut g, "the next block", 5.0, &|g| g.target().is_some_and(|h| h.pos != cell));
         let below = g.target().unwrap().pos;
         run_until(&mut g, "the second dig", 5.0, &|g| !g.client.is_solid(below));
@@ -979,6 +1036,97 @@ mod tests {
         g.touch(4, TouchPhase::Ended, tx, ty);
         run_for(&mut g, 0.4);
         assert!(!g.client.is_solid(above));
+    }
+
+    #[test]
+    fn he_flies_when_fly_is_picked_or_jump_is_tapped_twice_and_lands_on_the_ground() {
+        let mut g = loaded_game(true);
+        run_until(&mut g, "the ground under him", 20.0, &|g| g.ready(Duration::ZERO));
+        run_for(&mut g, 1.0);
+        let state = |g: &Game| g.player.last.as_ref().map(|o| o.state.clone()).unwrap_or_default();
+        assert!(!g.player.ctl.is_flying());
+        let y0 = g.player.position()[1];
+        // Fly, in the settings: he takes off and stays up, the camera with him.
+        g.ui.settings.walk = false;
+        run_for(&mut g, 1.2);
+        assert!(g.player.ctl.is_flying() && state(&g) == "fly");
+        let y1 = g.player.position()[1];
+        assert!(y1 > y0 + 0.5, "{y0} -> {y1}");
+        assert!((g.cam.pos[1] as f64 - y1).abs() < 4.0);
+        // The stick flies him along where he looks.
+        let x0 = g.player.position();
+        g.cam.pitch = 0.0;
+        g.touch(1, TouchPhase::Started, 300.0, 700.0);
+        g.touch(1, TouchPhase::Moved, 300.0, 500.0);
+        run_for(&mut g, 0.8);
+        g.touch(1, TouchPhase::Ended, 300.0, 500.0);
+        let x1 = g.player.position();
+        assert!((x1[0] - x0[0]).hypot(x1[2] - x0[2]) > 1.5, "{x0:?} -> {x1:?}");
+        // Walk: he drops back to the ground.
+        g.ui.settings.walk = true;
+        run_until(&mut g, "the landing", 6.0, &|g| g.player.last.as_ref().is_some_and(|o| o.grounded));
+        assert!(!g.player.ctl.is_flying());
+        // Two quick taps on JUMP: he takes off, and the setting follows.
+        for _ in 0..2 {
+            g.held.insert(9, "jump");
+            g.update();
+            std::thread::sleep(Duration::from_millis(30));
+            g.update();
+            g.held.remove(&9);
+            g.update();
+            std::thread::sleep(Duration::from_millis(30));
+        }
+        g.update();
+        assert!(g.player.ctl.is_flying() && !g.ui.settings.walk);
+        // DOWN held sinks him onto the ground, which ends the flight; the setting follows.
+        g.held.insert(9, "down");
+        run_until(&mut g, "the landing", 8.0, &|g| !g.player.ctl.is_flying());
+        g.held.remove(&9);
+        g.update();
+        assert!(g.ui.settings.walk);
+    }
+
+    #[test]
+    fn the_hotbars_block_is_carried_in_both_hands_and_put_down_with_both() {
+        let mut g = loaded_game(true);
+        g.ui.settings.view = CamView::First;
+        run_until(&mut g, "the ground under him", 20.0, &|g| g.ready(Duration::ZERO));
+        run_for(&mut g, 1.0);
+        // Stone in the hotbar's first slot: in his hands.
+        assert_eq!(g.ui.held_block(), g.registry.id("stone").unwrap());
+        assert_eq!(g.player.ctl.hold(), "two_handed_item");
+        assert!(g.player.carrying);
+        // An empty slot: empty hands.
+        g.ui.apply(Action::ClearSlot);
+        run_for(&mut g, 0.4);
+        assert!(!g.player.carrying && g.player.ctl.hold() == "none");
+        g.ui.apply(Action::Slot(1));
+        run_until(&mut g, "the dirt in his hands", 2.0, &|g| g.player.carrying);
+        // Look at the ground a little ahead.
+        g.cam.pitch = -0.8;
+        run_until(&mut g, "the ground ahead", 5.0, &|g| g.target().is_some_and(|h| !g.player.occupies(h.pos.neighbor(h.face))));
+        // A punch puts it away for a moment; the jab is thrown with a free hand.
+        g.ui_touches.insert(2, Action::Hold("attack"));
+        g.ui_action(2, Action::Hold("attack"));
+        g.button_released(2);
+        g.update();
+        let jab = g.player.last.as_ref().and_then(|o| o.upper.clone()).map(|u| u.clip);
+        assert!(matches!(jab.as_deref(), Some("punch" | "punch_l")), "{jab:?}");
+        run_for(&mut g, 0.25);
+        assert!(!g.player.carrying);
+        run_until(&mut g, "the block back in his hands", 2.0, &|g| g.player.carrying);
+        // PLACE: both hands reach out with it.
+        let hit = g.target().unwrap();
+        let cell = hit.pos.neighbor(hit.face);
+        g.ui_touches.insert(3, Action::Hold("place"));
+        g.ui_action(3, Action::Hold("place"));
+        g.button_released(3);
+        g.update();
+        let o = g.player.last.as_ref().unwrap();
+        assert_eq!(o.upper.as_ref().map(|u| u.clip.as_str()), Some("interact"));
+        assert_eq!(o.upper_left.as_ref().map(|u| u.clip.as_str()), Some("interact_l"));
+        assert!(g.player.carrying, "the block stays in his hands as he puts it down");
+        run_until(&mut g, "the placed block", 5.0, &|g| g.client.is_solid(cell));
     }
 
     #[test]

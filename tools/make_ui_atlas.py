@@ -64,7 +64,7 @@ ICON_CODES = {
     "filter_hdr": 0xE3DF, "auto_awesome": 0xE65F, "fullscreen": 0xE5D0,
     # The game's controls and their editor.
     "apps": 0xE5C3, "open_with": 0xE89F, "remove": 0xE15B, "visibility_off": 0xE8F5,
-    "keyboard_double_arrow_up": 0xEACF, "add_box": 0xE146, "opacity": 0xE91C, "gamepad": 0xE30F,
+    "keyboard_double_arrow_up": 0xEACF, "keyboard_double_arrow_down": 0xEAD0, "add_box": 0xE146, "opacity": 0xE91C, "gamepad": 0xE30F,
     "zoom_out_map": 0xE56B, "front_hand": 0xE769, "gavel": 0xE90E, "inventory_2": 0xE1A1,
     # The ornate menus.
     "arrow_left": 0xE5DE, "arrow_right": 0xE5DF, "arrow_drop_down": 0xE5C5, "backpack": 0xF19C,
