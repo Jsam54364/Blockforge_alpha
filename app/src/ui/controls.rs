@@ -4,7 +4,7 @@
 
 use super::draw::{self, nine};
 use super::screens::Style;
-use super::{rect, Action, Button, HudVertex, Request, Screen, Ui};
+use super::{items, rect, Action, Button, HudVertex, Request, Screen, Stack, Ui};
 use crate::atlas::FontId::Serif;
 
 /// How a control looks.
@@ -238,7 +238,7 @@ impl Ui {
 
     /// The block in the hotbar's picked slot (0: none).
     pub fn held_block(&self) -> u16 {
-        self.hotbar[self.slot.min(8)]
+        self.hotbar[self.slot.min(8)].id
     }
 
     fn alpha(&self, settings_alpha: u8) -> [u8; 4] {
@@ -301,7 +301,7 @@ impl Ui {
                 for n in 0..9 {
                     let sx = x + n as f32 * s;
                     nine(out, "slot", sx, y, s, s, k * 0.8, tint);
-                    if let Some(icon) = self.icon_of(self.hotbar[n]) {
+                    if let Some(icon) = self.icon_of(self.hotbar[n].id) {
                         draw::thumb(out, crate::gfx::icon_uv(icon), sx + s * 0.14, y + s * 0.12, s * 0.72, s * 0.72);
                     }
                     if !grab {
@@ -520,13 +520,18 @@ impl Ui {
                 self.slot_changed = self.seconds;
             }
             Action::ToggleInventory => {
-                self.screen = Screen::Inventory;
-                self.inv_sel = self.icon_of(self.held_block());
+                if self.screen == Screen::Inventory {
+                    self.close_inventory();
+                    self.screen = Screen::Playing;
+                } else {
+                    self.screen = Screen::Inventory;
+                    self.picked = None;
+                }
                 self.acts_open = false;
             }
             Action::PickBlock(k) => {
                 if let Some(b) = self.blocks.get(k as usize) {
-                    self.hotbar[self.slot.min(8)] = b.id;
+                    self.hotbar[self.slot.min(8)] = Stack::of(b.id, items::STACK_MAX);
                     self.slot_changed = self.seconds;
                 }
             }

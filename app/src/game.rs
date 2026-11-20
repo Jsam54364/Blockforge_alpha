@@ -31,7 +31,7 @@ use winit::event::TouchPhase;
 use crate::hyrig::View;
 use crate::player::Player;
 use crate::sky::Clock;
-use crate::ui::{Action, BlockItem, CamView, Joy, Screen, Ui, JOY_RADII, LOD_DISTANCES, LOD_QUALITY};
+use crate::ui::{items, Action, BlockItem, CamView, Joy, Recipe, Screen, Stack, Ui, JOY_RADII, LOD_DISTANCES, LOD_QUALITY};
 
 const LOOK_SENS: f32 = 0.0045;
 const REACH: f32 = 8.0;
@@ -196,25 +196,41 @@ pub fn block_items(reg: &BlockRegistry) -> Vec<BlockItem> {
         .collect()
 }
 
-/// The hotbar saved in a world's state (`hotbar=stone,dirt,...` and `slot=n`), or the
-/// default one; unknown blocks leave their slot empty.
-fn saved_hotbar(text: &str, reg: &BlockRegistry, items: &[BlockItem]) -> ([u16; 9], usize) {
-    let id_of = |name: &str| reg.id(name.trim()).filter(|id| items.iter().any(|b| b.id == *id)).unwrap_or(0);
-    let mut bar = [0u16; 9];
+/// The hotbar saved in a world's state (`hotbar=stone*64,dirt*12,...` and `slot=n`; older
+/// saves name the blocks alone: full stacks), or the default one; unknown blocks leave their
+/// slot empty.
+fn saved_hotbar(text: &str, reg: &BlockRegistry, items: &[BlockItem]) -> ([Stack; 9], usize) {
+    let id_of = |name: &str| reg.id(name.trim()).filter(|id| items.iter().any(|b| b.id == *id));
+    let mut bar = [Stack::EMPTY; 9];
     match text.lines().find_map(|l| l.trim().strip_prefix("hotbar=")) {
-        Some(line) => {
-            for (slot, name) in bar.iter_mut().zip(line.split(',')) {
-                *slot = id_of(name);
-            }
-        }
+        Some(line) => crate::ui::items::from_text(line, &mut bar, id_of),
         None => {
             for (slot, name) in bar.iter_mut().zip(DEFAULT_HOTBAR) {
-                *slot = id_of(name);
+                *slot = id_of(name).map_or(Stack::EMPTY, |id| Stack::of(id, crate::ui::items::STACK_MAX));
             }
         }
     }
     let slot = text.lines().find_map(|l| l.trim().strip_prefix("slot=")?.parse::<usize>().ok()).unwrap_or(0).min(8);
     (bar, slot)
+}
+
+/// A container saved in a world's state under `key=` (as the hotbar is), into `slots`.
+fn saved_stacks(text: &str, key: &str, reg: &BlockRegistry, items: &[BlockItem], slots: &mut [Stack]) {
+    let id_of = |name: &str| reg.id(name.trim()).filter(|id| items.iter().any(|b| b.id == *id));
+    if let Some(line) = text.lines().find_map(|l| l.trim().strip_prefix(key)?.strip_prefix('=')) {
+        crate::ui::items::from_text(line, slots, id_of);
+    }
+}
+
+/// The crafting recipes (`ui::items::RECIPES`) for the blocks this registry has.
+pub fn recipes(reg: &BlockRegistry) -> Vec<Recipe> {
+    crate::ui::items::RECIPES
+        .iter()
+        .filter_map(|(inputs, (out, n))| {
+            let inputs = inputs.iter().map(|(name, k)| Some((reg.id(name)?, *k))).collect::<Option<Vec<_>>>()?;
+            Some(Recipe { inputs, output: Stack::of(reg.id(out)?, *n) })
+        })
+        .collect()
 }
 
 /// The world a game is opened on.
@@ -289,6 +305,11 @@ impl Game {
             ui.blocks = block_items(&registry);
         }
         (ui.hotbar, ui.slot) = saved_hotbar(&saved, &registry, &ui.blocks);
+        ui.inventory = [Stack::EMPTY; items::INV_SLOTS];
+        ui.craft = [Stack::EMPTY; items::CRAFT_SLOTS];
+        saved_stacks(&saved, "inventory", &registry, &ui.blocks, &mut ui.inventory);
+        saved_stacks(&saved, "craft", &registry, &ui.blocks, &mut ui.craft);
+        ui.recipes = recipes(&registry);
         // A camera saved in a world from an older generator would be over different ground:
         // start over at the spawn (that world's save is kept, under its own name).
         let same_world = saved_generator(&saved) == WORLDGEN_VERSION;
@@ -379,16 +400,18 @@ impl Game {
     /// The world's `state.txt`: camera, time of day, the character, the hotbar.
     fn state_text(&self) -> String {
         let p = self.player.position();
-        let bar: Vec<&str> = self.ui.hotbar.iter().map(|&id| if id == 0 { "" } else { self.registry.def(id).name.as_str() }).collect();
+        let name = |id: u16| self.registry.def(id).name.clone();
         format!(
-            "{}{}player={},{},{}\ngen={WORLDGEN_VERSION}\nhotbar={}\nslot={}\n",
+            "{}{}player={},{},{}\ngen={WORLDGEN_VERSION}\nhotbar={}\nslot={}\ninventory={}\ncraft={}\n",
             self.cam.to_text(),
             self.clock.to_text(),
             p[0],
             p[1],
             p[2],
-            bar.join(","),
-            self.ui.slot
+            items::to_text(&self.ui.hotbar, name),
+            self.ui.slot,
+            items::to_text(&self.ui.inventory, name),
+            items::to_text(&self.ui.craft, name),
         )
     }
 
@@ -901,7 +924,7 @@ mod tests {
         ui.settings.walk = false; // flying: he stays up where he is put
         let mut g = Game::new(WorldSpec { dir: None, seed: 1337, settings_path: None }, ui, reg.clone());
         g.set_surface(2400, 1080, 2.75);
-        let names: Vec<&str> = g.ui.hotbar.iter().map(|&id| reg.def(id).name.as_str()).collect();
+        let names: Vec<&str> = g.ui.hotbar.iter().map(|s| reg.def(s.id).name.as_str()).collect();
         assert_eq!(names, DEFAULT_HOTBAR);
         let wait = |g: &mut Game, what: &str, done: &dyn Fn(&Game) -> bool| {
             let t = Instant::now();
@@ -945,7 +968,16 @@ mod tests {
         g.button_released(3);
         assert!(g.attack.is_none());
         // The hotbar is saved with the world's state.
-        assert!(g.state_text().contains("hotbar=stone,dirt,grass,glowstone,"), "{}", g.state_text());
+        assert!(g.state_text().contains("hotbar=stone*64,dirt*64,grass*64,glowstone*64,"), "{}", g.state_text());
+        // The inventory and the crafting grid are kept with it; older saves (names alone) read
+        // as full stacks.
+        g.ui.inventory[3] = Stack::of(reg.id("sand").unwrap(), 12);
+        let text = g.state_text();
+        assert!(text.contains("inventory=,,,sand*12,"), "{text}");
+        let mut inv = [Stack::EMPTY; items::INV_SLOTS];
+        saved_stacks(&text, "inventory", &reg, &g.ui.blocks, &mut inv);
+        assert_eq!(inv, g.ui.inventory);
+        assert_eq!(saved_hotbar("hotbar=stone,,dirt\n", &reg, &g.ui.blocks).0[..3], [Stack::of(reg.id("stone").unwrap(), 64), Stack::EMPTY, Stack::of(reg.id("dirt").unwrap(), 64)]);
         let (bar, slot) = saved_hotbar(&g.state_text(), &reg, &g.ui.blocks);
         assert_eq!((bar, slot), (g.ui.hotbar, 3));
     }

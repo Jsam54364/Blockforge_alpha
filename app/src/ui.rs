@@ -9,9 +9,11 @@ use crate::font;
 
 mod controls;
 mod draw;
+pub mod items;
 mod screens;
 
 pub use controls::{BlockItem, Joy, Layout, JOY_RADII};
+pub use items::{Recipe, Slot, Stack};
 use crate::perf::Perf;
 
 /// One corner of a HUD triangle (`ui.wgsl`): pixel position, texture place, sRGB colour and
@@ -373,10 +375,15 @@ pub enum Action {
     CtlShow(u8),
     CtlReset,
     CtlDone,
-    /// The inventory: picks block `n` of `Ui::blocks` (tapping the picked one again puts it in
-    /// the hotbar), puts the picked one in the hotbar's slot, empties the slot.
-    InvPick(u16),
-    AddToHotbar,
+    /// The inventory screen: a slot tapped (see `items`), a tab of its left window
+    /// (inventory, crafting, equipment) or right window (equipment, blocks), and its MOVE
+    /// ALL, MOVE SIMILAR and SORT buttons. ClearSlot empties the hotbar slot in hand.
+    Item(Slot),
+    LeftTab(u8),
+    RightTab(u8),
+    MoveAll,
+    MoveSimilar,
+    SortItems,
     ClearSlot,
     /// The title screen's arrows under the character: turn him.
     TurnShowcase(i8),
@@ -497,8 +504,19 @@ pub struct Ui {
     /// blocks (ids, 0 = empty), the picked slot and when it last changed, and whether the
     /// block picker is open.
     pub blocks: Vec<BlockItem>,
-    pub hotbar: [u16; 9],
+    pub hotbar: [Stack; 9],
     pub slot: usize,
+    /// The character's inventory, what he wears and the crafting grid (see `items`).
+    pub inventory: [Stack; items::INV_SLOTS],
+    pub equipment: [Stack; 4],
+    pub craft: [Stack; items::CRAFT_SLOTS],
+    pub recipes: Vec<Recipe>,
+    /// The inventory screen: the slot picked up (lit), the tab each window shows, and a line
+    /// about the last tap that didn't go through.
+    pub picked: Option<Slot>,
+    pub left_tab: u8,
+    pub right_tab: u8,
+    pub item_note: Option<String>,
     slot_changed: f32,
     /// The floating stick, while it shows (the game moves it).
     pub joystick: Option<Joy>,
@@ -509,8 +527,6 @@ pub struct Ui {
     pub showcase_yaw: f32,
     /// The first `under` vertices of the title screen go under its character (the pedestal).
     pub under: usize,
-    /// The inventory's picked block (an index into `blocks`).
-    pub inv_sel: Option<usize>,
     /// A finger dragging the world list: touch, where it started, the scroll then, and
     /// whether it has moved far enough to be a drag (then it picks nothing).
     list_drag: Option<(u64, f32, usize, bool)>,
@@ -660,7 +676,15 @@ impl Ui {
             drag: None,
             add_open: false,
             blocks: Vec::new(),
-            hotbar: [0; 9],
+            hotbar: [Stack::EMPTY; 9],
+            inventory: [Stack::EMPTY; items::INV_SLOTS],
+            equipment: [Stack::EMPTY; 4],
+            craft: [Stack::EMPTY; items::CRAFT_SLOTS],
+            recipes: Vec::new(),
+            picked: None,
+            left_tab: items::LEFT_DEFAULT,
+            right_tab: items::RIGHT_DEFAULT,
+            item_note: None,
             slot: 0,
             slot_changed: -10.0,
             joystick: None,
@@ -668,7 +692,6 @@ impl Ui {
             showcase: None,
             showcase_yaw: 0.0,
             under: 0,
-            inv_sel: None,
             list_drag: None,
         }
     }
@@ -866,6 +889,9 @@ impl Ui {
                 false
             }
             Action::Open(s) => {
+                if self.screen == Screen::Inventory && s != Screen::Inventory {
+                    self.close_inventory();
+                }
                 self.screen = s;
                 self.acts_open = false;
                 self.focus = None;
@@ -895,24 +921,12 @@ impl Ui {
                 self.showcase_yaw += d as f32 * std::f32::consts::FRAC_PI_4;
                 false
             }
-            Action::InvPick(k) => {
-                let k = k as usize;
-                if k < self.blocks.len() {
-                    if self.inv_sel == Some(k) {
-                        self.apply(Action::AddToHotbar);
-                    }
-                    self.inv_sel = Some(k);
-                }
-                false
-            }
-            Action::AddToHotbar => {
-                if let Some(k) = self.inv_sel {
-                    self.apply(Action::PickBlock(k as u16));
-                }
+            Action::Item(_) | Action::LeftTab(_) | Action::RightTab(_) | Action::MoveAll | Action::MoveSimilar | Action::SortItems => {
+                self.apply_items(a);
                 false
             }
             Action::ClearSlot => {
-                self.hotbar[self.slot.min(8)] = 0;
+                self.hotbar[self.slot.min(8)] = Stack::EMPTY;
                 false
             }
             Action::Quit => {

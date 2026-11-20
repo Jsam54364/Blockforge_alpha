@@ -386,8 +386,9 @@ fn hud(w: u32, h: u32, walk: bool) -> Ui {
     u.set_surface(w, h, DP);
     u.blocks = blocks();
     for (slot, b) in u.hotbar.iter_mut().zip(&u.blocks) {
-        *slot = b.id;
+        *slot = Stack::of(b.id, 64);
     }
+    u.recipes = crate::game::recipes(&blockforge::registry::BlockRegistry::builtin());
     u.settings.walk = walk;
     u
 }
@@ -451,36 +452,190 @@ fn the_action_grid_and_the_block_picker_open_on_top() {
         let out = build(&mut u);
         assert!(out.iter().all(|v| v.pos[0] >= -30.0 && v.pos[0] <= wf + 30.0 && v.pos[1] >= -30.0 && v.pos[1] <= hf + 30.0));
         assert_eq!(on_top(&u, |a| matches!(a, Action::Press("punch" | "wave" | "revive" | "two_handed_item")) || a == Action::ToggleView), 5);
-        // The inventory closes the grid; picking a block twice fills the picked slot.
         u.apply(Action::Slot(6));
+        // The inventory closes the grid.
         u.apply(Action::ToggleInventory);
         assert!(!u.acts_open);
         assert_eq!(u.screen, Screen::Inventory);
         assert!(u.over_world(), "the game shows behind the inventory");
         check_layout(&mut u, wf, hf);
-        let n = u.blocks.len();
-        for k in 0..n {
-            let b = find(&u, Action::InvPick(k as u16));
-            assert!(b.w >= 30.0 * 2.75, "{w}x{h}: block tiles are {}px", b.w);
-        }
-        let granite = u.blocks.iter().position(|b| b.name == "Granite").expect("granite");
-        tap(&mut u, Action::InvPick(granite as u16));
-        assert_eq!(u.inv_sel, Some(granite));
-        assert_ne!(u.held_block(), u.blocks[granite].id, "one tap only picks it");
-        tap(&mut u, Action::InvPick(granite as u16));
-        assert_eq!((u.slot, u.held_block()), (6, u.blocks[granite].id));
-        assert_eq!(u.icon_of(u.held_block()), Some(granite));
-        // ADD TO HOTBAR puts the picked block in another slot; CLEAR SLOT empties it.
-        tap(&mut u, Action::Slot(2));
-        tap(&mut u, Action::AddToHotbar);
-        assert_eq!(u.hotbar[2], u.blocks[granite].id);
-        tap(&mut u, Action::ClearSlot);
-        assert_eq!(u.hotbar[2], 0);
-        build(&mut u);
-        assert!(!has(&u, Action::ClearSlot), "nothing to clear");
-        tap(&mut u, Action::Open(Screen::Playing));
-        assert_eq!(u.screen, Screen::Playing);
     }
+}
+
+/// The game's HUD with the inventory screen open.
+fn inventory(w: u32, h: u32) -> Ui {
+    let mut u = hud(w, h, true);
+    build(&mut u);
+    u.apply(Action::ToggleInventory);
+    build(&mut u);
+    u
+}
+
+#[test]
+fn the_inventory_has_two_windows_whose_tabs_change_only_their_own_window() {
+    for (w, h) in SIZES {
+        let (wf, hf) = (w as f32, h as f32);
+        let mut u = inventory(w, h);
+        u.inventory[0] = u.hotbar[0];
+        check_layout(&mut u, wf, hf);
+        // The tabs: three for the left window, two for the right, and the X.
+        for a in [Action::LeftTab(0), Action::LeftTab(1), Action::LeftTab(2), Action::RightTab(0), Action::RightTab(1), Action::Open(Screen::Playing)] {
+            find(&u, a);
+        }
+        let (l0, r1, x) = (find(&u, Action::LeftTab(0)), find(&u, Action::RightTab(1)), find(&u, Action::Open(Screen::Playing)));
+        assert!(l0.x < wf * 0.2 && r1.x > wf * 0.6 && x.x > r1.x && l0.y < hf * 0.15, "tabs in the top bar's corners");
+        // At first: the inventory (36 slots) on the left, the blocks on the right, the
+        // hotbar along the bottom between MOVE SIMILAR, MOVE ALL, SORT and the screen's edge.
+        for n in 0..36u8 {
+            let b = find(&u, Action::Item(Slot::Inv(n)));
+            assert!(b.w >= 30.0 * 2.75 && b.x + b.w < wf * 0.56, "{w}x{h}: inventory slot {n}: {} at {}", b.w, b.x);
+        }
+        for k in 0..u.blocks.len() as u16 {
+            let b = find(&u, Action::Item(Slot::Palette(k)));
+            assert!(b.w >= 30.0 * 2.75 && b.x > wf * 0.5, "{w}x{h}: block {k}");
+        }
+        let hot: Vec<_> = (0..9u8).map(|n| find(&u, Action::Item(Slot::Hotbar(n)))).collect();
+        let sort = find(&u, Action::SortItems);
+        assert!(hot.iter().all(|b| b.y > hf * 0.8 && b.y == hot[0].y) && hot[0].x > sort.x + sort.w);
+        assert!(((hot[0].x + hot[8].x + hot[8].w) * 0.5 - wf * 0.5).abs() < wf * 0.12, "the hotbar is in the middle");
+        for a in [Action::MoveSimilar, Action::MoveAll] {
+            assert!(find(&u, a).x < hot[0].x);
+        }
+        // Crafting on the left: the right window keeps its blocks.
+        tap(&mut u, Action::LeftTab(1));
+        check_layout(&mut u, wf, hf);
+        assert!(!has(&u, Action::Item(Slot::Inv(0))));
+        for n in 0..4u8 {
+            find(&u, Action::Item(Slot::Craft(n)));
+        }
+        find(&u, Action::Item(Slot::Result));
+        find(&u, Action::Item(Slot::Palette(0)));
+        // Equipment: four slots and the character between them and the window's middle.
+        tap(&mut u, Action::LeftTab(2));
+        check_layout(&mut u, wf, hf);
+        for n in 0..4u8 {
+            find(&u, Action::Item(Slot::Equip(n)));
+        }
+        let sc = u.showcase.expect("the character shows");
+        assert!(sc.x < wf * 0.56 && sc.height > 60.0 * 2.75 && sc.feet < hf * 0.85, "{sc:?}");
+        assert!(u.under > 0);
+        find(&u, Action::TurnShowcase(1));
+        // The right window's equipment tab: the left window keeps the equipment.
+        tap(&mut u, Action::RightTab(0));
+        check_layout(&mut u, wf, hf);
+        assert!(!has(&u, Action::Item(Slot::Palette(0))));
+        find(&u, Action::Item(Slot::Equip(0)));
+        // The other tabs show no character.
+        tap(&mut u, Action::LeftTab(0));
+        assert!(u.showcase.is_none());
+    }
+}
+
+#[test]
+fn slots_are_tapped_to_pick_up_and_put_down_merge_swap_and_put_away() {
+    let mut u = inventory(2400, 1080);
+    let id = |u: &Ui, name: &str| u.blocks.iter().find(|b| b.name == name).unwrap().id;
+    let (granite, dirt) = (id(&u, "Granite"), id(&u, "Dirt"));
+    let pal = |u: &Ui, name: &str| Slot::Palette(u.blocks.iter().position(|b| b.name == name).unwrap() as u16);
+    // A block from the palette fills a slot with a full stack.
+    let (pal_granite, pal_stone) = (pal(&u, "Granite"), pal(&u, "Stone"));
+    tap(&mut u, Action::Item(pal_granite));
+    assert_eq!(u.picked, Some(pal_granite));
+    tap(&mut u, Action::Item(Slot::Inv(0)));
+    assert_eq!((u.inventory[0], u.picked), (Stack::of(granite, 64), None));
+    // Picked up and put on an empty slot: it moves.
+    tap(&mut u, Action::Item(Slot::Inv(0)));
+    tap(&mut u, Action::Item(Slot::Inv(5)));
+    assert!(u.inventory[0].is_empty() && u.inventory[5] == Stack::of(granite, 64));
+    // Onto the same block: they merge up to 64, the rest stays.
+    u.inventory[1] = Stack::of(dirt, 40);
+    u.inventory[2] = Stack::of(dirt, 30);
+    build(&mut u);
+    tap(&mut u, Action::Item(Slot::Inv(1)));
+    tap(&mut u, Action::Item(Slot::Inv(2)));
+    assert_eq!((u.inventory[1], u.inventory[2]), (Stack::of(dirt, 6), Stack::of(dirt, 64)));
+    // Onto another block: they swap, between the inventory and the hotbar too.
+    tap(&mut u, Action::Item(Slot::Inv(5)));
+    tap(&mut u, Action::Item(Slot::Hotbar(4)));
+    assert_eq!(u.hotbar[4], Stack::of(granite, 64));
+    assert_eq!(u.inventory[5].count, 64);
+    assert_ne!(u.inventory[5].id, granite);
+    // Tapping the hotbar picks the slot in hand too.
+    assert_eq!(u.slot, 0);
+    tap(&mut u, Action::Item(Slot::Hotbar(4)));
+    assert_eq!((u.slot, u.held_block()), (4, granite));
+    // Back onto the palette: put away.
+    tap(&mut u, Action::Item(pal_stone));
+    assert!(u.hotbar[4].is_empty() && u.picked.is_none());
+    // Tapping a picked slot again puts it down where it was.
+    tap(&mut u, Action::Item(Slot::Inv(2)));
+    tap(&mut u, Action::Item(Slot::Inv(2)));
+    assert_eq!((u.inventory[2], u.picked), (Stack::of(dirt, 64), None));
+    // Blocks can't be worn (picked up on one tab, taken to another).
+    tap(&mut u, Action::Item(Slot::Inv(2)));
+    tap(&mut u, Action::LeftTab(2));
+    assert_eq!(u.picked, Some(Slot::Inv(2)));
+    tap(&mut u, Action::Item(Slot::Equip(0)));
+    assert!(u.equipment[0].is_empty() && u.inventory[2] == Stack::of(dirt, 64));
+    assert!(u.item_note.is_some());
+    build(&mut u);
+    check_layout(&mut u, 2400.0, 1080.0);
+}
+
+#[test]
+fn the_crafting_grid_makes_things_and_gives_back_what_is_left() {
+    let mut u = inventory(2400, 1080);
+    let id = |u: &Ui, name: &str| u.blocks.iter().find(|b| b.name == name).unwrap().id;
+    let (sand, sandstone) = (id(&u, "Sand"), id(&u, "Sandstone"));
+    u.inventory = [Stack::EMPTY; 36];
+    tap(&mut u, Action::LeftTab(1));
+    // Nothing in the grid: nothing to take.
+    tap(&mut u, Action::Item(Slot::Result));
+    assert!(u.item_note.is_some() && u.inventory.iter().all(|s| s.is_empty()));
+    // Four sand, in any cells: sandstone.
+    for n in 0..4 {
+        u.craft[n] = Stack::of(sand, 3);
+    }
+    build(&mut u);
+    assert_eq!(u.stack(Slot::Result), Stack::of(sandstone, 1));
+    tap(&mut u, Action::Item(Slot::Result));
+    tap(&mut u, Action::Item(Slot::Result));
+    assert_eq!(u.inventory[0], Stack::of(sandstone, 2));
+    assert!(u.craft.iter().all(|c| *c == Stack::of(sand, 1)));
+    // Three sand isn't a recipe.
+    u.craft[3] = Stack::EMPTY;
+    assert!(u.craft_result().is_none());
+    // Closing the inventory gives back what is still in the grid.
+    tap(&mut u, Action::Open(Screen::Playing));
+    assert!(u.craft.iter().all(|c| c.is_empty()));
+    assert_eq!(u.inventory[1], Stack::of(sand, 3));
+}
+
+#[test]
+fn move_all_move_similar_and_sort() {
+    let mut u = inventory(2400, 1080);
+    let id = |u: &Ui, name: &str| u.blocks.iter().find(|b| b.name == name).unwrap().id;
+    let (stone, dirt, sand) = (id(&u, "Stone"), id(&u, "Dirt"), id(&u, "Sand"));
+    u.inventory = [Stack::EMPTY; 36];
+    u.hotbar = [Stack::EMPTY; 9];
+    u.hotbar[0] = Stack::of(stone, 10);
+    u.hotbar[1] = Stack::of(dirt, 64);
+    u.inventory[7] = Stack::of(stone, 60);
+    build(&mut u);
+    // MOVE SIMILAR: only the stone (the inventory has stone), topping up its stack first.
+    tap(&mut u, Action::MoveSimilar);
+    assert_eq!((u.inventory[7], u.inventory[0]), (Stack::of(stone, 64), Stack::of(stone, 6)));
+    assert!(u.hotbar[0].is_empty() && u.hotbar[1] == Stack::of(dirt, 64));
+    // MOVE ALL: the rest of the hotbar.
+    u.hotbar[2] = Stack::of(sand, 5);
+    build(&mut u);
+    tap(&mut u, Action::MoveAll);
+    assert!(u.hotbar.iter().all(|s| s.is_empty()));
+    // SORT: merged and in the palette's order (stone, dirt, ..., sand), gaps at the end.
+    tap(&mut u, Action::SortItems);
+    let filled: Vec<Stack> = u.inventory.iter().copied().filter(|s| !s.is_empty()).collect();
+    assert_eq!(filled, vec![Stack::of(stone, 64), Stack::of(stone, 6), Stack::of(dirt, 64), Stack::of(sand, 5)]);
+    assert!(u.inventory[..4].iter().all(|s| !s.is_empty()));
 }
 
 #[test]

@@ -70,6 +70,9 @@ ICON_CODES = {
     "arrow_left": 0xE5DE, "arrow_right": 0xE5DF, "arrow_drop_down": 0xE5C5, "backpack": 0xF19C,
     "image": 0xE3F4, "exit_to_app": 0xE879, "star": 0xE838, "download": 0xF090,
     "description": 0xE873, "event": 0xE878, "monitor": 0xEF5B, "insert_drive_file": 0xE24D,
+    # The inventory's tabs and buttons.
+    "handyman": 0xF10B, "shield": 0xE9E0, "checkroom": 0xF19E, "view_in_ar": 0xE9FE,
+    "merge_type": 0xE252, "sort": 0xE164, "arrow_forward": 0xE5C8,
 }
 
 

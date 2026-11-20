@@ -5,7 +5,7 @@
 //! menus, and the title screen shows the character on a pedestal.
 
 use super::draw::{self, nine};
-use super::{lod_label, rect, Action, Button, HudVertex, Screen, Showcase, Ui, LOD_QUALITY, XHAIR};
+use super::{items, lod_label, rect, Action, Button, HudVertex, Screen, Showcase, Slot, Ui, LOD_QUALITY, XHAIR};
 use crate::atlas::FontId::{self, Serif};
 use crate::perf::Perf;
 
@@ -979,99 +979,218 @@ impl Ui {
         let (w, h) = self.size;
         let dp = self.dp;
         let k = self.k();
+        let [sl, st, sr, sb] = self.margins();
         rect(out, 0.0, 0.0, w, h, [0, 0, 0, 120]);
-        let t = self.top_bar(out, &[("close", Action::Open(Screen::Playing), true)]);
-        let tw = (190.0 * dp).min(t.x1 - t.x0);
-        self.button(out, Style::Bar, (t.x0, t.y, tw, t.h), "Inventory", Some("backpack"), Serif, Action::Nothing, true, true);
-        let sel = self.inv_sel.filter(|&k| k < self.blocks.len());
-        let (x0, y0, x1, y1) = self.page_box(&t);
-        let gap = 14.0 * dp;
-        let pad = 14.0 * dp;
-        // The grid: as many columns as fit at a comfortable size.
-        let n = self.blocks.len().max(1);
-        let gw_max = (x1 - x0) * 0.6;
-        let tile_gap = 4.0 * dp;
-        let size_for = |cols: usize| {
-            let rows = n.div_ceil(cols) as f32;
-            let by_w = (gw_max - 2.0 * pad + tile_gap) / cols as f32 - tile_gap;
-            let by_h = (y1 - y0 - 2.0 * pad + tile_gap) / rows - tile_gap;
-            by_w.min(by_h).min(56.0 * dp)
-        };
-        // The number of columns that gives the biggest tiles (more columns when it is a tie).
-        let cols = (3..=10).max_by(|&a, &b| size_for(a).partial_cmp(&size_for(b)).unwrap()).unwrap_or(9);
-        let tile = size_for(cols);
-        let rows = n.div_ceil(cols);
-        let gw = cols as f32 * (tile + tile_gap) - tile_gap + 2.0 * pad;
-        draw::panel(out, x0, y0, gw, y1 - y0, k);
-        self.buttons.push(Button { x: x0, y: y0, w: gw, h: y1 - y0, action: Action::Nothing });
-        let grid_h = rows as f32 * (tile + tile_gap) - tile_gap;
-        let gy = y0 + pad + ((y1 - y0 - 2.0 * pad - grid_h) * 0.5).max(0.0);
-        for i in 0..self.blocks.len() {
-            let (tx, ty) = (x0 + pad + (i % cols) as f32 * (tile + tile_gap), gy + (i / cols) as f32 * (tile + tile_gap));
-            nine(out, "slot", tx, ty, tile, tile, k * 0.5, OPAQUE);
-            draw::thumb(out, crate::gfx::icon_uv(i), tx + tile * 0.12, ty + tile * 0.1, tile * 0.76, tile * 0.76);
-            if sel == Some(i) {
-                let g = 18.0 * k * 0.6;
-                nine(out, "glow", tx - g, ty - g, tile + 2.0 * g, tile + 2.0 * g, k * 0.6, OPAQUE);
-            }
-            self.buttons.push(Button { x: tx, y: ty, w: tile, h: tile, action: Action::InvPick(i as u16) });
+        // The top bar: the left window's tabs at the left, the right window's tabs and the
+        // X at the right, the screen's name between them.
+        let (sq, gap) = (44.0 * dp, 8.0 * dp);
+        let ty = st + 6.0 * dp;
+        let mut lx = sl + 8.0 * dp;
+        for (n, (name, icon)) in items::LEFT_TABS.iter().enumerate() {
+            let on = self.left_tab as usize == n;
+            self.button(out, Style::Stone, (lx, ty, sq, sq), "", Some(icon), Serif, Action::LeftTab(n as u8), true, on);
+            let _ = name;
+            lx += sq + gap;
         }
+        let mut rx = w - sr - 8.0 * dp - sq;
+        self.button(out, Style::Stone, (rx, ty, sq, sq), "", Some("close"), Serif, Action::Open(Screen::Playing), true, false);
+        for (n, (_, icon)) in items::RIGHT_TABS.iter().enumerate().rev() {
+            rx -= sq + gap;
+            let on = self.right_tab as usize == n;
+            self.button(out, Style::Stone, (rx, ty, sq, sq), "", Some(icon), Serif, Action::RightTab(n as u8), true, on);
+        }
+        let t = Top { x0: lx + 6.0 * dp, x1: rx - 10.0 * dp, y: ty, h: sq - 2.0 * dp, below: ty + sq + 8.0 * dp };
+        self.bar_plaque(out, &t, "Inventory", Some("backpack"));
 
-        // The picked block, and the hotbar.
-        let (dx, dw) = (x0 + gw + gap, x1 - x0 - gw - gap);
-        let dh = y1 - y0;
-        draw::panel(out, dx, y0, dw, dh, k);
-        self.buttons.push(Button { x: dx, y: y0, w: dw, h: dh, action: Action::Nothing });
-        let dpad = 16.0 * dp;
-        let slot_s = ((dw - 2.0 * dpad) / 9.0).min(38.0 * dp);
-        let hb_y = y0 + dh - dpad - slot_s;
-        let hb_x = dx + (dw - 9.0 * slot_s) * 0.5;
-        // Clear Slot and Add to Hotbar over the hotbar.
-        let bh = 38.0 * dp;
-        let by = hb_y - 24.0 * dp - bh;
-        let held = self.held_block() != 0;
-        self.button_row(
-            out,
-            (dx + dpad, by, dw - 2.0 * dpad, bh),
-            &[("Clear Slot", "delete", Action::ClearSlot, held, false, 1.0), ("Add to Hotbar", "star", Action::AddToHotbar, sel.is_some(), sel.is_some(), 1.3)],
-        );
-        draw::left(out, Serif, "Hotbar", hb_x, hb_y - 12.0 * dp, 15.0 * dp, DIM, true);
-        for n in 0..9 {
-            let sx = hb_x + n as f32 * slot_s;
-            nine(out, "slot", sx, hb_y, slot_s, slot_s, k * 0.4, OPAQUE);
-            if let Some(icon) = self.icon_of(self.hotbar[n]) {
-                draw::thumb(out, crate::gfx::icon_uv(icon), sx + slot_s * 0.14, hb_y + slot_s * 0.12, slot_s * 0.72, slot_s * 0.72);
-            }
-            if n == self.slot.min(8) {
-                let g = 18.0 * k * 0.5;
-                nine(out, "glow", sx - g, hb_y - g, slot_s + 2.0 * g, slot_s + 2.0 * g, k * 0.5, OPAQUE);
-            }
-            self.buttons.push(Button { x: sx, y: hb_y, w: slot_s, h: slot_s, action: Action::Slot(n as u8) });
+        // The bottom row: MOVE SIMILAR, MOVE ALL and SORT under the left window, the hotbar
+        // in the middle, a line about what is picked at the right.
+        let (x0, y0, x1, _) = self.page_box(&t);
+        let y1 = h - sb - 6.0 * dp;
+        let row = 46.0 * dp;
+        let ry = y1 - row;
+        let wy1 = ry - 8.0 * dp;
+        let mut bx = x0 + 14.0 * dp;
+        let hot_any = self.hotbar.iter().any(|s| !s.is_empty());
+        let inv_any = self.inventory.iter().any(|s| !s.is_empty());
+        for (icon, action, on) in [("merge_type", Action::MoveSimilar, hot_any && inv_any), ("keyboard_double_arrow_up", Action::MoveAll, hot_any), ("sort", Action::SortItems, inv_any)] {
+            self.button(out, Style::Stone, (bx, ry, row, row), "", Some(icon), Serif, action, on, false);
+            bx += row + gap;
         }
-        match sel {
-            Some(i) => {
-                let name = self.blocks[i].name.clone();
-                let big = (dh * 0.3).min(70.0 * dp);
-                let top = y0 + dpad;
-                draw::thumb(out, crate::gfx::icon_uv(i), dx + dpad, top, big, big);
-                draw::left(out, Serif, &name, dx + dpad + big + 12.0 * dp, top + big * 0.5, draw::fit(Serif, &name, 24.0 * dp, dw - 3.0 * dpad - big), INK, true);
-                let ry = top + big + 10.0 * dp;
-                self.rule(out, dx + dpad, ry, dw - 2.0 * dpad);
-                let ns = 15.0 * dp;
-                let mut ny = ry + 18.0 * dp;
-                for l in draw::wrap(Serif, block_note(&name), ns, dw - 2.0 * dpad) {
-                    if ny > by - 14.0 * dp {
-                        break;
-                    }
-                    draw::left(out, Serif, &l, dx + dpad, ny, ns, DIM, true);
-                    ny += ns * 1.35;
+        let hs = row;
+        let hx = ((x0 + x1) * 0.5 - 4.5 * hs).max(bx + 6.0 * dp);
+        for n in 0..9u8 {
+            self.item_slot(out, Slot::Hotbar(n), hx + n as f32 * hs, ry, hs, n as usize == self.slot.min(8));
+        }
+        let note_x0 = hx + 9.0 * hs + 12.0 * dp;
+        let note = match (&self.item_note, self.picked) {
+            (Some(n), _) => n.clone(),
+            (None, Some(p)) => {
+                let v = self.stack(p);
+                match p {
+                    Slot::Palette(_) => format!("{}: tap a slot for it", self.item_name(v.id)),
+                    _ => format!("{} x{}: tap where it goes", self.item_name(v.id), v.count),
                 }
             }
-            None => {
-                let s = "Pick a block to put it in the hotbar.";
-                draw::centered(out, Serif, s, dx + dw * 0.5, y0 + (by - y0) * 0.45, draw::fit(Serif, s, 17.0 * dp, dw - 2.0 * dpad), DIM, true);
+            (None, None) => "Tap a block, then a slot".to_string(),
+        };
+        if x1 - note_x0 > 60.0 * dp {
+            // One line if it fits at a readable size, else two.
+            let room = x1 - note_x0;
+            let size = draw::fit(Serif, &note, 15.0 * dp, room);
+            if size >= 12.0 * dp {
+                draw::left(out, Serif, &note, note_x0, ry + row * 0.5, size, DIM, true);
+            } else {
+                let lines = draw::wrap(Serif, &note, 13.0 * dp, room);
+                for (n, l) in lines.iter().take(2).enumerate() {
+                    draw::left(out, Serif, l, note_x0, ry + row * 0.5 + (n as f32 - 0.5) * 16.0 * dp, 13.0 * dp, DIM, true);
+                }
             }
         }
+
+        // The two windows.
+        let wgap = 12.0 * dp;
+        let lw = (x1 - x0 - wgap) * 0.53;
+        let (rwx, rw) = (x0 + lw + wgap, x1 - x0 - lw - wgap);
+        let wh = (wy1 - y0).max(80.0 * dp);
+        for (x, ww) in [(x0, lw), (rwx, rw)] {
+            draw::panel(out, x, y0, ww, wh, k);
+            self.buttons.push(Button { x, y: y0, w: ww, h: wh, action: Action::Nothing });
+        }
+        let pad = 14.0 * dp;
+        // Each window's heading: its tab's icon and name.
+        let heading = |out: &mut Vec<HudVertex>, x: f32, (name, icon): (&str, &str)| {
+            draw::icon(out, icon, x + pad + 11.0 * dp, y0 + pad + 10.0 * dp, 22.0 * dp, INK);
+            draw::left(out, Serif, name, x + pad + 28.0 * dp, y0 + pad + 10.0 * dp, 20.0 * dp, INK, true);
+        };
+        let left = items::LEFT_TABS[self.left_tab as usize % items::LEFT_TABS.len()];
+        let right = items::RIGHT_TABS[self.right_tab as usize % items::RIGHT_TABS.len()];
+        heading(out, x0, left);
+        heading(out, rwx, right);
+        let top = y0 + pad + 26.0 * dp;
+        let (lbox, rbox) = ((x0 + pad, top, lw - 2.0 * pad, y0 + wh - pad - top), (rwx + pad, top, rw - 2.0 * pad, y0 + wh - pad - top));
+        match self.left_tab {
+            1 => self.draw_crafting(out, lbox),
+            2 => self.draw_equipment(out, lbox),
+            _ => {
+                let (gx, gy, gw, gh) = lbox;
+                let s = ((gw / items::INV_COLS as f32).min(gh / items::INV_ROWS as f32)).min(52.0 * dp);
+                let ox = gx + (gw - s * items::INV_COLS as f32) * 0.5;
+                let oy = gy + ((gh - s * items::INV_ROWS as f32) * 0.5).max(0.0);
+                for n in 0..items::INV_SLOTS {
+                    let (c, r) = (n % items::INV_COLS, n / items::INV_COLS);
+                    self.item_slot(out, Slot::Inv(n as u8), ox + c as f32 * s, oy + r as f32 * s, s, false);
+                }
+            }
+        }
+        match self.right_tab {
+            0 => {
+                let (gx, gy, gw, gh) = rbox;
+                let msg = "Nothing to wear yet: armour and tools will show here once the game has them.";
+                let size = 16.0 * dp;
+                for (n, l) in draw::wrap(Serif, msg, size, gw * 0.85).iter().enumerate() {
+                    draw::centered(out, Serif, l, gx + gw * 0.5, gy + gh * 0.4 + n as f32 * size * 1.4, size, DIM, true);
+                }
+            }
+            _ => {
+                let (gx, gy, gw, gh) = rbox;
+                let n = self.blocks.len().max(1);
+                let size_for = |cols: usize| (gw / cols as f32).min(gh / n.div_ceil(cols) as f32).min(56.0 * dp);
+                let cols = (3..=10).max_by(|&a, &b| size_for(a).partial_cmp(&size_for(b)).unwrap()).unwrap_or(6);
+                let s = size_for(cols);
+                let ox = gx + (gw - s * cols as f32) * 0.5;
+                for i in 0..self.blocks.len() {
+                    self.item_slot(out, Slot::Palette(i as u16), ox + (i % cols) as f32 * s, gy + (i / cols) as f32 * s, s, false);
+                }
+            }
+        }
+        self.under = out.len();
+    }
+
+    /// A slot of the inventory screen: its frame, what is in it and how many, lit while
+    /// picked up (or, for the hotbar, while in hand); tapping it is `Action::Item`.
+    fn item_slot(&mut self, out: &mut Vec<HudVertex>, slot: Slot, x: f32, y: f32, s: f32, in_hand: bool) {
+        let k = self.k();
+        let inset = s * 0.04;
+        let (x, y, s) = (x + inset, y + inset, s - 2.0 * inset);
+        nine(out, "slot", x, y, s, s, k * 0.45, OPAQUE);
+        let v = self.stack(slot);
+        if let Some(icon) = self.icon_of(v.id).filter(|_| !v.is_empty()) {
+            draw::thumb(out, crate::gfx::icon_uv(icon), x + s * 0.14, y + s * 0.11, s * 0.72, s * 0.72);
+            if v.count > 1 && !matches!(slot, Slot::Palette(_)) {
+                let c = v.count.to_string();
+                draw::right(out, Serif, &c, x + s - s * 0.08, y + s * 0.8, s * 0.32, INK, true);
+            }
+        } else if let Slot::Equip(n) = slot {
+            let l = items::EQUIP_SLOTS[n as usize % 4];
+            draw::centered(out, Serif, l, x + s * 0.5, y + s * 0.5, draw::fit(Serif, l, s * 0.26, s * 0.85), [150, 140, 125, 200], false);
+        }
+        if self.picked == Some(slot) || in_hand {
+            let g = 18.0 * k * 0.5;
+            nine(out, "glow", x - g, y - g, s + 2.0 * g, s + 2.0 * g, k * 0.5, OPAQUE);
+        }
+        self.buttons.push(Button { x, y, w: s, h: s, action: Action::Item(slot) });
+    }
+
+    /// A block's name, as the palette shows it.
+    fn item_name(&self, id: u16) -> String {
+        self.blocks.iter().find(|b| b.id == id).map_or_else(String::new, |b| b.name.clone())
+    }
+
+    /// CRAFTING: the 2 x 2 grid, an arrow and what it makes; the recipes under it.
+    fn draw_crafting(&mut self, out: &mut Vec<HudVertex>, (gx, gy, gw, gh): (f32, f32, f32, f32)) {
+        let dp = self.dp;
+        let s = (gh * 0.24).min(gw * 0.18).min(50.0 * dp);
+        let total = 2.0 * s + 50.0 * dp + s * 1.15;
+        let ox = gx + (gw - total) * 0.5;
+        let oy = gy + 6.0 * dp;
+        for n in 0..items::CRAFT_SLOTS {
+            self.item_slot(out, Slot::Craft(n as u8), ox + (n % 2) as f32 * s, oy + (n / 2) as f32 * s, s, false);
+        }
+        let ax = ox + 2.0 * s + 25.0 * dp;
+        draw::icon(out, "arrow_forward", ax, oy + s, 30.0 * dp, INK);
+        let r = s * 1.15;
+        let ready = self.craft_result().is_some();
+        self.item_slot(out, Slot::Result, ax + 25.0 * dp, oy + s - r * 0.5, r, ready);
+        // What can be made.
+        let size = 13.0 * dp;
+        let mut y = oy + 2.0 * s + 16.0 * dp;
+        draw::left(out, Serif, "Recipes", gx, y, 15.0 * dp, INK, true);
+        y += 18.0 * dp;
+        let lines: Vec<String> = self
+            .recipes
+            .iter()
+            .map(|r| {
+                let ins: Vec<String> = r.inputs.iter().map(|(id, n)| format!("{n} {}", self.item_name(*id))).collect();
+                format!("{}  =  {} {}", ins.join(" + "), r.output.count, self.item_name(r.output.id))
+            })
+            .collect();
+        let cols = 2;
+        let col_w = gw / cols as f32;
+        let rows = ((((gy + gh) - y) / (size * 1.45)).floor() as usize).max(1);
+        for (n, l) in lines.iter().enumerate().take(rows * cols) {
+            let (c, row) = (n / rows.max(1), n % rows.max(1));
+            draw::left(out, Serif, l, gx + c as f32 * col_w, y + row as f32 * size * 1.45, draw::fit(Serif, l, size, col_w - 8.0 * dp), DIM, true);
+        }
+    }
+
+    /// EQUIPMENT: what he wears, in a column, and the character himself (turned by the
+    /// arrows under him).
+    fn draw_equipment(&mut self, out: &mut Vec<HudVertex>, (gx, gy, gw, gh): (f32, f32, f32, f32)) {
+        let dp = self.dp;
+        let s = (gh / 4.0).min(54.0 * dp);
+        for n in 0..4u8 {
+            self.item_slot(out, Slot::Equip(n), gx, gy + n as f32 * s, s, false);
+        }
+        // The character: in the rest of the window, on his feet above the arrows.
+        let (cx0, cw) = (gx + s + 12.0 * dp, gw - s - 12.0 * dp);
+        let arrows = 40.0 * dp;
+        let feet = gy + gh - arrows - 10.0 * dp;
+        let height = (feet - gy - 6.0 * dp).max(40.0 * dp);
+        let cx = cx0 + cw * 0.5;
+        self.showcase = Some(Showcase { x: cx, feet, height, yaw: self.showcase_yaw });
+        let ay = gy + gh - arrows;
+        self.button(out, Style::Stone, (cx - arrows * 1.6, ay, arrows, arrows), "", Some("chevron_left"), Serif, Action::TurnShowcase(-1), true, false);
+        self.button(out, Style::Stone, (cx + arrows * 0.6, ay, arrows, arrows), "", Some("chevron_right"), Serif, Action::TurnShowcase(1), true, false);
     }
 
     /// The HUD in the game: crosshair, stats, the game's buttons.

@@ -104,6 +104,9 @@ pub struct RenderOptions {
     pub time_of_day: f64,
     pub clouds: bool,
     pub god_rays: bool,
+    /// A character to draw over the HUD's first `.1` vertices (the inventory's equipment
+    /// tab): where he stands; his triangles as given to `set_portrait`.
+    pub figure: Option<(crate::ui::Showcase, usize)>,
 }
 
 fn as_bytes<T>(s: &[T]) -> &[u8] {
@@ -605,6 +608,12 @@ pub struct Gfx {
     pipe_char: wgpu::RenderPipeline,
     bind_char: wgpu::BindGroup,
     char_buf: wgpu::Buffer,
+    /// The character drawn in a menu over the world (`RenderOptions::figure`), with globals of
+    /// its own.
+    portrait_buf: wgpu::Buffer,
+    portrait_verts: u32,
+    globals_portrait: wgpu::Buffer,
+    bind_portrait: wgpu::BindGroup,
     char_verts: u32,
     /// Clouds around the camera, and the mesh on the GPU (buffer, quads).
     clouds: Clouds,
@@ -806,6 +815,7 @@ impl Gfx {
             })
         };
         let globals_solid = make_globals("globals solid");
+        let globals_portrait = make_globals("globals portrait");
         let globals_water = make_globals("globals water");
         let make_bind = |label: &str, buf: &wgpu::Buffer| {
             device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -824,6 +834,7 @@ impl Gfx {
             })
         };
         let bind_solid = make_bind("bind solid", &globals_solid);
+        let bind_portrait = make_bind("bind portrait", &globals_portrait);
         let bind_water = make_bind("bind water", &globals_water);
 
         // Solid terrain is one-sided: cull back faces (the winding is covered by tests).
@@ -858,6 +869,12 @@ impl Gfx {
             &shader,
             format,
         );
+        let portrait_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("portrait"),
+            size: (MAX_CHARACTER_VERTS * std::mem::size_of::<rig::Vertex>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         let char_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("character vertices"),
             size: (MAX_CHARACTER_VERTS * std::mem::size_of::<rig::Vertex>()) as u64,
@@ -941,6 +958,10 @@ impl Gfx {
             pipe_char,
             bind_char,
             char_buf,
+            portrait_buf,
+            portrait_verts: 0,
+            globals_portrait,
+            bind_portrait,
             char_verts: 0,
             clouds: Clouds::new(0xC10D),
             cloud_mesh: None,
@@ -989,6 +1010,16 @@ impl Gfx {
             self.queue.write_buffer(&self.char_buf, 0, as_bytes(&verts[..n]));
         }
         self.char_verts = n as u32;
+    }
+
+    /// The character drawn in a menu (`RenderOptions::figure`): triangles with his feet at
+    /// the origin, facing +Z.
+    pub fn set_portrait(&mut self, verts: &[rig::Vertex]) {
+        let n = (verts.len().min(MAX_CHARACTER_VERTS) / 3) * 3;
+        if n > 0 {
+            self.queue.write_buffer(&self.portrait_buf, 0, as_bytes(&verts[..n]));
+        }
+        self.portrait_verts = n as u32;
     }
 
     /// The open world's generator (biome colours come from it).
@@ -1395,6 +1426,15 @@ impl Gfx {
             self.queue.write_buffer(&self.hud_buf, 0, as_bytes(&hud[..hud_verts]));
             self.write_ui_screen();
         }
+        // A character over the menu: the HUD under him in the main pass, then he and the rest
+        // in a pass of their own (the depth buffer cleared for him).
+        let figure = opts.figure.filter(|_| hud_verts > 0 && self.portrait_verts > 0);
+        if let Some((sc, _)) = figure {
+            let (w, h) = (self.config.width as f32, self.config.height as f32);
+            let g = self.showcase_globals(sc, w, h);
+            self.queue.write_buffer(&self.globals_portrait, 0, as_bytes(std::slice::from_ref(&g)));
+        }
+        let hud_under = figure.map_or(hud_verts, |(_, u)| u.min(hud_verts));
 
         let acquire_start = Instant::now();
         let (frame, offscreen) = if capture {
@@ -1517,11 +1557,11 @@ impl Gfx {
             }
 
             // HUD (crosshair, stats, menu)
-            if hud_verts > 0 {
+            if hud_under > 0 {
                 pass.set_pipeline(&self.ui.pipe);
                 pass.set_bind_group(0, &self.ui.bind, &[]);
                 pass.set_vertex_buffer(0, self.hud_buf.slice(0..(hud_verts * std::mem::size_of::<HudVertex>()) as u64));
-                pass.draw(0..hud_verts as u32, 0..1);
+                pass.draw(0..hud_under as u32, 0..1);
             }
         }
         self.last_quads = quads;
@@ -1542,6 +1582,35 @@ impl Gfx {
             pass.set_bind_group(0, &self.bind_solid, &[]);
             pass.set_bind_group(1, &self.post.bind_mask, &[]);
             pass.draw(0..3, 0..1);
+        }
+        // (after the ray mask, which reads this frame's depth)
+        if figure.is_some() {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("portrait"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.post.depth_view,
+                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(math::DEPTH_CLEAR), store: wgpu::StoreOp::Discard }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&self.pipe_char);
+            pass.set_bind_group(0, &self.bind_portrait, &[]);
+            pass.set_bind_group(1, &self.bind_char, &[]);
+            pass.set_vertex_buffer(0, self.portrait_buf.slice(..));
+            pass.draw(0..self.portrait_verts, 0..1);
+            if hud_under < hud_verts {
+                pass.set_pipeline(&self.ui.pipe);
+                pass.set_bind_group(0, &self.ui.bind, &[]);
+                pass.set_vertex_buffer(0, self.hud_buf.slice(0..(hud_verts * std::mem::size_of::<HudVertex>()) as u64));
+                pass.draw(hud_under as u32..hud_verts as u32, 0..1);
+            }
         }
         if let Some(t) = self.timer.as_mut() {
             t.encode(&mut encoder);

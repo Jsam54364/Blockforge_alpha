@@ -260,6 +260,7 @@ impl App {
             time_of_day: game.clock.hours(),
             clouds: settings.clouds,
             god_rays: settings.god_rays,
+            figure: None,
         }
     }
 
@@ -375,8 +376,17 @@ impl App {
         let (under, figure) = (ui.under, ui.showcase);
         let result = match (&mut self.game, over_world) {
             (Some(game), true) => {
-                let opts = Self::render_options(game);
+                let mut opts = Self::render_options(game);
                 g.set_character(game.player.triangles());
+                // The inventory's equipment tab shows the character (the title screen's idling
+                // figure).
+                if let Some(sc) = figure {
+                    let dt = seconds - self.showcase_time;
+                    let verts = self.showcase.get_or_insert_with(title::Showcase::new).update(dt, sc.yaw);
+                    g.set_portrait(verts);
+                    opts.figure = Some((sc, under));
+                }
+                self.showcase_time = seconds;
                 let render_cam = game.render_cam();
                 let view_blocks = game.view_blocks();
                 g.render(&mut game.client, &render_cam, view_blocks, &opts, &self.hud)

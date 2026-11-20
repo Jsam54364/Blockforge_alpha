@@ -213,12 +213,26 @@ and quads drawn. The HUD and menus are drawn by a small immediate-mode layer (`u
 * **Place** (round, shows the hotbar's block): puts that block on the face you look at, then
   again every 0.22 s while held (after 0.4 s), never inside you or the character.
 * **Hotbar:** nine blocks along the bottom; tap one to pick it (its name shows for a moment).
-  The backpack button at its end opens the inventory over the game: every placeable block in a
-  grid of slots on the left; the picked one's picture, name and a line about it on the right,
-  above the hotbar. Tap a block to pick it, tap it again (or Add to Hotbar) to put it in the
-  hotbar's picked slot; tap a hotbar slot there to choose which; Clear Slot empties it. The hotbar is saved with each world (`state.txt`). The block pictures are little
-  cubes drawn on the CPU from each block's own textures when the renderer starts, kept in
-  the bottom of the world-thumbnails texture.
+  The backpack button at its end opens the inventory over the game (`ui/items.rs`).
+* **Inventory screen:** two windows side by side, each with its own tabs in the top bar. The
+  left window's tabs (top left): **Inventory** (36 slots, four rows of nine), **Crafting** (a
+  2 x 2 grid, what it makes, and the recipes) and **Equipment** (Head, Body, Legs and Feet
+  slots beside the character, turned by the arrows under him). The right window's tabs (top
+  right, by the X): **Gear** (things to wear; none exist yet) and **Blocks** (the creative
+  palette). Along the bottom: **Move Similar** (hotbar stacks of blocks the inventory already
+  holds go in with them), **Move All** (the whole hotbar into the inventory), **Sort** (the
+  inventory merged and ordered), the hotbar in the middle, and a line about what is picked.
+  Items are stacks of up to 64. Tap a slot to pick it up (it lights), then tap where it goes:
+  onto an empty slot it moves, onto the same block the stacks merge, onto another they swap.
+  A palette block fills a slot with a full stack; something tapped back onto the palette is
+  put away. Tapping a hotbar slot also takes it in hand. Crafting takes any arrangement of a
+  recipe's blocks (four sand make sandstone, grass makes dirt...): tap the result to make it
+  once, into the inventory; closing the screen puts what is left in the grid back. The world
+  is creative: placing a block doesn't use it up. The hotbar, the inventory and the grid are
+  saved with each world (`state.txt`: `hotbar=stone*64,...`; older saves' plain names read as
+  full stacks). The block pictures are little cubes drawn on the CPU from each block's own
+  textures when the renderer starts, kept in the bottom of the world-thumbnails texture; the
+  character in the Equipment tab is drawn in a pass of its own over the menu.
 * **Jump** (also rises in flight), **Down** (flight only: sinks), **Roll, Crouch, Crawl, Act**
   (walking only), and **Pause**.
 * **Building by touch** (optional, Settings > Controls > Building: Touch + Buttons): on the
