@@ -114,14 +114,31 @@ pub struct Client {
 /// columns holds an opaque block somewhere (every block shape covers its whole footprint).
 /// Not "its bottom layer is solid": a cave crossing the bottom layer far under the ground
 /// would then leave the column uncovered for good, and LOD terrain drawn over the real one.
+///
+/// Water closes a column too: under a river or the sea it is what shows from above, and the
+/// bed under it may lie in a chunk below the streamed window.
 fn bottom_is_closed(reg: &BlockRegistry, chunk: &Chunk) -> bool {
-    let closes = |s: BlockState| reg.get(s).opaque;
+    let water = reg.id("water");
+    let closes = |s: BlockState| reg.get(s).opaque || Some(s.id()) == water;
     if let Some(s) = chunk.uniform_state() {
         return closes(s);
     }
     let n = CHUNK_SIZE as u8;
-    // Bottom-up: in ground chunks the first block already settles most columns.
-    (0..n).all(|z| (0..n).all(|x| (0..n).any(|y| closes(chunk.get(LocalPos { x, y, z }.index())))))
+    // Bottom-up: in ground chunks the first block already settles most columns. A few open
+    // columns still count as closed: a cave shaft running right through a chunk is a hole a
+    // block or two wide, dark from above either way.
+    let mut open = 0;
+    for z in 0..n {
+        for x in 0..n {
+            if !(0..n).any(|y| closes(chunk.get(LocalPos { x, y, z }.index()))) {
+                open += 1;
+                if open > 24 {
+                    return false;
+                }
+            }
+        }
+    }
+    true
 }
 
 /// Which chunk columns around the camera show their real surface (meshed and within the

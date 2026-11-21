@@ -22,7 +22,7 @@ fn main() {
     let seed = std::env::var("SEED").ok().and_then(|v| v.parse().ok()).unwrap_or(1234);
     let g = WorldGen::new(seed, &reg);
     lod_bench(&g, &reg);
-    for biome in ["Ancient Wildwood", "Amberwood", "Winterpine Taiga", "Giants' Grasslands", "Stonefang Mountains", "Murkwater Swamp", "Emerald Oasis", "Petrified Kingdom", "Blightlands", "Sunscorched Expanse"] {
+    for biome in ["river", "Ancient Wildwood", "Amberwood", "Winterpine Taiga", "Giants' Grasslands", "Stonefang Mountains", "Murkwater Swamp", "Emerald Oasis", "Petrified Kingdom", "Blightlands", "Sunscorched Expanse"] {
         // The nearest to the origin, in 4-chunk steps out to 12 km.
         let Some((cx, cz)) = (0..200)
             .flat_map(|r: i32| (-r..=r).flat_map(move |i| [(i * 4, -r * 4), (i * 4, r * 4), (-r * 4, i * 4), (r * 4, i * 4)]))

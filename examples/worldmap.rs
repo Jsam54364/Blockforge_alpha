@@ -7,6 +7,7 @@ use std::io::Write;
 fn colour(biome: &str) -> [f32; 3] {
     match biome {
         "sea" => [0.16, 0.32, 0.62],
+        "river" => [0.25, 0.5, 0.95],
         "Ancient Wildwood" => [0.12, 0.42, 0.14],
         "Amberwood" => [0.78, 0.5, 0.16],
         "Frostpeak Highlands" => [0.9, 0.93, 0.97],

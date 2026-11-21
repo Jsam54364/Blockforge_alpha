@@ -475,6 +475,20 @@ cover decided separately.
   its ground (a surface, a block showing through it in patches, a subsurface) and its two
   stones (under the ground, on cliffs, in boulders and spires: ground three blocks steeper
   than a neighbour shows stone). **To add a biome, add an entry and a rule in `choose`.**
+* **Rivers** (`Terrain::river`): along the zero lines of a large, domain-warped noise, so
+  they meander for kilometres. They start as streams a few blocks wide in the hills (none
+  on the mountains) and widen to ~25 blocks towards the coast, where they meet the sea.
+  Their surface follows the land seen from 600 blocks up, so it falls gently towards the
+  sea a block at a time, with a bed of gravel and sand (mud in the swamp), a lip of bank
+  above the water and valley sides easing down to it. Each column knows how high water
+  fills it (`Column::water`, the sea's or a river's); nothing grows in rivers.
+* **Groves** (`WorldGen::grove`): trees grow thick where a 150-block noise is high and thin
+  out into glades where it is low; forest biomes stay mostly wooded, open lands gather
+  their few trees into copses. Distant terrain draws the same groves as canopy.
+* **Realistic tree sizes**, per species (`Wood::size`, a percent of an oak's): a young tree
+  4-6 m, a grown oak's crown ~15 m, old giants ~25-30 m, redwoods 34-50 m, conifers
+  8-18 m (giant spruces up to ~29 m); birches, pines, figs and ironwoods smaller, elms a
+  little bigger.
 * **The Hollow Earth** (`WorldGen::is_cavern`): under kilometre-wide regions, huge caverns
   from y -50 to -120, flooded below -104 (underground lakes), with glowing cave moss on
   their floors, glow crystals on their ceilings, giant glowcaps and fungalwood mushrooms,

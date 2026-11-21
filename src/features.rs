@@ -145,6 +145,36 @@ pub struct Wood {
     pub log: u16,
     /// 0: none (dead and petrified trees).
     pub leaves: u16,
+    /// The species' size, in percent of an oak's (birches and pines are slimmer and
+    /// shorter, elms a little taller...).
+    pub size: u8,
+}
+
+impl Wood {
+    fn s(&self) -> f32 {
+        self.size as f32 / 100.0
+    }
+}
+
+/// A broadleaf tree's height to the top of its trunk, for its size class and species
+/// (the first random draw, shared by `broadleaf` and `lod_top`). Real trees: a young one
+/// 4-6 m, a grown oak 8-13 m of trunk under a crown reaching ~15 m, an old giant ~25 m.
+fn broadleaf_height(rng: &mut Rng, size: u8, w: Wood) -> f32 {
+    w.s() * match size {
+        0 => 4.0 + rng.next_f32() * 2.5,
+        1 => 8.0 + rng.next_f32() * 5.0,
+        _ => 18.0 + rng.next_f32() * 8.0,
+    }
+}
+
+/// A redwood's height: 34-50 m (the real ones grow taller still, but slowly).
+fn redwood_height(rng: &mut Rng, w: Wood) -> f32 {
+    w.s() * (34.0 + rng.next_f32() * 16.0)
+}
+
+/// A conifer's height: 8-18 m, a giant 13-29 m.
+fn conifer_height(rng: &mut Rng, giant: bool, w: Wood) -> f32 {
+    w.s() * (8.0 + rng.next_f32() * 10.0) * if giant { 1.6 } else { 1.0 }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -304,12 +334,8 @@ impl Feature {
         let cone = |top: f32, r: f32, depth: f32, b: u16| (d < r).then(|| (top - depth * d / r, b));
         match self.kind {
             Kind::Broadleaf(w, size) => {
-                let h = match size {
-                    0 => 5.0 + rng.next_f32() * 3.0,
-                    1 => 10.0 + rng.next_f32() * 6.0,
-                    _ => 24.0 + rng.next_f32() * 12.0,
-                };
-                let leaf = [2.2, 2.8, 3.6][size.min(2) as usize];
+                let h = broadleaf_height(&mut rng, size, w);
+                let leaf = [2.0, 2.5, 3.2][size.min(2) as usize] * (0.6 + 0.4 * w.s());
                 if w.leaves == 0 {
                     return dome(0.85 * h, h * 0.35 + 1.0, h * 0.3, w.log);
                 }
@@ -317,11 +343,11 @@ impl Feature {
                 dome(0.85 * h + cr * 0.95, h * 0.45 + leaf, h * 0.35 + cr * 0.5, w.leaves)
             }
             Kind::Redwood(w) => {
-                let h = 45.0 + rng.next_f32() * 25.0;
-                cone(h + 3.5, 12.0, 0.58 * h, w.leaves).or_else(|| (d < 3.0).then_some((h, w.log)))
+                let h = redwood_height(&mut rng, w);
+                cone(h + 3.5, h * 0.22 + 2.0, 0.58 * h, w.leaves).or_else(|| (d < 3.0).then_some((h, w.log)))
             }
             Kind::Conifer { wood, open, giant } => {
-                let h = (9.0 + rng.next_f32() * 12.0) * if giant { 2.0 } else { 1.0 };
+                let h = conifer_height(&mut rng, giant, wood);
                 if open {
                     dome(h + 1.0, (h * 0.22 + 0.8) * 1.1, h * 0.35, wood.leaves)
                 } else {
@@ -329,7 +355,7 @@ impl Feature {
                 }
             }
             Kind::Palm(w) => {
-                let h = 7.0 + rng.next_f32() * 7.0;
+                let h = 6.0 + rng.next_f32() * 5.0;
                 let a = rng.next_f32() * std::f32::consts::TAU;
                 let bend = 0.25 + rng.next_f32() * 0.35;
                 let (ox, oz) = (a.cos() * bend * h, a.sin() * bend * h);
@@ -345,22 +371,22 @@ impl Feature {
                 dome(h + 5.5, 6.5, 5.0, w.leaves)
             }
             Kind::Cypress(w) => {
-                let h = 14.0 + rng.next_f32() * 9.0;
-                dome(h + 2.5, 6.0, 3.0, w.leaves)
+                let h = 11.0 + rng.next_f32() * 7.0;
+                dome(h + 2.5, 5.5, 3.0, w.leaves)
             }
             Kind::Bamboo(w) => dome(14.0, 3.0, 4.0, w.leaves),
             Kind::Dead { wood, giant } => {
                 if giant {
-                    let h = 16.0 + rng.next_f32() * 10.0;
+                    let h = 12.0 + rng.next_f32() * 6.0;
                     dome(h, 3.0, h * 0.2, wood.log)
                 } else {
-                    let h = 5.0 + rng.next_f32() * 8.0;
+                    let h = 4.0 + rng.next_f32() * 6.0;
                     (d < 1.0).then_some((h, wood.log))
                 }
             }
             Kind::Mushroom { cap, giant, .. } => {
                 let (h, _r, cr) = if giant {
-                    (10.0 + rng.next_f32() * 9.0, rng.next_f32(), 5.0 + rng.next_f32() * 3.0)
+                    (8.0 + rng.next_f32() * 6.0, rng.next_f32(), 4.0 + rng.next_f32() * 2.5)
                 } else {
                     (3.0 + rng.next_f32() * 3.0, 0.0, 2.0 + rng.next_f32() * 1.2)
                 };
@@ -464,11 +490,14 @@ fn roots(c: &mut Canvas, rng: &mut Rng, base: [f32; 3], r: f32, n: u32, reach: f
 }
 
 fn broadleaf(c: &mut Canvas, rng: &mut Rng, base: [f32; 3], w: Wood, size: u8, seed: u64) {
-    let (h, r, limbs, depth, leaf_r) = match size {
-        0 => (5.0 + rng.next_f32() * 3.0, 0.45, 3, 0, 2.2),
-        1 => (10.0 + rng.next_f32() * 6.0, 0.9 + rng.next_f32() * 0.5, 4, 1, 2.8),
-        _ => (24.0 + rng.next_f32() * 12.0, 2.4 + rng.next_f32() * 1.1, 6, 2, 3.6),
+    let h = broadleaf_height(rng, size, w);
+    let k = w.s();
+    let (r, limbs, depth, leaf_r) = match size {
+        0 => (0.45, 3, 0, 2.0),
+        1 => ((0.8 + rng.next_f32() * 0.4) * k, 4, 1, 2.5),
+        _ => ((1.9 + rng.next_f32() * 0.8) * k, 6, 2, 3.2),
     };
+    let leaf_r = leaf_r * (0.6 + 0.4 * k);
     let (lx, lz) = around(rng);
     let lean = 0.06 + rng.next_f32() * 0.08;
     let crown = h * 0.55;
@@ -504,8 +533,8 @@ fn broadleaf(c: &mut Canvas, rng: &mut Rng, base: [f32; 3], w: Wood, size: u8, s
 }
 
 fn redwood(c: &mut Canvas, rng: &mut Rng, base: [f32; 3], w: Wood, seed: u64) {
-    let h = 45.0 + rng.next_f32() * 25.0;
-    let r = 2.2 + rng.next_f32() * 1.0;
+    let h = redwood_height(rng, w);
+    let r = 1.7 + rng.next_f32() * 0.8;
     let foot = add(base, [0.0, -3.0, 0.0], 1.0);
     // A flared foot, then a straight column tapering to the top.
     c.segment(foot, add(base, [0.0, 4.0, 0.0], 1.0), r * 1.45, r, full(w.log), Mode::Force);
@@ -533,9 +562,8 @@ fn redwood(c: &mut Canvas, rng: &mut Rng, base: [f32; 3], w: Wood, seed: u64) {
 }
 
 fn conifer(c: &mut Canvas, rng: &mut Rng, base: [f32; 3], w: Wood, open: bool, giant: bool, seed: u64) {
-    let k = if giant { 2.0 } else { 1.0 };
-    let h = (9.0 + rng.next_f32() * 12.0) * k;
-    let r = if giant { 1.3 } else if h > 15.0 { 0.9 } else { 0.45 };
+    let h = conifer_height(rng, giant, w);
+    let r = if giant { 1.2 } else if h > 14.0 { 0.9 } else { 0.45 };
     c.segment(add(base, [0.0, -1.5, 0.0], 1.0), add(base, [0.0, h, 0.0], 1.0), r, 0.45, full(w.log), Mode::Force);
     if giant {
         roots(c, rng, base, r, 5, 3.0, w.log);
@@ -570,7 +598,7 @@ fn conifer(c: &mut Canvas, rng: &mut Rng, base: [f32; 3], w: Wood, open: bool, g
 }
 
 fn palm(c: &mut Canvas, rng: &mut Rng, base: [f32; 3], w: Wood) {
-    let h = 7.0 + rng.next_f32() * 7.0;
+    let h = 6.0 + rng.next_f32() * 5.0;
     let (dx, dz) = around(rng);
     let bend = 0.25 + rng.next_f32() * 0.35;
     let mut prev = add(base, [0.0, -1.0, 0.0], 1.0);
@@ -641,7 +669,7 @@ fn willow(c: &mut Canvas, rng: &mut Rng, base: [f32; 3], w: Wood, seed: u64) {
 }
 
 fn cypress(c: &mut Canvas, rng: &mut Rng, base: [f32; 3], w: Wood, seed: u64) {
-    let h = 14.0 + rng.next_f32() * 9.0;
+    let h = 11.0 + rng.next_f32() * 7.0;
     // A swollen, buttressed foot, then a slim trunk.
     c.segment(add(base, [0.0, -3.0, 0.0], 1.0), add(base, [0.0, 3.0, 0.0], 1.0), 2.6, 1.0, full(w.log), Mode::Force);
     c.segment(add(base, [0.0, 3.0, 0.0], 1.0), add(base, [0.0, h, 0.0], 1.0), 1.0, 0.5, full(w.log), Mode::Force);
@@ -693,7 +721,7 @@ fn bamboo(c: &mut Canvas, rng: &mut Rng, base: [f32; 3], w: Wood) {
 }
 
 fn dead(c: &mut Canvas, rng: &mut Rng, base: [f32; 3], w: Wood, giant: bool, seed: u64) {
-    let (h, r) = if giant { (16.0 + rng.next_f32() * 10.0, 1.8 + rng.next_f32() * 0.8) } else { (5.0 + rng.next_f32() * 8.0, 0.5 + rng.next_f32() * 0.4) };
+    let (h, r) = if giant { (12.0 + rng.next_f32() * 6.0, 1.5 + rng.next_f32() * 0.6) } else { (4.0 + rng.next_f32() * 6.0, 0.5 + rng.next_f32() * 0.3) };
     // A twisted trunk.
     let mut at = add(base, [0.0, -1.5, 0.0], 1.0);
     let mut rad = r;
@@ -718,7 +746,7 @@ fn dead(c: &mut Canvas, rng: &mut Rng, base: [f32; 3], w: Wood, giant: bool, see
 }
 
 fn mushroom(c: &mut Canvas, rng: &mut Rng, base: [f32; 3], stem: u16, cap: u16, giant: bool) {
-    let (h, r, cr) = if giant { (10.0 + rng.next_f32() * 9.0, 1.2 + rng.next_f32() * 0.8, 5.0 + rng.next_f32() * 3.0) } else { (3.0 + rng.next_f32() * 3.0, 0.45, 2.0 + rng.next_f32() * 1.2) };
+    let (h, r, cr) = if giant { (8.0 + rng.next_f32() * 6.0, 1.0 + rng.next_f32() * 0.6, 4.0 + rng.next_f32() * 2.5) } else { (3.0 + rng.next_f32() * 3.0, 0.45, 2.0 + rng.next_f32() * 1.2) };
     let (dx, dz) = around(rng);
     let bend = rng.next_f32() * 0.15;
     let top = [base[0] + dx * h * bend, base[1] + h, base[2] + dz * h * bend];

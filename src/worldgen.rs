@@ -21,7 +21,7 @@ use crate::registry::BlockRegistry;
 use crate::climate::{Climate, ClimateSample};
 use crate::noise::{smoothstep, Fbm};
 use crate::rng::{hash3, Rng};
-use crate::terrain::{Terrain, TerrainSample};
+use crate::terrain::{Terrain, TerrainSample, NO_RIVER};
 
 pub const SEA_LEVEL: i32 = 0;
 /// Bumped whenever the same seed would generate different terrain: worlds saved by an
@@ -58,6 +58,9 @@ pub struct Column {
     pub max_top: i32,
     /// How much of the Hollow Earth is under this column (0: none).
     pub hollow: f32,
+    /// The highest block water fills to (the sea's, or a river's), same indexing.
+    pub water: Vec<i32>,
+    pub max_water: i32,
 }
 
 impl Column {
@@ -129,7 +132,7 @@ impl FeatureGrid {
 
 /// Feature tiers: big things on a coarse grid, ordinary ones on a fine grid, and the
 /// Hollow Earth's on their own.
-const TIERS: [(u8, i32); 3] = [(0, 24), (1, 6), (2, 10)];
+const TIERS: [(u8, i32); 3] = [(0, 24), (1, 5), (2, 10)];
 
 pub struct WorldGen {
     seed: u64,
@@ -157,6 +160,8 @@ pub struct WorldGen {
     hollow: Fbm,
     /// Where a biome's second ground block shows through in patches.
     patches: Fbm,
+    /// Groves and glades: where trees grow thick (see `grove`).
+    groves: Fbm,
     fb: FeatureBlocks,
     ores: HashMap<&'static str, u16>,
     rock_ids: Vec<u16>,
@@ -213,6 +218,16 @@ fn surface_from(h: f32, neighbours: [f32; 4]) -> i32 {
     4 * t + if rising { 2 } else { 0 }
 }
 
+/// The highest block water fills to over terrain `t`: the sea's, or a river's (its
+/// surface is the top of that block).
+pub fn water_level(t: &TerrainSample) -> i32 {
+    if t.water > NO_RIVER {
+        (t.water as i32 - 1).max(SEA_LEVEL)
+    } else {
+        SEA_LEVEL
+    }
+}
+
 /// A uniform number 0..1 from a hash.
 fn unit(h: u64) -> f32 {
     (h >> 40) as f32 * (1.0 / 16_777_216.0)
@@ -245,18 +260,27 @@ impl WorldGen {
                 mossy: id(&format!("{}_mossy", b.stone)),
             })
             .collect();
-        let wood = |log: &str, leaves: &str| Wood { log: id(log), leaves: if leaves.is_empty() { 0 } else { id(leaves) } };
+        // Species sizes in percent of an oak's.
+        let size = |sp: &str| match sp {
+            "maple" | "fir" | "petrified" => 90,
+            "birch" | "frostpine" | "stonebark" | "goldbark" | "golden_oak" => 85,
+            "fig" | "larch" | "seapine" | "glowwood" => 80,
+            "ironwood" | "cragpine" => 70,
+            "elm" => 105,
+            _ => 100,
+        };
+        let wood = |sp: &str, log: &str, leaves: &str| Wood { log: id(log), leaves: if leaves.is_empty() { 0 } else { id(leaves) }, size: size(sp) };
         let mut woods = HashMap::new();
         for sp in [
             "redwood", "elder", "maple", "goldbark", "birch", "fir", "frostpine", "pine", "spruce", "larch", "ironwood", "cragpine", "palm", "acacia", "bamboo", "fig", "cypress",
             "willow", "frostwood", "silverwood", "blightwood", "ashwood", "deadwood", "stonebark", "glowwood", "fungalwood", "seapine", "elm",
         ] {
-            woods.insert(sp, wood(&format!("{sp}_log"), &format!("{sp}_leaves")));
+            woods.insert(sp, wood(sp, &format!("{sp}_log"), &format!("{sp}_leaves")));
         }
-        woods.insert("oak", wood("log", "leaves"));
-        woods.insert("golden_oak", wood("log", "golden_oak_leaves"));
-        woods.insert("driftwood", wood("driftwood_log", ""));
-        woods.insert("petrified", wood("petrified_log", ""));
+        woods.insert("oak", wood("oak", "log", "leaves"));
+        woods.insert("golden_oak", wood("golden_oak", "log", "golden_oak_leaves"));
+        woods.insert("driftwood", wood("driftwood", "driftwood_log", ""));
+        woods.insert("petrified", wood("petrified", "petrified_log", ""));
         let fb = FeatureBlocks {
             woods,
             moss: id("moss_block"),
@@ -310,6 +334,7 @@ impl WorldGen {
             oasis: Fbm::new(s(13), 260.0, 2, 0.5),
             hollow: Fbm::new(s(14), 1600.0, 2, 0.5),
             patches: Fbm::new(s(15), 22.0, 2, 0.55),
+            groves: Fbm::new(s(16), 150.0, 3, 0.5),
             fb,
             ores,
             rock_ids,
@@ -416,8 +441,14 @@ impl WorldGen {
         let b = self.biome_for(x, z, c, alt, t.inland, cell);
         let bb = self.biome_blocks[b];
         let stone = if self.patches.at(x as f32 + 900.0, z as f32, cell) > 0.25 { bb.stone_b } else { bb.stone };
-        // Under water (top <= sea level), and beaches: dry ground at sea level near the coast.
-        // Inland lakes and wetland ponds keep the biome's ground right to the water's edge.
+        // Under water (top <= its level), and beaches: dry ground at sea level near the coast.
+        // Inland lakes and wetland ponds keep the biome's ground right to the water's edge;
+        // river beds are gravel and sand (clay and mud in the swamps).
+        let wl = water_level(t);
+        if wl > SEA_LEVEL && top <= wl {
+            let s = if b == biome::MURKWATER { self.mud } else if self.patches.at(x as f32 + 400.0, z as f32, cell) > 0.0 { self.gravel } else { self.sand };
+            return (s, s, stone);
+        }
         if top <= SEA_LEVEL || (top - 1 <= SEA_LEVEL && t.inland < 0.35) {
             let s = if b == biome::MURKWATER {
                 self.mud
@@ -458,7 +489,13 @@ impl WorldGen {
     pub fn describe(&self, x: i32, z: i32) -> GroundInfo {
         let t = self.terrain.sample(x as f32, z as f32, 1.0);
         let c = self.climate.at(x as f32, z as f32, t.smooth.max(0.0), t.inland, 1.0);
-        let biome = if t.height < (SEA_LEVEL + 1) as f32 { "sea" } else { BIOMES[self.biome_at(x, z, &t, 1.0)].name };
+        let biome = if t.height < (SEA_LEVEL + 1) as f32 {
+            "sea"
+        } else if t.height.round() as i32 <= water_level(&t) {
+            "river"
+        } else {
+            BIOMES[self.biome_at(x, z, &t, 1.0)].name
+        };
         GroundInfo { biome, landform: self.terrain.landform_at(x as f32, z as f32).name, height: t.height, climate: c }
     }
 
@@ -537,10 +574,11 @@ impl WorldGen {
         let hq = if cell <= 1 { self.surface_q(x, z) } else { 4 * t.height.round() as i32 };
         let top = hq.div_euclid(4);
         let slab = hq.rem_euclid(4) >= 2;
-        // Water fills every block above the terrain up to SEA_LEVEL, and there are no
-        // half-slabs under water (see `block_at`).
-        if top <= SEA_LEVEL {
-            return (4 * (SEA_LEVEL + 1), self.water);
+        // Water fills every block above the terrain up to the sea's or a river's level, and
+        // there are no half-slabs under water (see `block_at`).
+        let wl = water_level(&t);
+        if top <= wl {
+            return (4 * (wl + 1), self.water);
         }
         let slope = if cell <= 1 {
             let h = |x: i32, z: i32| self.terrain.sample(x as f32, z as f32, 1.0).height.round() as i32;
@@ -618,9 +656,18 @@ impl WorldGen {
         }
         if cell > 8 && b != self.water && ground == q {
             let t = self.terrain.sample(x as f32, z as f32, cell as f32);
-            let (cover, height, name) = self.canopy(self.biome_at(x, z, &t, cell as f32));
+            let biome = self.biome_at(x, z, &t, cell as f32);
+            let (cover, height, name) = self.canopy(biome);
             let h = hash3(self.seed ^ 0xCA90, x, cell, z);
-            if cover > 0.0 && unit(h) < cover {
+            // Groves show as solid canopy, glades as open ground, and the edge between them
+            // a little ragged.
+            let g = self.grove(x, z, cell as f32);
+            let density = cover * match biome {
+                biome::WILDWOOD | biome::TAIGA | biome::AMBERWOOD | biome::MURKWATER | biome::OASIS => 0.45 + 0.6 * g,
+                biome::FROSTPEAK | biome::BLIGHT | biome::PETRIFIED | biome::STORMBREAK => 0.2 + g,
+                _ => 0.1 + 2.0 * g * g,
+            };
+            if cover > 0.0 && density > 0.42 + 0.2 * unit(h) {
                 if let Some(&blk) = self.canopy_blocks.get(name) {
                     let top = ground + (4.0 * height * (0.7 + 0.6 * unit(h.rotate_left(21)))) as i32;
                     (q, b) = (top, blk);
@@ -632,10 +679,12 @@ impl WorldGen {
 
     /// Just the height part of `lod_surface` (much cheaper: no climate).
     pub fn lod_height(&self, x: i32, z: i32, cell: i32) -> i32 {
-        let hq = self.height_q_filtered(x, z, cell);
+        let t = self.terrain.sample(x as f32, z as f32, cell.max(1) as f32);
+        let hq = if cell <= 1 { self.surface_q(x, z) } else { 4 * t.height.round() as i32 };
         let top = hq.div_euclid(4);
-        if top <= SEA_LEVEL {
-            return 4 * (SEA_LEVEL + 1);
+        let wl = water_level(&t);
+        if top <= wl {
+            return 4 * (wl + 1);
         }
         4 * top + if hq.rem_euclid(4) >= 2 { 2 } else { 0 }
     }
@@ -649,7 +698,7 @@ impl WorldGen {
     pub fn column(&self, cx: i32, cz: i32) -> Column {
         let n = (CHUNK_SIZE * CHUNK_SIZE) as usize;
         let (mut heights, mut surface, mut subsurface) = (Vec::with_capacity(n), Vec::with_capacity(n), Vec::with_capacity(n));
-        let (mut rock, mut stone) = (Vec::with_capacity(n), Vec::with_capacity(n));
+        let (mut rock, mut stone, mut water) = (Vec::with_capacity(n), Vec::with_capacity(n), Vec::with_capacity(n));
         let (mut min_top, mut max_top) = (i32::MAX, i32::MIN);
         // The terrain with a one-block border: slabs depend on the neighbouring heights.
         const W: i32 = CHUNK_SIZE + 2;
@@ -675,6 +724,7 @@ impl WorldGen {
                 surface.push(surf);
                 subsurface.push(sub);
                 stone.push(st);
+                water.push(water_level(&t));
                 rock.push(self.rock_at(x, z, 1.0));
             }
         }
@@ -683,7 +733,8 @@ impl WorldGen {
             .iter()
             .map(|&(dx, dz)| self.hollow_at(cx * CHUNK_SIZE + dx, cz * CHUNK_SIZE + dz))
             .fold(0.0f32, f32::max);
-        Column { cx, cz, height_q: heights, surface, subsurface, stone, rock, min_top, max_top, hollow }
+        let max_water = water.iter().copied().max().unwrap_or(SEA_LEVEL);
+        Column { cx, cz, height_q: heights, surface, subsurface, stone, rock, min_top, max_top, hollow, water, max_water }
     }
 
     /// Two thin noise "sheets" intersecting give tunnel-like caves. Constants need tuning.
@@ -701,19 +752,19 @@ impl WorldGen {
     /// The terrain block at `(wx, wy, wz)` (without features), for a column whose partial
     /// block is at `top` with `rem` quarters in it. `zone`: the Hollow Earth under it.
     #[allow(clippy::too_many_arguments)]
-    fn block_at(&self, wx: i32, wy: i32, wz: i32, top: i32, rem: i32, surf: u16, sub: u16, stone: u16, rock: u16, zone: f32) -> BlockState {
+    fn block_at(&self, wx: i32, wy: i32, wz: i32, top: i32, rem: i32, surf: u16, sub: u16, stone: u16, rock: u16, zone: f32, wl: i32) -> BlockState {
         if wy <= BEDROCK_Y {
             return BlockState::full(self.bedrock);
         }
 
         if wy > top {
-            return if wy <= SEA_LEVEL { BlockState::full(self.water) } else { AIR };
+            return if wy <= wl { BlockState::full(self.water) } else { AIR };
         }
         if wy == top {
             // The partial block: a half-slab when the fractional height is >= 0.5, but never
             // under water: a slab there would leave a pocket of air in the sea (slabs are not
             // waterlogged) and its sides would z-fight with the water beside it.
-            if wy <= SEA_LEVEL {
+            if wy <= wl {
                 return BlockState::full(self.water);
             }
             if rem >= 2 {
@@ -748,7 +799,7 @@ impl WorldGen {
         let hq = col.height_q_at(lx as usize, lz as usize);
         let i = lz as usize * CHUNK_SIZE as usize + lx as usize;
         let zone = if col.hollow > 0.0 { self.hollow_at(wx, wz) } else { 0.0 };
-        self.block_at(wx, wy, wz, hq.div_euclid(4), hq.rem_euclid(4), col.surface[i], col.subsurface[i], col.stone[i], col.rock[i], zone)
+        self.block_at(wx, wy, wz, hq.div_euclid(4), hq.rem_euclid(4), col.surface[i], col.subsurface[i], col.stone[i], col.rock[i], zone, col.water[i])
     }
 
     // ------------------------------------------------------------------ features
@@ -788,11 +839,14 @@ impl WorldGen {
         let t = self.terrain.sample(x as f32, z as f32, 1.0);
         let y = t.height.round() as i32 - 1;
         let b = self.biome_at(x, z, &t, 1.0);
+        if water_level(&t) > SEA_LEVEL && y < water_level(&t) + 1 {
+            return None; // nothing grows in rivers
+        }
         let underwater = y < SEA_LEVEL + 1;
         if underwater && !(b == biome::STORMBREAK && tier == 0) && !(b == biome::MURKWATER && y >= SEA_LEVEL - 2) {
             return None;
         }
-        let kind = if tier == 0 { self.big_feature(b, roll, u, x, z, underwater)? } else { self.small_feature(b, roll, u)? };
+        let kind = if tier == 0 { self.big_feature(b, roll, u, x, z, underwater)? } else { self.small_feature(b, roll, u, x, z)? };
         if underwater && !matches!(kind, Kind::Spire { .. } | Kind::Cypress(_) | Kind::Willow(_)) {
             return None;
         }
@@ -821,6 +875,23 @@ impl WorldGen {
             }
         }
         false
+    }
+
+    /// How thick the trees grow at `(x, z)`: 0 in a glade .. 1 in the heart of a grove.
+    pub fn grove(&self, x: i32, z: i32, cell: f32) -> f32 {
+        smoothstep(-0.3, 0.2, self.groves.at(x as f32, z as f32, cell))
+    }
+
+    /// What the grove noise does to a biome's tree density: forests keep most of it and
+    /// fill up in their groves; open lands gather their few trees into copses.
+    fn grove_factor(&self, b: usize, x: i32, z: i32) -> f32 {
+        let g = self.grove(x, z, 1.0);
+        use biome::*;
+        match b {
+            WILDWOOD | TAIGA | AMBERWOOD | MURKWATER | OASIS => 0.45 + 0.6 * g,
+            FROSTPEAK | BLIGHT | PETRIFIED | STORMBREAK => 0.2 + 1.0 * g,
+            _ => 0.1 + 2.0 * g * g,
+        }
     }
 
     fn w(&self, sp: &str) -> Wood {
@@ -865,7 +936,7 @@ impl WorldGen {
         pick(u, &table)
     }
 
-    fn small_feature(&self, b: usize, roll: f32, u: f32) -> Option<Kind> {
+    fn small_feature(&self, b: usize, roll: f32, u: f32, x: i32, z: i32) -> Option<Kind> {
         let bb = self.biome_blocks[b];
         let mossy = self.fb.mossy[b];
         let boulder = |m: bool| Kind::Boulder { stone: bb.stone, moss: if m { mossy } else { 0 }, big: false };
@@ -875,7 +946,7 @@ impl WorldGen {
         let con = |sp: &str, open: bool| Kind::Conifer { wood: self.w(sp), open, giant: false };
         use biome::*;
         let (chance, table): (f32, Vec<(f32, Kind)>) = match b {
-            WILDWOOD => (0.8, vec![
+            WILDWOOD => (0.95, vec![
                 (0.3, Kind::Broadleaf(self.w("elder"), 1)),
                 (0.15, Kind::Broadleaf(self.w("oak"), 1)),
                 (0.1, Kind::Broadleaf(self.w("oak"), 0)),
@@ -886,7 +957,7 @@ impl WorldGen {
                 (0.05, small_cap(self.fb.brown_cap)),
                 (0.05, con("redwood", false)),
             ]),
-            AMBERWOOD => (0.65, vec![
+            AMBERWOOD => (0.85, vec![
                 (0.28, Kind::Broadleaf(self.w("maple"), 1)),
                 (0.2, Kind::Broadleaf(self.w("birch"), 1)),
                 (0.14, Kind::Broadleaf(self.w("golden_oak"), 1)),
@@ -901,10 +972,10 @@ impl WorldGen {
             STONEFANG => (0.3, vec![(0.3, con("cragpine", true)), (0.15, Kind::Broadleaf(self.w("ironwood"), 0)), (0.35, boulder(false)), (0.2, bush("cragpine"))]),
             SUNSCORCHED => (0.12, vec![(0.6, Kind::Cactus(self.fb.cactus)), (0.12, Kind::Acacia(self.w("acacia"))), (0.18, boulder(false)), (0.1, Kind::Dead { wood: self.w("deadwood"), giant: false })]),
             OASIS => (0.6, vec![(0.4, Kind::Palm(self.w("palm"))), (0.2, Kind::Broadleaf(self.w("fig"), 1)), (0.2, Kind::Bamboo(self.w("bamboo"))), (0.15, bush("fig")), (0.05, boulder(true))]),
-            MURKWATER => (0.65, vec![(0.35, Kind::Cypress(self.w("cypress"))), (0.3, Kind::Willow(self.w("willow"))), (0.1, log("willow")), (0.1, small_cap(self.fb.brown_cap)), (0.1, bush("willow")), (0.05, Kind::Stump(self.w("cypress").log))]),
+            MURKWATER => (0.8, vec![(0.35, Kind::Cypress(self.w("cypress"))), (0.3, Kind::Willow(self.w("willow"))), (0.1, log("willow")), (0.1, small_cap(self.fb.brown_cap)), (0.1, bush("willow")), (0.05, Kind::Stump(self.w("cypress").log))]),
             TUNDRA => (0.12, vec![(0.45, boulder(false)), (0.2, con("larch", false)), (0.2, Kind::Broadleaf(self.w("birch"), 0)), (0.15, bush("larch"))]),
             GLACIER => (0.08, vec![(0.5, Kind::Crystals(self.fb.frost_crystal)), (0.3, boulder(false)), (0.2, Kind::IceSpike { ice: self.fb.packed_ice, core: self.fb.glacial_ice, big: false })]),
-            TAIGA => (0.8, vec![(0.35, con("spruce", false)), (0.3, con("pine", true)), (0.1, bush("spruce")), (0.1, boulder(true)), (0.08, log("pine")), (0.07, Kind::Stump(self.w("spruce").log))]),
+            TAIGA => (0.95, vec![(0.35, con("spruce", false)), (0.3, con("pine", true)), (0.1, bush("spruce")), (0.1, boulder(true)), (0.08, log("pine")), (0.07, Kind::Stump(self.w("spruce").log))]),
             BLIGHT => (0.4, vec![(0.35, Kind::Dead { wood: self.w("blightwood"), giant: false }), (0.3, Kind::Dead { wood: self.w("ashwood"), giant: false }), (0.15, boulder(false)), (0.1, small_cap(self.fb.red_cap)), (0.1, Kind::Stump(self.w("ashwood").log))]),
             PETRIFIED => (0.3, vec![
                 (0.3, Kind::Broadleaf(self.w("petrified"), 1)),
@@ -917,6 +988,9 @@ impl WorldGen {
             GRASSLANDS => (0.06, vec![(0.35, Kind::Broadleaf(self.w("oak"), 1)), (0.25, Kind::Broadleaf(self.w("elm"), 1)), (0.25, bush("oak")), (0.15, boulder(false))]),
             _ => (0.0, vec![]),
         };
+        // Forests grow in groves: dense where the grove noise is high, thinning to glades
+        // (and, in open country, gathering scattered trees into copses).
+        let chance = chance * self.grove_factor(b, x, z);
         if roll >= chance {
             return None;
         }
@@ -1051,16 +1125,16 @@ impl WorldGen {
         if y1 <= BEDROCK_Y {
             return Chunk::uniform(BlockState::full(self.bedrock));
         }
-        if y0 > col.max_top + FEATURE_UP && y0 > SEA_LEVEL {
+        if y0 > col.max_top + FEATURE_UP && y0 > col.max_water {
             return Chunk::uniform(AIR);
         }
         let deep = col.hollow <= 0.0 && y0 > BEDROCK_Y && y1 < col.min_top - 16 && y1 < CAVE_FLOOR && col.rock.iter().all(|r| *r == col.rock[0]);
         let features = if deep || !extras { Vec::new() } else { self.features_for(pos, col) };
-        if y0 > col.max_top && y0 > SEA_LEVEL && features.is_empty() {
+        if y0 > col.max_top && y0 > col.max_water && features.is_empty() {
             return Chunk::uniform(AIR);
         }
         let mut buf = vec![if deep { BlockState::full(col.rock[0]) } else { AIR }; (CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE) as usize];
-        if !deep && !(y0 > col.max_top && y0 > SEA_LEVEL) {
+        if !deep && !(y0 > col.max_top && y0 > col.max_water) {
             self.terrain_into(pos, col, &mut buf);
         }
         if extras {
@@ -1100,7 +1174,7 @@ impl WorldGen {
                 let zone = if in_hollow { self.hollow_at(wx, wz) } else { 0.0 };
                 for ly in 0..CHUNK_SIZE {
                     let wy = y0 + ly;
-                    let mut state = self.block_at(wx, wy, wz, top, rem, surf, sub, stone, rock, zone);
+                    let mut state = self.block_at(wx, wy, wz, top, rem, surf, sub, stone, rock, zone, col.water[i]);
                     if zone > 0.0 && !state.is_air() && state.id() != self.water && wy < top - 1 && wy > HOLLOW_BOTTOM - 2 {
                         // The Hollow Earth's own rock, glowing moss on its floors and
                         // crystals on its ceilings.
@@ -1174,7 +1248,7 @@ mod tests {
                         .or_insert_with(|| g.generate(ChunkPos::new(cx, cy, cz), &col, false));
                     let l = LocalPos { x: lx as u8, y: top.rem_euclid(CHUNK_SIZE) as u8, z: lz as u8 };
                     let s = chunk.get(l.index());
-                    if top <= SEA_LEVEL {
+                    if top <= col.water[lz * CHUNK_SIZE as usize + lx] {
                         // Under water: water, never a slab with a pocket of air above it.
                         assert_eq!(s, BlockState::full(g.water_id()), "at {cx},{cz} {lx},{lz}");
                         wet += 1;
@@ -1347,6 +1421,31 @@ mod tests {
         let f = g.features_for(ChunkPos::new(cx, cy0 + 1, cz), &col);
         assert!(!f.is_empty());
         assert_eq!(g.generate_chunk(ChunkPos::new(cx, cy0 + 1, cz), &col), g.generate_chunk(ChunkPos::new(cx, cy0 + 1, cz), &g.column(cx, cz)));
+    }
+
+    #[test]
+    fn rivers_flow_above_the_sea_in_beds_cut_into_the_land() {
+        let (_, g) = make();
+        // A river column well above the sea: water from its bed up to its level, then air.
+        let (x, z): (i32, i32) = (0..400_000)
+            .map(|i: i32| ((i % 800) * 6 - 2400, (i / 800) * 6 - 1500))
+            .find(|&(x, z)| {
+                let t = g.terrain.sample(x as f32, z as f32, 1.0);
+                water_level(&t) >= SEA_LEVEL + 2 && (t.height.round() as i32) < water_level(&t)
+            })
+            .expect("a river");
+        let (cx, cz) = (x.div_euclid(CHUNK_SIZE), z.div_euclid(CHUNK_SIZE));
+        let col = g.column(cx, cz);
+        let i = (z.rem_euclid(CHUNK_SIZE) * CHUNK_SIZE + x.rem_euclid(CHUNK_SIZE)) as usize;
+        let (wl, top) = (col.water[i], col.height_q[i].div_euclid(4));
+        assert!(wl > top);
+        for y in top..=wl {
+            assert_eq!(g.seed_block(&col, x, y, z), BlockState::full(g.water), "water at {y}");
+        }
+        assert!(g.seed_block(&col, x, wl + 1, z).is_air());
+        let bed = g.seed_block(&col, x, top - 1, z).id();
+        assert!([g.sand, g.gravel, g.mud].contains(&bed));
+        assert_eq!(g.describe(x, z).biome, "river");
     }
 
     #[test]
