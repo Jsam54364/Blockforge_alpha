@@ -26,7 +26,7 @@ use crate::terrain::{Terrain, TerrainSample, NO_RIVER};
 pub const SEA_LEVEL: i32 = 0;
 /// Bumped whenever the same seed would generate different terrain: worlds saved by an
 /// older generator are kept apart (their edits would land on different ground).
-pub const WORLDGEN_VERSION: u32 = 5;
+pub const WORLDGEN_VERSION: u32 = 6;
 pub const BEDROCK_Y: i32 = -128;
 /// No caves below this; deep chunks collapse to a single uniform entry (except under the
 /// Hollow Earth, whose tunnels go down to its caverns).
