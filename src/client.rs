@@ -317,10 +317,17 @@ impl Client {
                     let o = p.origin();
                     let h = CHUNK_SIZE as f32 * 0.5;
                     let c = [o.x as f32 + h - self.camera[0], o.y as f32 + h - self.camera[1], o.z as f32 + h - self.camera[2]];
+                    let closed = self.closed_bottom.contains(&p);
                     if c[0] * c[0] + c[1] * c[1] + c[2] * c[2] > d2_max {
-                        break;
+                        // Too far to be drawn. Above the ground that is only a treetop
+                        // missing (tall trees reach into chunks high above it); the chunk
+                        // that closes the column off must be drawn.
+                        if closed {
+                            break;
+                        }
+                        continue;
                     }
-                    if self.closed_bottom.contains(&p) {
+                    if closed {
                         cov.set(cx, cz);
                         break;
                     }
