@@ -247,6 +247,20 @@ impl Player {
                 from[1] += self.lift * 0.5;
                 at[1] += self.lift * 0.5;
             }
+            // Under a low canopy the shoulder can be in the leaves: start from his head then.
+            let solid_at = |q: [f64; 3]| {
+                let cell = BlockPos { x: q[0].floor() as i32, y: q[1].floor() as i32, z: q[2].floor() as i32 };
+                client.solid_span(cell).flatten().is_some_and(|(lo, hi)| {
+                    let f = q[1] - q[1].floor();
+                    f >= lo as f64 - 0.15 && f <= hi as f64 + 0.15
+                })
+            };
+            for alt in [[head[0], head[1], head[2]], [head[0], head[1] - 0.35, head[2]], [out.position[0], out.position[1] + 1.0, out.position[2]]] {
+                if !solid_at(from) {
+                    break;
+                }
+                from = alt;
+            }
             // Keep the camera out of the ground and walls: walk toward where it wants to be
             // and stop short of the first solid block.
             let d = [at[0] - from[0], at[1] - from[1], at[2] - from[2]];
@@ -264,7 +278,7 @@ impl Player {
             for i in 1..=steps {
                 let t = i as f64 / steps as f64;
                 if inside(t) {
-                    free = ((i as f64 - 1.5) / steps as f64).max(0.05);
+                    free = ((i as f64 - 1.5) / steps as f64).max(0.0);
                     break;
                 }
             }
@@ -386,7 +400,7 @@ mod tests {
             assert!(if i % 2 == 1 { ahead > -0.5 } else { ahead < 0.5 }, "camera {ahead:.2} ahead on frame {i}");
             let q = p.position();
             assert!(!solid_at(&client, [q[0], q[1] + 0.9, q[2]]), "his middle is inside a block at {q:?} (frame {i})");
-            assert!(!solid_at(&client, [eye[0] as f64, eye[1] as f64, eye[2] as f64]), "the camera is inside a block at {eye:?}");
+            assert!(!solid_at(&client, [eye[0] as f64, eye[1] as f64, eye[2] as f64]), "the camera is inside a block at {eye:?} (frame {i}, him at {q:?})");
             airborne += !p.ctl.is_grounded() as u32;
             std::thread::sleep(Duration::from_millis(1));
         }

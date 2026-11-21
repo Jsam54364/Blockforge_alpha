@@ -461,12 +461,42 @@ cover decided separately.
   a pole, and the bands repeat beyond) and drops 1.5 C per 10 blocks of altitude, so peaks
   are snowy. Rainfall has Earth-like belts (wet equator, dry subtropics, wet mid-latitudes)
   plus its own map, and coasts are wetter.
-* **Biomes emerge from the climate** (`biome::BIOMES`): the first entry whose temperature,
-  rainfall and altitude ranges match wins. Each names its surface and subsurface blocks.
-  **To add a biome, add an entry** (more specific ones first). Today: snowy peaks, glacier,
-  bare rock, scree, tundra, boreal forest, cold steppe, temperate forest, grassland, steppe,
-  desert, savanna, rainforest, plus beaches and sea floors.
-* New players start at the nearest temperate lowland to the origin (`find_spawn`). The stats
+* **The 15 biomes** (`biome.rs`): chosen from the climate, the altitude, the distance to
+  the coast and large region noises for the places to discover. Frostpeak Highlands (cold
+  peaks, green below and snowbound up high) and Stonefang Mountains on the high ground;
+  Crystal Glacier, Whitewind Tundra and Winterpine Taiga in the cold; Ancient Wildwood,
+  Amberwood and Giants' Grasslands in the temperate lands by rainfall; Sunscorched Expanse
+  with Emerald Oasis pockets in the hot dry lands, Emerald Oasis also where it is hot and
+  wet; Murkwater Swamp in warm wet lowlands; Stormbreak Coast along temperate shores; the
+  Blightlands and the Petrified Kingdom where their region noises are high. Each names
+  its ground (a surface, a block showing through it in patches, a subsurface) and its two
+  stones (under the ground, on cliffs, in boulders and spires: ground three blocks steeper
+  than a neighbour shows stone). **To add a biome, add an entry and a rule in `choose`.**
+* **The Hollow Earth** (`WorldGen::is_cavern`): under kilometre-wide regions, huge caverns
+  from y -50 to -120, flooded below -104 (underground lakes), with glowing cave moss on
+  their floors, glow crystals on their ceilings, giant glowcaps and fungalwood mushrooms,
+  glowwood trees and crystal clusters. Caves reach down to them there, and sinkholes open
+  from the surface.
+* **Natural features** (`features.rs`): every feature is a pure function of its anchor, so
+  each chunk draws its own part of it and the parts meet. Big ones sit on a 24-block grid
+  (ancient trees, redwoods, spires, arches, big boulders and fallen logs, skeletons, ice
+  spikes), ordinary ones on a 6-block grid, kept out of the big ones' way. Trees grow like
+  Vintage Story's (limbs lose width as they go, bend and fork, leaf clusters at their
+  ends) with the procedural-tree mods' forked trunks, buttress roots and layered crowns:
+  broadleaf trees in three sizes (ancient giants up to ~40 blocks with roots spreading
+  ~10 blocks and sometimes a hollow trunk you can walk into), 45-70 block redwoods,
+  layered or open conifers (giant spruces in the taiga), palms, flat-topped acacias,
+  weeping willows, buttressed swamp cypresses with knees, bamboo clumps, twisted dead trees,
+  petrified trees, giant mushrooms. Small details: bushes, stumps, fallen logs with moss,
+  mossy boulders, cacti, crystal clusters, fossil boulders.
+* **Ore veins** in the rock of every chunk, by depth and biome: coal, iron, copper, gold
+  deep down, silver and rubies or sapphires in the mountains, rock salt in the drylands,
+  amber in Amberwood, fossils in the Petrified Kingdom and the grasslands, blightshard in
+  the Blightlands, frost crystals in the glacier, glow crystals near the Hollow Earth.
+* Distant (LOD) terrain shows the ground only: trees appear with the real chunks.
+* `cargo run --release --example chunk_bench` times chunk generation in a few biomes
+  (well under a millisecond a chunk on a desktop).
+* New players start on the nearest open, gentle ground in the Giants' Grasslands, clear of trees (`find_spawn`). The stats
   overlay shows the biome, temperature, rainfall and landform under the camera.
 * `cargo run --release --example worldmap -- <seed> <blocks per pixel> map.ppm` draws a
   top-down map of the biomes.

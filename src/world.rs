@@ -291,7 +291,8 @@ impl World {
     fn column_top_below(&mut self, x: i32, z: i32, top_edit: Option<i32>) -> ColumnTop {
         let col = self.column(x.div_euclid(CHUNK_SIZE), z.div_euclid(CHUNK_SIZE));
         let hq = col.height_q_at(x.rem_euclid(CHUNK_SIZE) as usize, z.rem_euclid(CHUNK_SIZE) as usize);
-        // Nothing generated is above the terrain's top block or the sea; edits may be.
+        // The terrain's top block or the sea, or an edit above them (trees and other
+        // features are left out: distant terrain doesn't draw them).
         let mut y = (hq.div_euclid(4) + 1).max(SEA_LEVEL);
         if let Some(e) = top_edit {
             y = y.max(e);
@@ -367,8 +368,28 @@ mod tests {
     fn column_tops_follow_edits_whether_or_not_chunks_are_loaded() {
         let mut w = world();
         let stone = w.registry.state("stone").unwrap();
-        let (x, z) = (7, 9);
         // The real top of the column, read from generated chunks.
+        let real_top_at = |w: &mut World, x: i32, z: i32| -> (i32, u16) {
+            for y in (-128..400).rev() {
+                let p = BlockPos::new(x, y, z);
+                if !w.has_chunk(p.chunk()) {
+                    load(w, p.chunk());
+                }
+                let s = w.get_block(p).unwrap();
+                if !s.is_air() {
+                    return (4 * y + s.shape().y_range_q().1, s.id());
+                }
+            }
+            unreachable!()
+        };
+        // A column with no tree over it (column tops leave trees out).
+        let (x, z) = (0..64)
+            .map(|i| (7 + i % 8, 9 + i / 8))
+            .find(|&(x, z)| {
+                let t = w.column_top(x, z);
+                (t.top_q, t.block) == real_top_at(&mut w, x, z)
+            })
+            .expect("open ground");
         let real_top = |w: &mut World| -> (i32, u16) {
             for y in (-128..400).rev() {
                 let p = BlockPos::new(x, y, z);
