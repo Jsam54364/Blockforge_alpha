@@ -780,6 +780,7 @@ impl Ui {
                 ("Fog", on_off(s.fog, Action::ToggleFog)),
                 ("Clouds", on_off(s.clouds, Action::ToggleClouds)),
                 ("God Rays", on_off(s.god_rays, Action::ToggleRays)),
+                ("Shaders", Control::Stepper(crate::shadows::Quality::from_index(s.shaders).label().into(), Action::CycleShaders, Action::CycleShaders)),
                 if self.vsync_supported {
                     ("VSync", on_off(s.vsync, Action::ToggleVsync))
                 } else {

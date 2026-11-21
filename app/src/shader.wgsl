@@ -29,6 +29,13 @@ struct Globals {
     night: vec4<f32>,        // x: how much of the night photo (stars, moon) shows
     cloud: vec4<f32>,        // clouds: x, z of the window's corner in the world, base height, fade distance
     rays: vec4<f32>,         // god rays: xy = the sun on screen (uv), z = strength
+    // ---- Shadows and the shader-pack look (see app/src/shadows.rs) ----
+    shadow_mat: array<mat4x4<f32>, 2>, // world -> near / far shadow map
+    shadow: vec4<f32>,       // x, y: half widths of the maps (blocks), z: strength (0 = off), w: map size
+    light: vec4<f32>,        // xyz: towards the light that casts the shadows (sun or moon); w: soft taps (1 or 4)
+    light_color: vec4<f32>,  // rgb: its direct light; w: foliage sways (0 / 1)
+    look: vec4<f32>,         // x: bounce light, y: colour grading, z: warm block light, w: shader look on (0 / 1)
+    foliage: array<vec4<u32>, 32>, // one bit per texture layer: leaves and ferns
 };
 
 @group(0) @binding(0) var<uniform> g: Globals;
@@ -43,6 +50,10 @@ struct Globals {
 @group(0) @binding(6) var sky_sampler: sampler;
 // The night sky photo: stars, Milky Way and moon (background taken out), the whole sphere.
 @group(0) @binding(7) var night_map: texture_2d<f32>;
+// Shadow maps (depth from the light) and their comparison sampler.
+@group(0) @binding(8) var shadow_near: texture_depth_2d;
+@group(0) @binding(9) var shadow_far: texture_depth_2d;
+@group(0) @binding(10) var shadow_cmp: sampler_comparison;
 
 struct VsIn {
     @location(0) packed: vec2<u32>,
@@ -60,6 +71,11 @@ struct VsOut {
     // Water surfaces only: how close the shore is, 0 in open water (two blocks or more from
     // it), 1 touching a block, interpolated across the face.
     @location(5) shore: f32,
+    // Direct light from the sun (or moon) on the surface, before shadows: the shader takes it
+    // away where the shadow map says something is in the way. `color` has the rest.
+    @location(6) direct: vec3<f32>,
+    // How much sky the block sees (0..1).
+    @location(7) open: f32,
 };
 
 // Texture coordinates for a face, from a position in blocks: one texture per block, upright
@@ -78,6 +94,32 @@ fn face_uv(face: u32, p: vec3<f32>) -> vec2<f32> {
 
 // How far a water surface sits below the top of its block (like Minecraft's): 4 of 32 pixels.
 const WATER_SINK: f32 = 0.125;
+
+fn is_foliage(tex: u32) -> bool {
+    if (tex >= 4096u) {
+        return false;
+    }
+    return ((g.foliage[tex / 128u][(tex / 32u) % 4u] >> (tex % 32u)) & 1u) == 1u;
+}
+
+// Leaves sway: every corner moves by a function of where it is, so corners that blocks share
+// move together and no cracks open between them. Gusts come and go.
+fn sway(p: vec3<f32>) -> vec3<f32> {
+    let t = g.flags.y;
+    let gust = 0.55 + 0.45 * sin(t * 0.37 + p.x * 0.021 + p.z * 0.017);
+    let a = sin(t * 1.9 + p.x * 0.71 + p.y * 0.43 + p.z * 0.29);
+    let b = sin(t * 2.6 + p.z * 0.83 - p.x * 0.31 + p.y * 0.2);
+    return vec3<f32>(a * 0.05, a * b * 0.015, b * 0.04) * gust;
+}
+
+// Light from glowing blocks: white and linear without the shader look; with it, warm (torch
+// and lantern orange) and falling off faster, so it pools around the light.
+fn block_light(blk: f32) -> vec3<f32> {
+    if (g.look.z > 0.5) {
+        return vec3<f32>(1.25, 0.80, 0.48) * pow(blk, 1.7) + vec3<f32>(0.04) * blk;
+    }
+    return vec3<f32>(blk);
+}
 
 fn face_normal(f: u32) -> vec3<f32> {
     var n = array<vec3<f32>, 6>(
@@ -114,7 +156,11 @@ fn vs_main(v: VsIn) -> VsOut {
     let sky = f32((b >> 16u) & 15u) / 15.0;
     let blk = f32((b >> 20u) & 15u) / 15.0;
 
-    let world = v.origin.xyz + local;
+    var world = v.origin.xyz + local;
+    let leafy = is_foliage(tex);
+    if (leafy && g.light_color.w > 0.5) {
+        world += sway(world);
+    }
     // Water has no ambient occlusion: on its surface the AO bits say how far the shore is
     // (blockforge::mesh::shore_corners: 0 touching .. 3 two blocks or more).
     let water = tex == u32(g.flags.z + 0.5);
@@ -123,8 +169,27 @@ fn vs_main(v: VsIn) -> VsOut {
     var o: VsOut;
     o.clip = g.view_proj * vec4<f32>(world, 1.0);
     // Sky, sun and moon light for this face's direction (sky::face_light), dimmed by ambient
-    // occlusion and by how much sky the block sees; block light (glowstone) on top.
-    o.color = g.face_light[min(face, 5u)].rgb * (ao_f * max(sky, 0.25)) + vec3<f32>(blk);
+    // occlusion and by how much sky the block sees; block light (glowstone) on top. The direct
+    // part (from the light that casts shadows) goes separately, for the shadows to take away;
+    // with shadows off the two add up to exactly the old light.
+    let n = face_normal(face);
+    let facing = max(dot(n, g.light.xyz), 0.0);
+    let direct = g.light_color.rgb * facing;
+    let ambient = max(g.face_light[min(face, 5u)].rgb - direct, vec3<f32>(0.0));
+    let open = max(sky, 0.25);
+    let shaded = g.shadow.z > 0.0;
+    o.color = ambient * (ao_f * open) + block_light(blk);
+    // With shadows, sunlight goes wherever the shadow map lets it (under an overhang that the
+    // sky light only half reaches, too); the sky light only keeps it out of caves. Leaves let
+    // some light through to their far side.
+    var through = 0.0;
+    if (leafy && shaded) {
+        through = 0.15;
+    }
+    let gate = select(open, smoothstep(0.15, 0.6, sky), shaded);
+    let ao_d = select(ao_f, mix(ao_f, 1.0, 0.5), shaded);
+    o.direct = g.light_color.rgb * (max(facing, through) * ao_d * gate);
+    o.open = sky;
     o.world = world;
     // Side faces: lift the texture so its top row starts at the quad's top (half-slabs).
     let lift = f32((b >> 27u) & 3u) * 0.25;
@@ -168,6 +233,7 @@ fn vs_lod(v: VsIn) -> VsOut {
             if (((word >> (bit % 32u)) & 1u) == 1u) {
                 o.clip = vec4<f32>(2.0, 2.0, 2.0, 1.0);
                 o.color = vec3<f32>(0.0);
+                o.direct = vec3<f32>(0.0);
                 o.world = base;
                 return o;
             }
@@ -205,6 +271,8 @@ fn vs_lod(v: VsIn) -> VsOut {
             + g.face_light[select(5, 4, n.z > 0.0)].rgb * n2.z;
     }
     o.world = world;
+    o.direct = vec3<f32>(0.0);
+    o.open = 1.0;
     o.uv = face_uv(face, world - vec3<f32>(v.origin.x, 0.0, v.origin.y));
     o.layer = tex;
     o.face = face;
@@ -261,7 +329,13 @@ fn sky_radiance(d: vec3<f32>, lod: f32) -> vec3<f32> {
 // What goes to the screen: unchanged up to 0.8, then a soft shoulder up to 1 that keeps the
 // hue (an orange sunset stays orange instead of clipping to yellow or white); only very bright
 // light (the sun, the sky right around it) washes out toward white.
-fn display(c: vec3<f32>) -> vec3<f32> {
+fn display(c_in: vec3<f32>) -> vec3<f32> {
+    var c = c_in;
+    // The shader look: a little richer colour, as shader packs grade it.
+    if (g.look.y > 0.0) {
+        let l = dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
+        c = max(mix(vec3<f32>(l), c, 1.0 + 0.18 * g.look.y), vec3<f32>(0.0));
+    }
     let k = 0.8;
     let m = max(c.r, max(c.g, c.b));
     if (m <= k) {
@@ -445,6 +519,81 @@ fn water_shade(world: vec3<f32>, face: u32, light: vec3<f32>, shore: f32) -> vec
     return vec4<f32>(col, alpha);
 }
 
+// ---- Shadows ----
+fn shadow_tap(far: bool, uv: vec2<f32>, z: f32) -> f32 {
+    if (far) {
+        return textureSampleCompareLevel(shadow_far, shadow_cmp, uv, z);
+    }
+    return textureSampleCompareLevel(shadow_near, shadow_cmp, uv, z);
+}
+
+// How much of the light reaches a point (1 lit .. 0 in shadow). `px` is the pixel, for noise.
+// The near map while inside it (switching to the far one over a dithered band before its
+// edge, so the change in sharpness doesn't draw a line); the far one fades out at its edge.
+// The point is moved off the surface along its normal by about a texel first, which together
+// with the depth bias the maps were drawn with keeps surfaces from shadowing themselves.
+fn shadow_at(world: vec3<f32>, n: vec3<f32>, px: vec2<f32>) -> f32 {
+    let size = g.shadow.w;
+    let noise = fract(52.9829189 * fract(dot(px, vec2<f32>(0.06711056, 0.00583715))));
+    var far = false;
+    var p = g.shadow_mat[0] * vec4<f32>(world + n * (3.0 * g.shadow.x / size), 1.0);
+    if (max(abs(p.x), abs(p.y)) > 0.94 - 0.1 * noise) {
+        far = true;
+        p = g.shadow_mat[1] * vec4<f32>(world + n * (3.0 * g.shadow.y / size), 1.0);
+    }
+    let edge = max(abs(p.x), abs(p.y));
+    if (edge >= 1.0 || p.z <= 0.0 || p.z >= 1.0) {
+        return 1.0;
+    }
+    let uv = p.xy * vec2<f32>(0.5, -0.5) + 0.5;
+    var s = 0.0;
+    if (g.light.w < 1.5) {
+        s = shadow_tap(far, uv, p.z);
+    } else {
+        // Four taps on a circle turned a different way at every pixel: soft, grainy edges
+        // instead of a blocky staircase, for four lookups.
+        let a = noise * 6.2831853;
+        let r = 1.6 / size;
+        let d0 = vec2<f32>(cos(a), sin(a)) * r;
+        let d1 = vec2<f32>(-d0.y, d0.x) * 0.6;
+        s = (shadow_tap(far, uv + d0, p.z) + shadow_tap(far, uv - d0, p.z)
+            + shadow_tap(far, uv + d1, p.z) + shadow_tap(far, uv - d1, p.z)) * 0.25;
+    }
+    if (far) {
+        s = mix(s, 1.0, smoothstep(0.85, 1.0, edge));
+    }
+    return mix(1.0, s, g.shadow.z);
+}
+
+// The light on a surface, shader-pack style: the ambient part, the direct part through the
+// shadows, and a cheap stand-in for light bouncing around (global illumination):
+//   * sunlit ground, coloured like the biome's ground, lights walls and the undersides of
+//     things from below, where they see the sky (`open`);
+//   * what the shadow takes away isn't all lost: a little comes back as light bounced off
+//     the lit surfaces around, so shade is dim and coloured, not black.
+fn surface_light(f: VsOut, n: vec3<f32>, tint: vec3<f32>) -> vec3<f32> {
+    var vis = 1.0;
+    if (g.shadow.z > 0.0 && f.open > 0.02 && max(f.direct.r, max(f.direct.g, f.direct.b)) > 0.0005) {
+        vis = shadow_at(f.world, n, f.clip.xy);
+        if (is_foliage(f.layer)) {
+            vis = mix(vis, 1.0, 0.15); // light through the leaves around
+        }
+    }
+    var light = f.color + f.direct * vis;
+    if (g.look.x > 0.0) {
+        // Shader-pack contrast: shade a little cooler and dimmer, sunlight a little warmer and
+        // stronger, so shadows read clearly.
+        let k = g.look.x;
+        light = f.color * mix(vec3<f32>(1.0), vec3<f32>(0.78, 0.86, 1.0), k)
+            + f.direct * vis * mix(vec3<f32>(1.0), vec3<f32>(1.12, 1.05, 0.94), k);
+        let sun = g.light_color.rgb * max(g.light.y, 0.0);
+        let ground = mix(tint, vec3<f32>(0.32, 0.29, 0.25), 0.5);
+        let from_below = (0.5 - 0.5 * n.y) * f.open;
+        light += (sun * ground * (0.22 * from_below) + f.direct * ((1.0 - vis) * 0.08) * ground * 2.0) * k;
+    }
+    return light;
+}
+
 @fragment
 fn fs_main(f: VsOut) -> @location(0) vec4<f32> {
     // Derivatives first (they need uniform control flow): mip levels for the turned textures.
@@ -455,15 +604,16 @@ fn fs_main(f: VsOut) -> @location(0) vec4<f32> {
     let fog = clamp((d - g.fog_params.x) / (g.fog_params.y - g.fog_params.x), 0.0, 1.0) * g.flags.x;
     var col: vec3<f32>;
     var alpha = g.fog_params.z;
+    let n = face_normal(f.face);
     if (f.layer == u32(g.flags.z + 0.5)) {
-        let w = water_shade(f.world, f.face, f.color, f.shore);
+        let w = water_shade(f.world, f.face, surface_light(f, n, vec3<f32>(0.1, 0.2, 0.25)), f.shore);
         col = w.rgb;
         alpha = w.a;
     } else {
         let t = tint_at(f.world.xz);
         // Alpha says how much of the biome colour to apply: 0 = all (grass), 1 = none.
         let albedo = mix(tex.rgb * t.rgb, tex.rgb, tex.a) * mix(0.86, 1.14, t.a);
-        col = albedo * f.color;
+        col = albedo * surface_light(f, n, t.rgb);
     }
     // Fog takes on the sky's colour in that direction, so far terrain melts into the sky
     // behind it (bright toward the sun, orange at sunset, dark at night).
@@ -606,6 +756,9 @@ struct CharOut {
     @location(0) uv: vec2<f32>,
     @location(1) light: vec3<f32>,
     @location(2) world: vec3<f32>,
+    // Direct light from the sun (or moon), for the shadows; and the surface's normal.
+    @location(3) direct: vec3<f32>,
+    @location(4) normal: vec3<f32>,
 };
 
 @vertex
@@ -619,7 +772,11 @@ fn vs_char(@location(0) pos: vec3<f32>, @location(1) normal: vec3<f32>, @locatio
     var o: CharOut;
     o.clip = g.view_proj * vec4<f32>(pos, 1.0);
     o.uv = uv;
-    o.light = lx * n2.x + ly * n2.y + lz * n2.z;
+    let total = lx * n2.x + ly * n2.y + lz * n2.z;
+    let direct = g.light_color.rgb * max(dot(normal, g.light.xyz), 0.0);
+    o.light = max(total - direct, vec3<f32>(0.0));
+    o.direct = direct;
+    o.normal = normal;
     o.world = pos;
     return o;
 }
@@ -641,7 +798,11 @@ fn fs_char(f: CharOut) -> @location(0) vec4<f32> {
     } else if (t.a < 0.64) { // the model's cut-out threshold (rig::ALPHA_CUTOFF)
         discard;
     }
-    var col = base * f.light;
+    var vis = 1.0;
+    if (g.shadow.z > 0.0 && max(f.direct.r, max(f.direct.g, f.direct.b)) > 0.0005) {
+        vis = shadow_at(f.world, normalize(f.normal), f.clip.xy);
+    }
+    var col = base * (f.light + f.direct * vis);
     let d = distance(f.world, g.cam_pos.xyz);
     let fog = clamp((d - g.fog_params.x) / (g.fog_params.y - g.fog_params.x), 0.0, 1.0) * g.flags.x;
     if (fog > 0.0) {

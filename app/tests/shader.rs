@@ -41,3 +41,14 @@ fn ui_shader_parses_and_validates() {
     let names: Vec<String> = module.entry_points.iter().map(|e| e.name.clone()).collect();
     assert!(names.contains(&"vs_ui".to_string()) && names.contains(&"fs_ui".to_string()));
 }
+
+#[test]
+fn shadow_shader_parses_and_validates() {
+    const SHADOW: &str = include_str!("../src/shadow.wgsl");
+    let module = naga::front::wgsl::parse_str(SHADOW).unwrap_or_else(|e| panic!("{}", e.emit_to_string(SHADOW)));
+    naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all())
+        .validate(&module)
+        .expect("shadow WGSL validation failed");
+    let names: Vec<String> = module.entry_points.iter().map(|e| e.name.clone()).collect();
+    assert!(names.contains(&"vs_chunk".to_string()) && names.contains(&"vs_char".to_string()));
+}

@@ -20,6 +20,7 @@ mod math;
 mod perf;
 mod player;
 mod pool;
+mod shadows;
 mod sky;
 mod texgen;
 mod textures;
@@ -260,6 +261,7 @@ impl App {
             time_of_day: game.clock.hours(),
             clouds: settings.clouds,
             god_rays: settings.god_rays,
+            shaders: shadows::Quality::from_index(settings.shaders),
             figure: None,
         }
     }

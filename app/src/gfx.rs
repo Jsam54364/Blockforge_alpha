@@ -42,6 +42,7 @@ use winit::window::Window;
 use crate::game::CameraView;
 use crate::gpu_timer::GpuTimer;
 use crate::math;
+use crate::shadows::{self, Shadows};
 use crate::pool;
 use crate::ui::{HudVertex, MAX_HUD_VERTS};
 
@@ -83,6 +84,16 @@ struct Globals {
     cloud: [f32; 4],
     /// God rays: the sun on screen (uv), strength.
     rays: [f32; 4],
+    /// Shadows and the shader look (`shadows`): the maps' matrices; their half widths,
+    /// strength (0 = off) and size; towards the light, soft taps; its colour, foliage sways;
+    /// bounce light, grading, warm block light, look on.
+    shadow_mat: [[f32; 16]; 2],
+    shadow: [f32; 4],
+    light: [f32; 4],
+    light_color: [f32; 4],
+    look: [f32; 4],
+    /// Leaves and ferns: one bit per texture layer.
+    foliage: [[u32; 4]; 32],
 }
 
 /// Per-frame toggles chosen in the settings menu.
@@ -104,6 +115,8 @@ pub struct RenderOptions {
     pub time_of_day: f64,
     pub clouds: bool,
     pub god_rays: bool,
+    /// Shadows and the rest of the shader-pack look.
+    pub shaders: shadows::Quality,
     /// A character to draw over the HUD's first `.1` vertices (the inventory's equipment
     /// tab): where he stands; his triangles as given to `set_portrait`.
     pub figure: Option<(crate::ui::Showcase, usize)>,
@@ -606,6 +619,9 @@ struct GpuLayer {
 struct GpuChunk {
     solid: Option<GpuLayer>,
     water: Option<GpuLayer>,
+    /// Some face sees the sky. A chunk that is all underground can't shadow anything the sun
+    /// reaches (what is behind it from the sun is underground too), so it casts no shadow.
+    sky_lit: bool,
 }
 
 struct GpuLod {
@@ -685,6 +701,9 @@ pub struct Gfx {
     water_layer: u32,
     /// The sky and the light it gives (see `sky`).
     sky: Sky,
+    /// Shadow maps (see `shadows`), and which texture layers are foliage.
+    shadows: Shadows,
+    foliage: [[u32; 4]; 32],
 }
 
 impl Gfx {
@@ -750,6 +769,8 @@ impl Gfx {
             source: wgpu::ShaderSource::Wgsl(SHADER.into()),
         });
 
+        let shadow_entries = Shadows::layout_entries();
+        let shadows = Shadows::new(&device, MAX_INSTANCES, std::mem::size_of::<rig::Vertex>() as u64);
         let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("globals layout"),
             entries: &[
@@ -821,6 +842,9 @@ impl Gfx {
                     },
                     count: None,
                 },
+                shadow_entries[0],
+                shadow_entries[1],
+                shadow_entries[2],
             ],
         });
         let (tint_tex, tint_view, tint_sampler) = tint_texture(&device);
@@ -847,6 +871,7 @@ impl Gfx {
         let globals_solid = make_globals("globals solid");
         let globals_portrait = make_globals("globals portrait");
         let globals_water = make_globals("globals water");
+        let sh = shadows.bind_entries();
         let make_bind = |label: &str, buf: &wgpu::Buffer| {
             device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some(label),
@@ -860,6 +885,9 @@ impl Gfx {
                     wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&sky_view) },
                     wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::Sampler(&sky_sampler) },
                     wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&night_view) },
+                    sh[0].clone(),
+                    sh[1].clone(),
+                    sh[2].clone(),
                 ],
             })
         };
@@ -974,6 +1002,7 @@ impl Gfx {
         });
         let timer = if want_ts { Some(GpuTimer::new(&device, &queue)) } else { None };
 
+        let texture_remap_ref = texture_remap.clone();
         Ok(Gfx {
             texture_remap,
             surface,
@@ -1030,6 +1059,8 @@ impl Gfx {
             start: Instant::now(),
             water_layer: reg.texture_names().iter().position(|n| n == "water").unwrap_or(usize::MAX) as u32,
             sky,
+            foliage: shadows::foliage_mask(reg.texture_names(), texture_remap_ref.as_deref()),
+            shadows,
         })
     }
 
@@ -1166,6 +1197,12 @@ impl Gfx {
             sky: self.sky.uniforms(16.0),
             cloud: [0.0; 4],
             rays: [0.0; 4],
+            shadow_mat: [[0.0; 16]; 2],
+            shadow: [0.0; 4],
+            light: [0.0, 1.0, 0.0, 1.0],
+            light_color: [0.0; 4],
+            look: [0.0; 4],
+            foliage: [[0; 4]; 32],
         }
     }
 
@@ -1236,11 +1273,13 @@ impl Gfx {
                 self.release(old.solid);
                 self.release(old.water);
             }
+            self.shadows.terrain_changed();
             if let Some(mesh) = client.meshes.get(&pos) {
                 // Cutout (leaves) shares the opaque draw for now.
                 let solid = self.upload(&[&mesh.opaque.vertices, &mesh.cutout.vertices]);
                 let water = self.upload(&[&mesh.translucent.vertices]);
-                self.chunks.insert(pos, GpuChunk { solid, water });
+                let sky_lit = mesh.opaque.vertices.iter().chain(&mesh.cutout.vertices).any(|v| v.sky() > 0);
+                self.chunks.insert(pos, GpuChunk { solid, water, sky_lit });
             }
         }
         for key in client.lod.take_evicted() {
@@ -1430,6 +1469,12 @@ impl Gfx {
         let sun = [sky_uniforms.sun[0], sky_uniforms.sun[1], sky_uniforms.sun[2]];
         let rays = ray_params(&vp, cam.pos, fwd, sun, sky_uniforms.sun[3]).filter(|_| opts.god_rays);
 
+        // Shadows: which maps to redraw this frame (they are drawn first, below).
+        let (light_dir, light_col, light_strength) = shadows::light(&sky::params(opts.time_of_day));
+        let look_on = opts.shaders != shadows::Quality::Off;
+        let shadow_jobs = self.shadows.plan(opts.shaders, cam.pos, fwd, light_dir);
+        let (shadow_mat, shadow_u) = self.shadows.uniforms(light_strength);
+
         let mut globals = Globals {
             view_proj: vp,
             cam_pos: [cam.pos[0], cam.pos[1], cam.pos[2], 1.0],
@@ -1446,6 +1491,12 @@ impl Gfx {
             sky: sky_uniforms,
             cloud: cloud_origin.map_or([0.0; 4], |o| [o[0], o[1], clouds::BASE_Y, clouds::FADE_END]),
             rays: rays.unwrap_or([0.0; 4]),
+            shadow_mat,
+            shadow: shadow_u,
+            light: [light_dir[0], light_dir[1], light_dir[2], if opts.shaders == shadows::Quality::Fancy { 4.0 } else { 1.0 }],
+            light_color: [light_col[0], light_col[1], light_col[2], if look_on { 1.0 } else { 0.0 }],
+            look: if look_on { [1.0, 1.0, 1.0, 1.0] } else { [0.0; 4] },
+            foliage: self.foliage,
         };
         self.queue.write_buffer(&self.globals_solid, 0, as_bytes(std::slice::from_ref(&globals)));
         globals.fog_params[2] = 0.65;
@@ -1493,6 +1544,20 @@ impl Gfx {
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame") });
+        for job in &shadow_jobs {
+            let size = CHUNK_SIZE as f32;
+            let mut casters: Vec<([f32; 4], wgpu::BufferSlice<'_>, u32)> = Vec::new();
+            for (pos, c) in &self.chunks {
+                let Some(layer) = c.solid.as_ref().filter(|_| c.sky_lit) else { continue };
+                let o = pos.origin();
+                let min = [o.x as f32, o.y as f32, o.z as f32];
+                if job.holds(&self.shadows, min, size) {
+                    casters.push(([min[0], min[1], min[2], 0.0], self.pool.slice(&layer.slot), layer.quads.min(MAX_QUADS)));
+                }
+            }
+            let character = (self.char_verts > 0).then(|| (self.char_buf.slice(..), self.char_verts));
+            self.shadows.draw(&self.queue, &mut encoder, &self.index_buf, job, &casters, character);
+        }
         let mut quads = 0u64;
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -2292,7 +2357,11 @@ mod tests {
         // 64 (mat4) + 4 * 16 (vec4s) + 32 * 16 (palette) + 16 (lod window) + 32 * 16 (lod mask)
         // + 16 (tint window) + 3 * 16 (sky basis) + sky: 4 * 16 + 4 * 16 (glow) + 6 * 16 (faces)
         // + 3 * 16 (night rotation) + 3 * 16 + 16 (clouds) + 16 (rays)
-        assert_eq!(std::mem::size_of::<Globals>(), 64 + 64 + 512 + 16 + 512 + 16 + 48 + 64 + 64 + 96 + 48 + 48 + 32);
+        // + 2 * 64 (shadow matrices) + 4 * 16 (shadow, light, light colour, look) + 32 * 16 (foliage)
+        assert_eq!(
+            std::mem::size_of::<Globals>(),
+            64 + 64 + 512 + 16 + 512 + 16 + 48 + 64 + 64 + 96 + 48 + 48 + 32 + 128 + 64 + 512
+        );
     }
 
     #[test]

@@ -119,6 +119,8 @@ pub struct Settings {
     pub show_stats: bool,
     pub clouds: bool,
     pub god_rays: bool,
+    /// Shadows and the shader-pack look: 0 off, 1 Lite, 2 Fancy (`shadows::Quality`).
+    pub shaders: u8,
     /// Walking as the character (true) or the free-flying camera.
     pub walk: bool,
     /// Where the camera is while walking.
@@ -190,6 +192,7 @@ impl Default for Settings {
             show_stats: true,
             clouds: true,
             god_rays: true,
+            shaders: 1,
             walk: true,
             view: CamView::Back,
             hud_opacity: 85,
@@ -205,7 +208,7 @@ impl Settings {
     /// `key=value` lines, one per setting, for the settings file kept between launches.
     pub fn to_text(&self) -> String {
         format!(
-            "render_chunks={}\nlod_level={}\nlod_quality={}\nfog={}\ncull={}\nvsync={}\ngreedy={}\nshow_stats={}\nclouds={}\ngod_rays={}\nwalk={}\nview={}\nhud_opacity={}\nlook_speed={}\njoy_size={}\ntouch_build={}\none_stance={}\n",
+            "render_chunks={}\nlod_level={}\nlod_quality={}\nfog={}\ncull={}\nvsync={}\ngreedy={}\nshow_stats={}\nclouds={}\ngod_rays={}\nshaders={}\nwalk={}\nview={}\nhud_opacity={}\nlook_speed={}\njoy_size={}\ntouch_build={}\none_stance={}\n",
             self.render_chunks,
             self.lod_level,
             self.lod_quality,
@@ -216,6 +219,7 @@ impl Settings {
             self.show_stats,
             self.clouds,
             self.god_rays,
+            self.shaders,
             self.walk,
             self.view.key(),
             self.hud_opacity,
@@ -262,6 +266,11 @@ impl Settings {
                 "lod_level" => {
                     if let Ok(v) = value.parse::<u8>() {
                         self.lod_level = v.min(LOD_DISTANCES.len() as u8 - 1);
+                    }
+                }
+                "shaders" => {
+                    if let Ok(v) = value.parse::<u8>() {
+                        self.shaders = v.min(2);
                     }
                 }
                 "lod_quality" => {
@@ -342,6 +351,7 @@ pub enum Action {
     ToggleStats,
     ToggleClouds,
     ToggleRays,
+    CycleShaders,
     /// Walk as the character, or fly the camera.
     ToggleWalk,
     /// Third person or first person.
@@ -1135,6 +1145,11 @@ impl Ui {
             Action::ToggleRays => {
                 let s = self.edited();
                 s.god_rays = !s.god_rays;
+                false
+            }
+            Action::CycleShaders => {
+                let s = self.edited();
+                s.shaders = (s.shaders + 1) % 3;
                 false
             }
             Action::ToggleWalk => {

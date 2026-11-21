@@ -785,6 +785,28 @@ Next: trees and plants per biome, rivers, rain shadows behind mountains.
 * The block texture array never has a multiple of six layers (`gfx::array_layers`): on OpenGL
   ES, wgpu would make it a cube map and every block would show the wrong texture.
 
+## Shadows and the shader look (`app/src/shadows.rs`, the shader)
+
+Settings > Video > Shaders: Off, Lite (the default) or Fancy, like a Minecraft shader pack
+but built in, and cheap enough for a phone.
+
+* **Sun shadows** from two shadow maps (2048 x 2048) seen down the light's direction: a sharp
+  one 112 blocks wide, redrawn every frame (every other frame on Lite), and a coarse one 448
+  wide that is only redrawn when the camera has moved 45 blocks, the sun has moved, or terrain
+  has changed. Each keeps the matrix it was drawn with, so a stale map is still right where it
+  covers. The squares snap to whole texels (no crawling edges), only solid terrain with some
+  sky-lit face casts (underground chunks can't shadow anything the sun reaches), faces turned
+  from the sun and caves skip the lookup, and edges are softened by the hardware's 2x2
+  comparison filter (plus 4 rotated taps on Fancy). The moon casts them at night. The
+  character casts and receives them.
+* **Fake global illumination**: sunlit ground bounces light, coloured like the biome's ground,
+  onto walls and undersides; part of what a shadow takes away comes back as bounced light, so
+  shade is dim and blue-ish rather than black; block light is warm and pools around lamps.
+* **Foliage**: leaves and ferns sway in gusts (each corner moved by its world position, so no
+  cracks open) and let a little light through.
+* **Grading**: slightly richer colour.
+* Off draws exactly the old lighting.
+
 ## Greedy meshing (`greedy.rs`)
 
 A hybrid bit-mask greedy mesher, written from the published "binary greedy meshing" idea
