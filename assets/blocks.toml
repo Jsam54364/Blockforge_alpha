@@ -14145,3 +14145,23 @@ label = "Giants' Grasslands Sand"
 biome = "grasslands"
 hardness = 0.6
 behavior = "falling"
+
+[[block]]
+name = "fern"
+group = "natural"
+family = "plant"
+biome = "wildwood"
+opaque = false
+render = "cutout"
+hardness = 0.1
+
+[[block]]
+name = "meadow"
+group = "natural"
+family = "soil"
+label = "Flower Meadow"
+biome = "grasslands"
+hardness = 0.6
+top = "meadow_top"
+side = "prairie_grass_side"
+bottom = "dirt"

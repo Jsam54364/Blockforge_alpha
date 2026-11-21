@@ -50,7 +50,7 @@ pub const GRASSLANDS: usize = 14;
 
 pub const BIOMES: &[Biome] = &[
     biome!("Ancient Wildwood", "wildwood", "lush_grass", "forest_floor", "dirt", "mossrock", "elderstone", 0x4E9A3A),
-    biome!("Amberwood", "amberwood", "grass", "leaf_litter", "dirt", "ochrestone", "honeystone", 0xA9AE4A),
+    biome!("Amberwood", "amberwood", "leaf_litter", "grass", "dirt", "ochrestone", "honeystone", 0xA9AE4A),
     biome!("Frostpeak Highlands", "frostpeak", "cold_grass", "frostpeak_stony_soil", "dirt", "frostgranite", "rimeslate", 0x7E9C72),
     biome!("Stonefang Mountains", "stonefang", "cold_grass", "stonefang_pebbles", "stonefang_coarse_soil", "fangbasalt", "ironstone", 0x8AA06A),
     biome!("Sunscorched Expanse", "sunscorched", "sunscorched_sand", "red_sand", "sand", "sunstone", "dunerock", 0xBFB755),
@@ -58,12 +58,12 @@ pub const BIOMES: &[Biome] = &[
     biome!("Murkwater Swamp", "murkwater", "grass", "mud", "mud", "bogstone", "mirestone", 0x5E7A34),
     biome!("Whitewind Tundra", "tundra", "tundra_moss", "snowy_grass", "permafrost", "windstone", "palestone", 0x8FA676),
     biome!("Crystal Glacier", "glacier", "snow", "packed_ice", "packed_ice", "glacierstone", "bluemarble", 0x86A07A),
-    biome!("Winterpine Taiga", "taiga", "cold_grass", "needle_floor", "dirt", "taigarock", "greystone", 0x5F8A5A),
+    biome!("Winterpine Taiga", "taiga", "snowy_grass", "needle_floor", "dirt", "taigarock", "greystone", 0x5F8A5A),
     biome!("Blightlands", "blight", "blighted_turf", "blighted_soil", "blighted_soil", "rotstone", "ashstone", 0x6E6A50),
     biome!("Petrified Kingdom", "petrified", "petrified_sand", "cracked_earth", "petrified_coarse_soil", "petrastone", "dustrock", 0xA8A070),
     biome!("Hollow Earth", "hollow", "cave_moss", "hollow_coarse_soil", "gloomstone", "gloomstone", "cavernstone", 0x4E8A6A),
     biome!("Stormbreak Coast", "stormbreak", "grass", "shingle", "dirt", "tidestone", "seaslate", 0x7FA85E),
-    biome!("Giants' Grasslands", "grasslands", "prairie_grass", "grass", "dirt", "fieldstone", "meadowstone", 0x9CBF52),
+    biome!("Giants' Grasslands", "grasslands", "prairie_grass", "meadow", "dirt", "fieldstone", "meadowstone", 0x9CBF52),
 ];
 
 /// What a point is like, besides its climate: altitude above the sea, how far inland

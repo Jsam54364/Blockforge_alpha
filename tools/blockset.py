@@ -996,6 +996,58 @@ OLD = {
 }
 
 
+# Blocks added after the biome set (ids follow it). APPEND ONLY.
+LATE_BLOCKS = [
+    B('fern', 'natural', 'plant', opaque=False, render='cutout', hardness=0.1, biome='wildwood'),
+    B('meadow', 'natural', 'soil', {'top': 'meadow_top', 'side': 'prairie_grass_side', 'bottom': 'dirt'}, label='Flower Meadow', hardness=0.6, biome='grasslands'),
+]
+
+
+def fern_tex():
+    """Fern fronds: bright, feathery clusters with dark gaps, lit from the top left."""
+    r = rng('fern')
+    img = np.zeros((N, N, 3))
+    base = C(0.08, 0.16, 0.05)
+    img[:] = base
+    cols = [C(0.18, 0.40, 0.10), C(0.28, 0.54, 0.14), C(0.40, 0.66, 0.20), C(0.56, 0.78, 0.30)]
+    for _ in range(9):
+        cx, cy = r.integers(0, N, 2)
+        a = r.random() * 2 * np.pi
+        L = 8 + r.integers(0, 8)
+        for k in range(L):
+            x = int(cx + np.cos(a) * k) % N
+            y = int(cy + np.sin(a) * k) % N
+            img[y, x] = cols[1]
+            w = int((1 - k / L) * 3) + 1
+            for side in (-1, 1):
+                for j in range(1, w + 1):
+                    px = int(x + np.cos(a + side * 1.2) * j) % N
+                    py = int(y + np.sin(a + side * 1.2) * j) % N
+                    img[py, px] = cols[min(3, 2 + (side < 0))] if j == 1 else cols[0 + (side < 0)]
+    return img
+
+
+def meadow_top():
+    """Greyscale grass (tinted by biome: alpha 0) dotted with flowers in their own colours
+    (alpha 255: not tinted)."""
+    grey = P.grass_top('meadow_grass', 5, 0.7, 0.55, 0.0)
+    rgba = np.zeros((N, N, 4))
+    rgba[..., 0] = rgba[..., 1] = rgba[..., 2] = grey * 255
+    r = rng('meadow flowers')
+    petals = [C(0.95, 0.95, 0.92), C(0.98, 0.86, 0.24), C(0.92, 0.48, 0.70), C(0.62, 0.50, 0.92), C(0.96, 0.40, 0.30)]
+    for _ in range(26):
+        x, y = r.integers(0, N, 2)
+        c = petals[r.integers(0, len(petals))]
+        for dx, dy in ((0, 0), (1, 0), (0, 1), (-1, 0), (0, -1)):
+            if dx == dy == 0 or r.random() < 0.75:
+                px, py = (x + dx) % N, (y + dy) % N
+                k = 1.0 if dx == dy == 0 else 0.85
+                rgba[py, px, :3] = c * 255 * (0.8 if (dx, dy) == (0, 0) else k)
+                rgba[py, px, 3] = 255
+        rgba[y, x, :3] = C(0.98, 0.84, 0.30) * 255
+    return rgba
+
+
 def toml_block(name, group, family, tex, kw):
     lines = ['[[block]]', f'name = "{name}"', f'group = "{group}"', f'family = "{family}"']
     for k in ('label', 'biome', 'solid', 'opaque', 'render', 'light', 'hardness', 'behavior', 'slab'):
@@ -1038,7 +1090,7 @@ def main():
     dup = set(t) & set(biome_tex)
     assert not dup, f'textures painted twice: {sorted(dup)[:5]}'
     t.update(biome_tex)
-    blocks = BLOCKS + biome_blocks
+    blocks = BLOCKS + biome_blocks + LATE_BLOCKS
     names = [b[0] for b in blocks]
     assert len(names) == len(set(names)), [n for n in names if names.count(n) > 1][:5]
     for name, img in t.items():
@@ -1059,6 +1111,8 @@ def main():
             side[y, x] *= 0.8
     save(side * 255, 'prairie_grass_side')
     save(over, 'prairie_grass_side_overlay', 'RGBA')
+    save(np.clip(fern_tex(), 0, 1) * 255, 'fern')
+    save(meadow_top(), 'meadow_top', 'RGBA')
     write_toml(blocks)
     # The list of texture files the game embeds (every png in assets/textures).
     names = sorted(f[:-4] for f in os.listdir(P.OUT) if f.endswith('.png'))

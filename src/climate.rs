@@ -43,7 +43,7 @@ fn latitude_rain(latitude: f32) -> f32 {
 }
 
 /// The climate at a point.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
 pub struct ClimateSample {
     /// Average yearly temperature at the surface, degrees C.
     pub temperature: f32,

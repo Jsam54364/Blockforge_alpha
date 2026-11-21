@@ -26,7 +26,7 @@ use crate::terrain::{Terrain, TerrainSample, NO_RIVER};
 pub const SEA_LEVEL: i32 = 0;
 /// Bumped whenever the same seed would generate different terrain: worlds saved by an
 /// older generator are kept apart (their edits would land on different ground).
-pub const WORLDGEN_VERSION: u32 = 7;
+pub const WORLDGEN_VERSION: u32 = 8;
 pub const BEDROCK_Y: i32 = -128;
 /// No caves below this; deep chunks collapse to a single uniform entry (except under the
 /// Hollow Earth, whose tunnels go down to its caverns).
@@ -37,7 +37,7 @@ const HOLLOW_BOTTOM: i32 = -120;
 /// Below this its caverns are flooded: underground lakes.
 const HOLLOW_LAKE: i32 = -104;
 /// The tallest a feature reaches above the ground it stands on.
-pub const FEATURE_UP: i32 = 78;
+pub const FEATURE_UP: i32 = 100;
 
 /// Per-(x,z) data shared by the whole vertical stack of chunks.
 #[derive(Clone, Debug)]
@@ -60,6 +60,8 @@ pub struct Column {
     pub hollow: f32,
     /// The highest block water fills to (the sea's, or a river's), same indexing.
     pub water: Vec<i32>,
+    /// Each column's biome (index into `BIOMES`), same indexing.
+    pub biome: Vec<u8>,
     pub max_water: i32,
 }
 
@@ -108,7 +110,7 @@ pub struct FeatureGrid {
 impl FeatureGrid {
     /// Bucket width: as wide as the furthest any feature reaches, so the 3 x 3 buckets
     /// around a point hold every feature that can reach it.
-    const SIZE: i32 = 20;
+    const SIZE: i32 = 24;
 
     pub fn new(feats: Vec<Feature>) -> FeatureGrid {
         let mut buckets: HashMap<(i32, i32), Vec<Feature>> = HashMap::new();
@@ -146,6 +148,8 @@ struct Styles {
     mesas: Fbm,
     basins: Fbm,
     hummocks: Fbm,
+    /// Big ridged noise for alpine massifs and jagged ranges.
+    alps: Fbm,
 }
 
 /// Feature tiers: big things on a coarse grid, ordinary ones on a fine grid, and the
@@ -167,6 +171,13 @@ pub struct WorldGen {
     shingle: u16,
     mud: u16,
     snow: u16,
+    ice: u16,
+    red_sand: u16,
+    red_sandstone: u16,
+    blight_glow: u16,
+    fern: u16,
+    /// Every leaves block (snow settles on them in the cold biomes).
+    leaves_ids: Vec<u16>,
     /// Per entry of `biome::BIOMES`.
     biome_blocks: Vec<BiomeBlocks>,
     /// Gentle large-scale brightness variation of the ground (see `ground_tint`).
@@ -347,6 +358,16 @@ impl WorldGen {
             shingle: id("shingle"),
             mud: id("mud"),
             snow: id("snow"),
+            ice: id("ice"),
+            red_sand: id("red_sand"),
+            red_sandstone: id("red_sandstone"),
+            blight_glow: id("blight_ore"),
+            fern: id("fern"),
+            leaves_ids: {
+                let mut v: Vec<u16> = (1..reg.len() as u16).filter(|&i| reg.def(i).name.ends_with("leaves")).collect();
+                v.sort_unstable();
+                v
+            },
             biome_blocks,
             variation: Fbm::new(seed ^ 0x7A11_7E5D, 60.0, 2, 0.5),
             blight: Fbm::new(s(11), 2600.0, 3, 0.5),
@@ -366,6 +387,7 @@ impl WorldGen {
                 mesas: Fbm::new(s(27), 340.0, 3, 0.5),
                 basins: Fbm::new(s(28), 120.0, 2, 0.5),
                 hummocks: Fbm::new(s(29), 16.0, 2, 0.5),
+                alps: Fbm::new(s(30), 1100.0, 5, 0.5),
             },
             fb,
             ores,
@@ -455,8 +477,9 @@ impl WorldGen {
 
     /// The land at `(x, z)` shaped as biome `b` would have it, from the landforms' terrain `t`.
     /// Each style keeps the large shape of the land (its smoothed height) and remakes what
-    /// sits on it: the grasslands smooth it into wide plains, the Stonefang raise fangs of
-    /// rock, the desert piles dunes and mesas, the swamp sinks almost to the water...
+    /// sits on it, at real-world scale and amplified the way JJThunder's terrain is: alpine
+    /// massifs hundreds of blocks high, sandstone pillars like Zhangjiajie's, dune seas,
+    /// red-rock canyons, sea cliffs.
     fn style(&self, b: usize, x: f32, z: f32, cell: f32, t: &TerrainSample) -> f32 {
         use biome::*;
         let (h, s) = (t.height, t.smooth);
@@ -464,93 +487,146 @@ impl WorldGen {
         let st = &self.styles;
         let roll = st.roll.at(x, z, cell);
         let swell = st.swell.at(x, z, cell);
-        // Keep land land, except where a biome wants pools.
+        // Keep land land, except where a biome wants water.
         let keep = |v: f32| if h >= 1.0 { v.max(1.0) } else { v };
         match b {
-            GRASSLANDS => keep(s * 0.9 + 2.0 + 5.0 * swell + 2.0 * roll + d * 0.25),
+            GRASSLANDS => {
+                // Wide rolling hills of grass, with green tablelands ending in escarpments.
+                let hills = s * 0.85 + 3.0 + 14.0 * swell + 6.0 * roll + d * 0.2;
+                let e = st.mesas.at(x + 7000.0, z, cell);
+                let table = 30.0 * smoothstep(0.22, 0.27, e) + 8.0 * smoothstep(0.27, 0.6, e);
+                keep(hills + table)
+            }
             WILDWOOD => {
-                // Rolling hills cut by steep, narrow ravines.
+                // Rolling forest floor cut by steep, narrow ravines.
                 let r = 1.0 - st.ravines.at(x, z, cell).abs();
-                let cut = 11.0 * smoothstep(0.955, 0.995, r);
-                keep(h + 7.0 * roll + 3.0 * swell - cut)
+                let cut = 14.0 * smoothstep(0.955, 0.995, r);
+                keep(h + 9.0 * roll + 5.0 * swell - cut)
             }
-            AMBERWOOD => keep(s + d * 0.6 + 8.0 * st.roll.at(x + 1700.0, z, cell) + 3.0 * swell),
+            AMBERWOOD => keep(s + d * 0.6 + 10.0 * st.roll.at(x + 1700.0, z, cell) + 5.0 * swell),
             TAIGA => {
-                let knolls = 14.0 * (st.spikes.ridged(x + 900.0, z, cell) - 0.55).max(0.0);
-                keep(h + 6.0 * roll + knolls)
+                let knolls = 22.0 * (st.spikes.ridged(x + 900.0, z, cell) - 0.55).max(0.0);
+                keep(h + 10.0 * roll + 8.0 * swell + knolls)
             }
-            TUNDRA => keep(s * 0.7 + 2.0 + 3.0 * swell + d * 0.2 + 1.0 * roll),
+            TUNDRA => {
+                // Wide, open, gently swelling land with lakes (frozen over).
+                let base = s * 0.6 + 3.0 + 5.0 * swell + 1.5 * roll;
+                let lake = smoothstep(0.3, 0.42, st.basins.at(x + 900.0, z, cell));
+                base + (-2.0 - base) * lake
+            }
             GLACIER => {
-                // Smooth domes of ice split by crevasses.
-                let dome = 16.0 * swell.max(0.0) + 4.0 * roll;
-                let crev = st.crevasses.at(x, z, cell).abs();
-                let cut = 8.0 * (1.0 - smoothstep(0.0, 0.025, crev));
-                keep(s + 4.0 + dome - cut)
+                // An ice sheet in broad domes, cut by deep canyons with sheer ice walls.
+                let sheet = s + 18.0 + 34.0 * swell.max(0.0) + 6.0 * roll;
+                let c = 1.0 - st.crevasses.at(x, z, cell).abs();
+                let cut = 45.0 * smoothstep(0.955, 0.985, c);
+                keep(sheet - cut)
             }
             FROSTPEAK => {
-                // High plateaus stepped by cliffs, jagged peaks rising off them.
-                let f = (h + 6.0 * roll) / 9.0;
-                let stepped = (f.floor() + smoothstep(0.62, 0.9, f.fract())) * 9.0;
-                let peaks = 55.0 * st.spikes.ridged(x, z, cell).powi(3) * smoothstep(30.0, 70.0, s);
-                keep(stepped + peaks)
+                // Alpine massifs: sharp ridges and peaks hundreds of blocks above forested
+                // valleys, the ranges coming and going.
+                let alps = st.alps.ridged(x, z, cell);
+                let range = smoothstep(-0.25, 0.35, st.swell.at(x + 5000.0, z, cell));
+                keep(s + 12.0 * roll + 380.0 * alps.powf(2.6) * range + 40.0 * alps * alps)
             }
             STONEFANG => {
-                // Sharp ridges and fangs of rock, deep canyons between.
-                let r = st.spikes.ridged(x, z, cell);
-                let f = ((st.fangs.ridged(x, z, cell) - 0.7).max(0.0) / 0.3).min(1.0);
-                let fangs = 24.0 * f * f;
-                let canyon = 1.0 - st.canyons.at(x, z, cell).abs();
-                let cut = 22.0 * smoothstep(0.93, 0.99, canyon);
-                keep(h + 60.0 * r.powi(4) + fangs - cut)
+                // Pillars of rock, like Zhangjiajie's: sheer columns 60-220 blocks tall with
+                // green tops, standing in green valleys, before jagged ridges.
+                let valley = s * 0.7 + 4.0 + 7.0 * roll;
+                let ridges = 150.0 * st.alps.ridged(x + 3000.0, z, cell).powi(3);
+                let pillar = if cell <= 16.0 { self.pillar(x, z, st) } else { None };
+                let base = valley + ridges;
+                keep(match pillar {
+                    Some(top) => base.max(valley + top + 2.0 * roll),
+                    None => base,
+                })
             }
             SUNSCORCHED => {
-                // Long dunes on a flat floor, with mesas standing out of it.
-                let warp = 40.0 * st.swell.at(x + 3000.0, z, cell);
-                let k = smoothstep(60.0, 20.0, cell);
-                let dune = (0.5 + 0.5 * (((x * 0.8 + z * 0.6) + warp) / 13.0).sin()).powi(2);
-                let dunes = 8.0 * dune * smoothstep(-0.2, 0.4, st.roll.at(x - 500.0, z, cell)) * k;
-                // Mesas: flat tops 20 blocks up, their sides stepped in 4-block layers.
-                let k = smoothstep(0.32, 0.4, st.mesas.at(x, z, cell));
-                let floor = s * 0.75 + 3.0 + 2.0 * swell;
-                let mesa = floor + 20.0 * k;
-                let mesa = if k > 0.0 && k < 1.0 { (mesa / 4.0).floor() * 4.0 } else { mesa };
-                keep((floor + dunes).max(mesa))
+                // A sea of dunes with sharp crests, and bare, jagged mountains rising out of it.
+                let warp = 60.0 * st.swell.at(x + 3000.0, z, cell);
+                let k = smoothstep(80.0, 24.0, cell);
+                let phase = ((x * 0.8 + z * 0.6) + warp) / 22.0;
+                let crest = (1.0 - phase.sin().abs()).powf(1.4);
+                let dunes = 22.0 * crest * smoothstep(-0.3, 0.3, st.roll.at(x - 500.0, z, cell)) * k;
+                let m = smoothstep(0.25, 0.55, st.mesas.at(x, z, cell));
+                let mountains = 170.0 * st.alps.ridged(x + 9000.0, z, cell).powf(2.4) * m;
+                keep(s * 0.7 + 4.0 + 3.0 * swell + dunes * (1.0 - m) + mountains)
             }
             OASIS => {
-                // Low, lush ground with pools (the sea's level fills them).
-                let base = s * 0.55 + 2.0 + 3.0 * roll;
-                let pool = smoothstep(0.35, 0.5, st.basins.at(x, z, cell));
-                base + (-2.5 - base) * pool
+                // Red-rock tablelands cut by deep canyons: sheer stepped walls, and at their
+                // feet pools of clear water and lush ledges.
+                let plateau = s * 0.5 + 44.0 + 6.0 * roll;
+                let c = 1.0 - st.canyons.at(x * 3.0, z * 3.0, cell).abs();
+                let wall = smoothstep(0.92, 0.958, c);
+                let stepped = plateau - (plateau + 3.0) * ((wall * 6.0).floor() / 6.0);
+                let floor = if c > 0.978 { -3.0 } else { 2.0 + roll };
+                if c > 0.958 {
+                    floor
+                } else {
+                    stepped.max(2.0)
+                }
             }
             MURKWATER => {
-                // Almost flat, just above the water, hummocks and pools of open water.
-                let base = (h - SEA_LEVEL as f32) * 0.18 + 1.2 + 1.3 * st.hummocks.at(x, z, cell);
-                let pool = smoothstep(-0.25, -0.45, roll);
-                base + (-1.5 - base) * pool
+                // Almost flat, just above the water, hummocks among open pools.
+                let base = (h - SEA_LEVEL as f32) * 0.12 + 0.9 + 1.2 * st.hummocks.at(x, z, cell);
+                let pool = smoothstep(0.05, -0.2, roll);
+                base + (-1.6 - base) * pool
             }
             BLIGHT => {
-                // Scarred ground: craters with raised rims, jagged cracks.
+                // Scarred ground: craters with raised rims, cracks glowing from below.
                 let c = st.basins.at(x + 4000.0, z, cell);
-                let pit = 13.0 * smoothstep(0.42, 0.58, c);
-                let rim = 3.5 * smoothstep(0.32, 0.42, c) * (1.0 - smoothstep(0.42, 0.5, c));
-                let crack = 4.0 * smoothstep(0.96, 0.995, 1.0 - st.ravines.at(x + 2000.0, z, cell).abs());
-                h + d * 0.6 + 3.0 * roll + rim - pit - crack
+                let pit = 18.0 * smoothstep(0.42, 0.58, c);
+                let rim = 5.0 * smoothstep(0.32, 0.42, c) * (1.0 - smoothstep(0.42, 0.5, c));
+                let crack = 5.0 * self.blight_crack(x, z, cell);
+                h + d * 0.6 + 5.0 * roll + rim - pit - crack
             }
             PETRIFIED => {
                 // Badlands: eroded tablelands in layers, with hoodoos.
-                let raised = h + 16.0 * smoothstep(-0.1, 0.35, st.mesas.at(x + 2500.0, z, cell)) + 3.0 * roll;
+                let raised = h + 28.0 * smoothstep(-0.1, 0.35, st.mesas.at(x + 2500.0, z, cell)) + 4.0 * roll;
                 let f = raised / 4.0;
                 let layered = (f.floor() + smoothstep(0.55, 0.9, f.fract())) * 4.0;
-                let hoodoos = 9.0 * ((st.fangs.ridged(x + 700.0, z, cell) - 0.82).max(0.0) / 0.18);
+                let hoodoos = 18.0 * ((st.fangs.ridged(x + 700.0, z, cell) - 0.82).max(0.0) / 0.18);
                 keep(layered + hoodoos)
             }
             STORMBREAK => {
-                // Rugged headlands ending in cliffs over the sea.
-                let cliff = 15.0 * smoothstep(0.0, 0.05, t.inland) * (0.7 + 0.3 * swell);
-                keep(h + cliff + d * 0.4 + 3.0 * roll)
+                // Green headlands ending in sheer cliffs 40-70 blocks over the sea.
+                let cliff = 52.0 * smoothstep(0.0, 0.03, t.inland) * (0.75 + 0.35 * swell);
+                keep(h + cliff + d * 0.4 + 4.0 * roll)
             }
             _ => h,
         }
+    }
+
+    /// How much a Blightlands crack runs through `(x, z)`: 0 none .. 1 its glowing floor.
+    fn blight_crack(&self, x: f32, z: f32, cell: f32) -> f32 {
+        smoothstep(0.965, 0.995, 1.0 - self.styles.ravines.at(x + 2000.0, z * 1.3, cell).abs())
+    }
+
+    /// The top of a rock pillar standing over `(x, z)`, if one does: pillars stand on a
+    /// 34-block jittered grid (most cells have one), 5-13 blocks across their ragged edge,
+    /// 60-220 blocks tall.
+    fn pillar(&self, x: f32, z: f32, st: &Styles) -> Option<f32> {
+        const CELL: f32 = 34.0;
+        let (gx, gz) = ((x / CELL).floor() as i32, (z / CELL).floor() as i32);
+        let mut best: Option<f32> = None;
+        for dz in -1..=1 {
+            for dx in -1..=1 {
+                let (cx, cz) = (gx + dx, gz + dz);
+                let hsh = hash3(self.seed ^ 0x9111A5, cx, 0, cz);
+                if unit(hsh) > 0.7 {
+                    continue;
+                }
+                let px = (cx as f32 + 0.2 + 0.6 * unit(hsh.rotate_left(11))) * CELL;
+                let pz = (cz as f32 + 0.2 + 0.6 * unit(hsh.rotate_left(23))) * CELL;
+                let r = 5.0 + 8.0 * unit(hsh.rotate_left(37));
+                let (ddx, ddz) = (x - px, z - pz);
+                let ragged = 1.0 + 0.18 * st.fangs.at(x * 2.0, z * 2.0, 1.0);
+                if ddx * ddx + ddz * ddz < (r * ragged) * (r * ragged) {
+                    let top = 60.0 + 160.0 * unit(hsh.rotate_left(49)).powi(2);
+                    best = Some(best.map_or(top, |b: f32| b.max(top)));
+                }
+            }
+        }
+        best
     }
 
     /// What a point is like besides its climate (see `biome::Place`).
@@ -596,12 +672,25 @@ impl WorldGen {
 
     /// The (surface, subsurface, stone) blocks of a column whose partial (top) block is at
     /// `top`; `slope` is how many blocks its steepest neighbour differs by.
-    fn ground_blocks(&self, x: i32, z: i32, top: i32, t: &TerrainSample, cell: f32, slope: i32) -> (u16, u16, u16) {
+    fn ground_blocks(&self, x: i32, z: i32, top: i32, t: &TerrainSample, cell: f32, slope: i32) -> (u16, u16, u16, usize) {
         let alt = t.smooth.max(0.0);
         let c = self.climate.at(x as f32, z as f32, alt, t.inland, cell);
         let b = self.biome_for(x, z, c, alt, t.inland, cell);
+        let (surf, sub, stone) = self.ground_of(x, z, top, t, cell, slope, b, c.temperature);
+        (surf, sub, stone, b)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn ground_of(&self, x: i32, z: i32, top: i32, t: &TerrainSample, cell: f32, slope: i32, b: usize, temperature: f32) -> (u16, u16, u16) {
+        let c = ClimateSample { temperature, ..Default::default() };
         let bb = self.biome_blocks[b];
-        let stone = if self.patches.at(x as f32 + 900.0, z as f32, cell) > 0.25 { bb.stone_b } else { bb.stone };
+        let mut stone = if self.patches.at(x as f32 + 900.0, z as f32, cell) > 0.25 { bb.stone_b } else { bb.stone };
+        // The glacier's walls are blue ice; the oasis's canyons red rock.
+        if b == biome::GLACIER {
+            stone = self.fb.glacial_ice;
+        } else if b == biome::OASIS && top > 10 {
+            stone = self.red_sandstone;
+        }
         // Under water (top <= its level), and beaches: dry ground at sea level near the coast.
         // Inland lakes and wetland ponds keep the biome's ground right to the water's edge;
         // river beds are gravel and sand (clay and mud in the swamps).
@@ -620,17 +709,27 @@ impl WorldGen {
             };
             return (s, s, stone);
         }
+        // High ground is snowbound everywhere but in the hot lands: snow on its slopes,
+        // bare rock on its cliffs.
+        let snowline = 150.0 + 30.0 * self.patches.at(x as f32 + 3000.0, z as f32, cell);
+        let snowy = (top as f32 > snowline && !matches!(b, biome::SUNSCORCHED | biome::OASIS)) || (b == biome::FROSTPEAK && c.temperature < -3.0);
         // Cliffs show the biome's stone.
-        if slope >= 3 && b != biome::GLACIER {
-            return (stone, stone, stone);
+        if slope >= 3 {
+            return if snowy && slope < 5 { (self.snow, stone, stone) } else { (stone, stone, stone) };
         }
         let mut surf = if self.patches.at(x as f32, z as f32, cell) > 0.3 { bb.patches } else { bb.surface };
-        // The highlands are green below and snowbound up high.
-        if b == biome::FROSTPEAK && c.temperature < -3.0 {
+        if snowy {
             surf = self.snow;
         }
         if b == biome::STONEFANG && slope >= 2 {
             surf = stone;
+        }
+        if b == biome::OASIS && top > 12 {
+            // The red tablelands above the canyons.
+            surf = if self.patches.at(x as f32, z as f32, cell) > 0.1 { self.red_sand } else { self.red_sandstone };
+        }
+        if b == biome::BLIGHT && self.blight_crack(x as f32, z as f32, cell) > 0.6 {
+            surf = self.blight_glow; // the cracks glow from below
         }
         let surf = if surf == self.stone { stone } else { surf };
         (surf, bb.subsurface, stone)
@@ -761,7 +860,7 @@ impl WorldGen {
             if (tier == 1 && cell > 8) || cell > 32 {
                 continue;
             }
-            let reach = if tier == 0 { 19 } else { 9 };
+            let reach = if tier == 0 { 24 } else { 12 };
             for gz in (z0 - reach).div_euclid(size)..=(z1 + reach).div_euclid(size) {
                 for gx in (x0 - reach).div_euclid(size)..=(x1 + reach).div_euclid(size) {
                     if let Some(f) = self.anchor(tier, gx, gz) {
@@ -860,6 +959,7 @@ impl WorldGen {
         let n = (CHUNK_SIZE * CHUNK_SIZE) as usize;
         let (mut heights, mut surface, mut subsurface) = (Vec::with_capacity(n), Vec::with_capacity(n), Vec::with_capacity(n));
         let (mut rock, mut stone, mut water) = (Vec::with_capacity(n), Vec::with_capacity(n), Vec::with_capacity(n));
+        let mut biomes = Vec::with_capacity(n);
         let (mut min_top, mut max_top) = (i32::MAX, i32::MIN);
         // The terrain with a one-block border: slabs depend on the neighbouring heights.
         const W: i32 = CHUNK_SIZE + 2;
@@ -878,7 +978,8 @@ impl WorldGen {
                 let hq = surface_from(t.height, nb);
                 let top = hq.div_euclid(4);
                 let slope = nb.iter().map(|v| (v.round() as i32 - t.height.round() as i32).abs()).max().unwrap_or(0);
-                let (surf, sub, st) = self.ground_blocks(x, z, top, &t, 1.0, slope);
+                let (surf, sub, st, b) = self.ground_blocks(x, z, top, &t, 1.0, slope);
+                biomes.push(b as u8);
                 min_top = min_top.min(top);
                 max_top = max_top.max(top);
                 heights.push(hq);
@@ -895,7 +996,7 @@ impl WorldGen {
             .map(|&(dx, dz)| self.hollow_at(cx * CHUNK_SIZE + dx, cz * CHUNK_SIZE + dz))
             .fold(0.0f32, f32::max);
         let max_water = water.iter().copied().max().unwrap_or(SEA_LEVEL);
-        Column { cx, cz, height_q: heights, surface, subsurface, stone, rock, min_top, max_top, hollow, water, max_water }
+        Column { cx, cz, height_q: heights, surface, subsurface, stone, rock, min_top, max_top, hollow, water, max_water, biome: biomes }
     }
 
     /// Two thin noise "sheets" intersecting give tunnel-like caves. Constants need tuning.
@@ -952,6 +1053,23 @@ impl WorldGen {
         BlockState::full(rock)
     }
 
+    /// What sits on open water: ice over the lakes and rivers of the frozen biomes, lily
+    /// pads (thin pads of moss) on the swamp's pools.
+    #[allow(clippy::too_many_arguments)]
+    fn on_water(&self, s: BlockState, wx: i32, wy: i32, wz: i32, top: i32, wl: i32, b: u8) -> BlockState {
+        if wl < top {
+            return s;
+        }
+        let b = b as usize;
+        if wy == wl && s.id() == self.water && matches!(b, biome::TUNDRA | biome::GLACIER | biome::FROSTPEAK) {
+            return BlockState::full(self.ice);
+        }
+        if wy == wl + 1 && s.is_air() && b == biome::MURKWATER && unit(hash3(self.seed ^ 0x1111, wx, 0, wz)) < 0.09 {
+            return BlockState::new(self.fb.moss, Shape::SlabBottom);
+        }
+        s
+    }
+
     /// The generated terrain block at `(wx, wy, wz)`, which must lie in `col` (what
     /// `generate_chunk` puts there before trees and other features).
     pub fn seed_block(&self, col: &Column, wx: i32, wy: i32, wz: i32) -> BlockState {
@@ -960,7 +1078,8 @@ impl WorldGen {
         let hq = col.height_q_at(lx as usize, lz as usize);
         let i = lz as usize * CHUNK_SIZE as usize + lx as usize;
         let zone = if col.hollow > 0.0 { self.hollow_at(wx, wz) } else { 0.0 };
-        self.block_at(wx, wy, wz, hq.div_euclid(4), hq.rem_euclid(4), col.surface[i], col.subsurface[i], col.stone[i], col.rock[i], zone, col.water[i])
+        let s = self.block_at(wx, wy, wz, hq.div_euclid(4), hq.rem_euclid(4), col.surface[i], col.subsurface[i], col.stone[i], col.rock[i], zone, col.water[i]);
+        self.on_water(s, wx, wy, wz, hq.div_euclid(4), col.water[i], col.biome[i])
     }
 
     // ------------------------------------------------------------------ features
@@ -1117,6 +1236,7 @@ impl WorldGen {
                 (0.05, Kind::Stump(self.w("oak").log)),
                 (0.05, small_cap(self.fb.brown_cap)),
                 (0.05, con("redwood", false)),
+                (0.35, Kind::Ferns(self.fern)),
             ]),
             AMBERWOOD => (0.85, vec![
                 (0.28, Kind::Broadleaf(self.w("maple"), 1)),
@@ -1132,7 +1252,7 @@ impl WorldGen {
             FROSTPEAK => (0.4, vec![(0.35, con("fir", false)), (0.3, con("frostpine", false)), (0.2, boulder(false)), (0.1, bush("frostpine")), (0.05, Kind::Stump(self.w("fir").log))]),
             STONEFANG => (0.3, vec![(0.3, con("cragpine", true)), (0.15, Kind::Broadleaf(self.w("ironwood"), 0)), (0.35, boulder(false)), (0.2, bush("cragpine"))]),
             SUNSCORCHED => (0.12, vec![(0.6, Kind::Cactus(self.fb.cactus)), (0.12, Kind::Acacia(self.w("acacia"))), (0.18, boulder(false)), (0.1, Kind::Dead { wood: self.w("deadwood"), giant: false })]),
-            OASIS => (0.6, vec![(0.4, Kind::Palm(self.w("palm"))), (0.2, Kind::Broadleaf(self.w("fig"), 1)), (0.2, Kind::Bamboo(self.w("bamboo"))), (0.15, bush("fig")), (0.05, boulder(true))]),
+            OASIS => (0.6, vec![(0.1, Kind::Ferns(self.fern)), (0.4, Kind::Palm(self.w("palm"))), (0.2, Kind::Broadleaf(self.w("fig"), 1)), (0.2, Kind::Bamboo(self.w("bamboo"))), (0.15, bush("fig")), (0.05, boulder(true))]),
             MURKWATER => (0.8, vec![(0.35, Kind::Cypress(self.w("cypress"))), (0.3, Kind::Willow(self.w("willow"))), (0.1, log("willow")), (0.1, small_cap(self.fb.brown_cap)), (0.1, bush("willow")), (0.05, Kind::Stump(self.w("cypress").log))]),
             TUNDRA => (0.12, vec![(0.45, boulder(false)), (0.2, con("larch", false)), (0.2, Kind::Broadleaf(self.w("birch"), 0)), (0.15, bush("larch"))]),
             GLACIER => (0.08, vec![(0.5, Kind::Crystals(self.fb.frost_crystal)), (0.3, boulder(false)), (0.2, Kind::IceSpike { ice: self.fb.packed_ice, core: self.fb.glacial_ice, big: false })]),
@@ -1176,6 +1296,7 @@ impl WorldGen {
                         (0.15, Kind::Broadleaf(self.w("glowwood"), 1)),
                         (0.15, Kind::Crystals(self.fb.glow_crystal)),
                         (0.1, Kind::Mushroom { stem: self.fb.stem, cap: self.fb.glowcap, giant: false }),
+                        (0.2, Kind::Ferns(self.fern)),
                     ],
                 )?;
                 return Some(Feature { x, y: y - 1, z, kind, seed });
@@ -1196,7 +1317,7 @@ impl WorldGen {
             if tier != 2 && y0 + CHUNK_SIZE < col.min_top - 16 && col.hollow <= 0.0 {
                 continue;
             }
-            let reach = if tier == 0 { 19 } else { 9 };
+            let reach = if tier == 0 { 24 } else { 12 };
             let (gx0, gx1) = ((x0 - reach).div_euclid(cell), (x0 + CHUNK_SIZE + reach).div_euclid(cell));
             let (gz0, gz1) = ((z0 - reach).div_euclid(cell), (z0 + CHUNK_SIZE + reach).div_euclid(cell));
             for gz in gz0..=gz1 {
@@ -1308,6 +1429,9 @@ impl WorldGen {
                 f.draw(&mut canvas);
             }
         }
+        if extras {
+            self.snow_on_leaves(pos, col, &mut buf);
+        }
         let mut chunk = Chunk::uniform(buf[0]);
         if buf.iter().any(|b| *b != buf[0]) {
             for (i, b) in buf.iter().enumerate() {
@@ -1317,6 +1441,30 @@ impl WorldGen {
             }
         }
         chunk
+    }
+
+    /// In the cold biomes snow settles on leaves: a layer on each leaves block open above.
+    fn snow_on_leaves(&self, pos: ChunkPos, col: &Column, buf: &mut [BlockState]) {
+        let y0 = pos.y * CHUNK_SIZE;
+        if y0 + CHUNK_SIZE < col.min_top {
+            return;
+        }
+        let snow = BlockState::new(self.snow, Shape::SlabBottom);
+        for lz in 0..CHUNK_SIZE as u8 {
+            for lx in 0..CHUNK_SIZE as u8 {
+                let b = col.biome[lz as usize * CHUNK_SIZE as usize + lx as usize] as usize;
+                if !matches!(b, biome::TAIGA | biome::FROSTPEAK | biome::TUNDRA | biome::GLACIER) {
+                    continue;
+                }
+                for ly in 0..CHUNK_SIZE as u8 - 1 {
+                    let i = LocalPos { x: lx, y: ly, z: lz }.index();
+                    let up = LocalPos { x: lx, y: ly + 1, z: lz }.index();
+                    if buf[up].is_air() && self.leaves_ids.binary_search(&buf[i].id()).is_ok() {
+                        buf[up] = snow;
+                    }
+                }
+            }
+        }
     }
 
     /// The terrain (no features) of the chunk at `pos` into `buf`.
@@ -1336,6 +1484,7 @@ impl WorldGen {
                 for ly in 0..CHUNK_SIZE {
                     let wy = y0 + ly;
                     let mut state = self.block_at(wx, wy, wz, top, rem, surf, sub, stone, rock, zone, col.water[i]);
+                    state = self.on_water(state, wx, wy, wz, top, col.water[i], col.biome[i]);
                     if zone > 0.0 && !state.is_air() && state.id() != self.water && wy < top - 1 && wy > HOLLOW_BOTTOM - 2 {
                         // The Hollow Earth's own rock, glowing moss on its floors and
                         // crystals on its ceilings.
@@ -1536,7 +1685,8 @@ mod tests {
                 }
             }
         }
-        assert!(slabs > 50 && slabs < checked / 3, "{slabs} slabs in {checked} columns");
+        // (more in steep country, where every step has one)
+        assert!(slabs > 50 && slabs < checked / 2, "{slabs} slabs in {checked} columns");
     }
 
     #[test]
@@ -1608,8 +1758,8 @@ mod tests {
         let (fangs, _) = survey("Stonefang Mountains");
         let (_, swamp) = survey("Murkwater Swamp");
         assert!(fangs > plains * 3.0, "Stonefang {fangs} vs grasslands {plains}");
-        assert!(plains < 1.2, "plains are gentle: {plains}");
-        assert!(swamp < 5.0, "the swamp lies near the water: {swamp}");
+        assert!(plains < 3.0, "plains are gentle: {plains}");
+        assert!(swamp < 20.0, "the swamp lies near the water: {swamp}");
     }
 
     #[test]

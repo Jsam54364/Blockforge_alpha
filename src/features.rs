@@ -157,24 +157,26 @@ impl Wood {
 }
 
 /// A broadleaf tree's height to the top of its trunk, for its size class and species
-/// (the first random draw, shared by `broadleaf` and `lod_top`). Real trees: a young one
-/// 4-6 m, a grown oak 8-13 m of trunk under a crown reaching ~15 m, an old giant ~25 m.
+/// (the first random draw, shared by `broadleaf` and `lod_top`), at real sizes (a block is
+/// a metre): a young tree 5-8 m, a grown oak 14-20 m with its crown reaching ~22 m, an
+/// ancient one 28-36 m reaching ~40 m.
 fn broadleaf_height(rng: &mut Rng, size: u8, w: Wood) -> f32 {
     w.s() * match size {
-        0 => 4.0 + rng.next_f32() * 2.5,
-        1 => 8.0 + rng.next_f32() * 5.0,
-        _ => 18.0 + rng.next_f32() * 8.0,
+        0 => 5.0 + rng.next_f32() * 3.0,
+        1 => 14.0 + rng.next_f32() * 6.0,
+        _ => 28.0 + rng.next_f32() * 8.0,
     }
 }
 
-/// A redwood's height: 34-50 m (the real ones grow taller still, but slowly).
+/// A redwood's height: 60-85 m, as the old coast redwoods.
 fn redwood_height(rng: &mut Rng, w: Wood) -> f32 {
-    w.s() * (34.0 + rng.next_f32() * 16.0)
+    w.s() * (60.0 + rng.next_f32() * 25.0)
 }
 
-/// A conifer's height: 8-18 m, a giant 13-29 m.
+/// A conifer's height: 14-28 m (spruces, firs and pines in a mature forest), a giant 1.5
+/// times that.
 fn conifer_height(rng: &mut Rng, giant: bool, w: Wood) -> f32 {
-    w.s() * (8.0 + rng.next_f32() * 10.0) * if giant { 1.6 } else { 1.0 }
+    w.s() * (14.0 + rng.next_f32() * 14.0) * if giant { 1.5 } else { 1.0 }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -204,6 +206,8 @@ pub enum Kind {
     IceSpike { ice: u16, core: u16, big: bool },
     Crystals(u16),
     Cactus(u16),
+    /// A patch of ferns on the forest floor.
+    Ferns(u16),
     Skeleton(u16),
     Sinkhole,
 }
@@ -212,16 +216,16 @@ impl Kind {
     /// How far the feature can reach from its anchor: (sideways, down, up).
     pub fn reach(&self) -> (i32, i32, i32) {
         match self {
-            Kind::Broadleaf(_, 2) => (19, 12, 46),
-            Kind::Broadleaf(_, 1) => (9, 3, 22),
+            Kind::Broadleaf(_, 2) => (19, 12, 50),
+            Kind::Broadleaf(_, 1) => (12, 3, 30),
             Kind::Broadleaf(..) => (5, 1, 12),
-            Kind::Redwood(_) => (12, 6, 76),
-            Kind::Conifer { giant: true, .. } => (9, 2, 40),
-            Kind::Conifer { .. } => (6, 2, 28),
-            Kind::Palm(_) => (9, 1, 18),
+            Kind::Redwood(_) => (19, 6, 96),
+            Kind::Conifer { giant: true, .. } => (14, 2, 50),
+            Kind::Conifer { .. } => (9, 2, 34),
+            Kind::Palm(_) => (11, 1, 24),
             Kind::Acacia(_) => (9, 1, 14),
             Kind::Willow(_) => (9, 2, 16),
-            Kind::Cypress(_) => (8, 3, 26),
+            Kind::Cypress(_) => (9, 3, 34),
             Kind::Bamboo(_) => (4, 1, 18),
             Kind::Dead { giant: true, .. } => (12, 6, 30),
             Kind::Dead { .. } => (6, 1, 16),
@@ -239,7 +243,8 @@ impl Kind {
             Kind::IceSpike { .. } => (3, 2, 12),
             Kind::Crystals(_) => (5, 2, 7),
             Kind::Cactus(_) => (2, 1, 7),
-            Kind::Skeleton(_) => (12, 2, 7),
+            Kind::Ferns(_) => (4, 1, 3),
+            Kind::Skeleton(_) => (24, 3, 9),
             Kind::Sinkhole => (8, 200, 3),
         }
     }
@@ -315,6 +320,18 @@ impl Feature {
             Kind::IceSpike { ice, core, big } => ice_spike(c, &mut rng, base, ice, core, big),
             Kind::Crystals(b) => crystals(c, &mut rng, base, b, 1.0),
             Kind::Cactus(b) => cactus(c, &mut rng, base, b),
+            Kind::Ferns(b) => {
+                for _ in 0..(4 + rng.below(6)) {
+                    let (dx, dz) = around(&mut rng);
+                    let d = rng.next_f32() * 3.5;
+                    let (x, z) = ((base[0] + dx * d).floor() as i32, (base[2] + dz * d).floor() as i32);
+                    let gy = (c.ground)(x, z) + 1;
+                    c.put(x, gy, z, full(b), Mode::Air);
+                    if rng.next_f32() < 0.3 {
+                        c.put(x, gy + 1, z, full(b), Mode::Air);
+                    }
+                }
+            }
             Kind::Skeleton(b) => skeleton(c, &mut rng, base, b),
             Kind::Sinkhole => sinkhole(c, &mut rng, base, self.seed),
         }
@@ -355,9 +372,9 @@ impl Feature {
                 }
             }
             Kind::Palm(w) => {
-                let h = 6.0 + rng.next_f32() * 5.0;
+                let h = 11.0 + rng.next_f32() * 7.0;
                 let a = rng.next_f32() * std::f32::consts::TAU;
-                let bend = 0.25 + rng.next_f32() * 0.35;
+                let bend = 0.15 + rng.next_f32() * 0.25;
                 let (ox, oz) = (a.cos() * bend * h, a.sin() * bend * h);
                 let d2 = ((dx as f32 - ox).powi(2) + (dz as f32 - oz).powi(2)).sqrt();
                 (d2 < 6.5).then(|| (h + 1.3 - 3.0 * (d2 / 6.5).powi(2), w.leaves))
@@ -371,7 +388,7 @@ impl Feature {
                 dome(h + 5.5, 6.5, 5.0, w.leaves)
             }
             Kind::Cypress(w) => {
-                let h = 11.0 + rng.next_f32() * 7.0;
+                let h = 18.0 + rng.next_f32() * 10.0;
                 dome(h + 2.5, 5.5, 3.0, w.leaves)
             }
             Kind::Bamboo(w) => dome(14.0, 3.0, 4.0, w.leaves),
@@ -534,7 +551,7 @@ fn broadleaf(c: &mut Canvas, rng: &mut Rng, base: [f32; 3], w: Wood, size: u8, s
 
 fn redwood(c: &mut Canvas, rng: &mut Rng, base: [f32; 3], w: Wood, seed: u64) {
     let h = redwood_height(rng, w);
-    let r = 1.7 + rng.next_f32() * 0.8;
+    let r = 2.4 + rng.next_f32() * 1.1;
     let foot = add(base, [0.0, -3.0, 0.0], 1.0);
     // A flared foot, then a straight column tapering to the top.
     c.segment(foot, add(base, [0.0, 4.0, 0.0], 1.0), r * 1.45, r, full(w.log), Mode::Force);
@@ -549,7 +566,7 @@ fn redwood(c: &mut Canvas, rng: &mut Rng, base: [f32; 3], w: Wood, seed: u64) {
         let n = 1 + rng.below(3);
         for _ in 0..n {
             let (dx, dz) = around(rng);
-            let len = (1.0 - t) * 9.0 + 2.0;
+            let len = (1.0 - t) * 12.0 + 2.5;
             let from = add(base, [0.0, y, 0.0], 1.0);
             let to = [from[0] + dx * len, from[1] - len * 0.15 + rng.next_f32(), from[2] + dz * len];
             c.segment(from, to, 0.8, 0.45, full(w.log), Mode::Force);
@@ -598,9 +615,9 @@ fn conifer(c: &mut Canvas, rng: &mut Rng, base: [f32; 3], w: Wood, open: bool, g
 }
 
 fn palm(c: &mut Canvas, rng: &mut Rng, base: [f32; 3], w: Wood) {
-    let h = 6.0 + rng.next_f32() * 5.0;
+    let h = 11.0 + rng.next_f32() * 7.0;
     let (dx, dz) = around(rng);
-    let bend = 0.25 + rng.next_f32() * 0.35;
+    let bend = 0.15 + rng.next_f32() * 0.25;
     let mut prev = add(base, [0.0, -1.0, 0.0], 1.0);
     let n = h as i32;
     for i in 1..=n {
@@ -669,7 +686,7 @@ fn willow(c: &mut Canvas, rng: &mut Rng, base: [f32; 3], w: Wood, seed: u64) {
 }
 
 fn cypress(c: &mut Canvas, rng: &mut Rng, base: [f32; 3], w: Wood, seed: u64) {
-    let h = 11.0 + rng.next_f32() * 7.0;
+    let h = 18.0 + rng.next_f32() * 10.0;
     // A swollen, buttressed foot, then a slim trunk.
     c.segment(add(base, [0.0, -3.0, 0.0], 1.0), add(base, [0.0, 3.0, 0.0], 1.0), 2.6, 1.0, full(w.log), Mode::Force);
     c.segment(add(base, [0.0, 3.0, 0.0], 1.0), add(base, [0.0, h, 0.0], 1.0), 1.0, 0.5, full(w.log), Mode::Force);

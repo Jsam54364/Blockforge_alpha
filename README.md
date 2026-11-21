@@ -475,20 +475,36 @@ cover decided separately.
   its ground (a surface, a block showing through it in patches, a subsurface) and its two
   stones (under the ground, on cliffs, in boulders and spires: ground three blocks steeper
   than a neighbour shows stone). **To add a biome, add an entry and a rule in `choose`.**
-* **Each biome shapes its own land** (`WorldGen::style`), keeping the large shape of the
-  landforms and remaking what sits on it: the grasslands smooth it into vast gentle plains;
-  the Wildwood rolls in hills cut by steep ravines; Amberwood rolls gently in hills and
-  valleys; the taiga rolls with rocky knolls; the tundra lies flat and open; the glacier
-  rises in smooth domes of ice split by crevasses; the Frostpeak Highlands climb in
-  cliff-stepped plateaus with jagged peaks; the Stonefang Mountains raise sharp ridges and
-  fangs of rock over deep canyons; the Sunscorched Expanse piles long dunes and stands
-  layered mesas out of its flat floor; the oasis lies low and lush round pools; the swamp
-  sinks almost to the water among hummocks and open pools; the Blightlands are scarred
-  with craters and cracks; the Petrified Kingdom is badlands of layered tablelands and
-  hoodoos; the Stormbreak Coast ends in cliffs over the sea. **Biomes blend:** how much a
-  place belongs to each biome (`biome::weights`) comes from the same rules as choosing it,
-  each a soft step over a margin, and the land is the weighted mix of the styles, so one
-  style fades into the next over a few hundred blocks. Rivers are cut afterwards.
+* **Each biome shapes its own land** (`WorldGen::style`), at real-world scale and
+  amplified in the manner of JJThunder's terrain, after a set of reference pictures:
+  * Ancient Wildwood: a rolling forest floor with ravines, 60-85 m redwoods, ferns.
+  * Amberwood: soft hills carpeted in fallen leaves under red and gold maples.
+  * Frostpeak Highlands: alpine massifs with sharp ridges and peaks up to ~400 blocks
+    over snowy spruce valleys.
+  * Stonefang Mountains: sheer rock pillars 60-220 blocks tall with green tops
+    (`WorldGen::pillar`, like Zhangjiajie's) in green valleys, jagged ridges behind.
+  * Sunscorched Expanse: a sea of sharp-crested dunes up to ~20 blocks, bare jagged
+    mountains rising from it.
+  * Emerald Oasis: red-rock tablelands ~45 blocks up, cut by canyons with stepped walls,
+    pools of water and lush ledges at their feet.
+  * Murkwater Swamp: just above the water, hummocks among open pools with lily pads.
+  * Whitewind Tundra: wide open swelling land with frozen lakes.
+  * Crystal Glacier: an ice sheet in domes, cut by deep canyons with blue ice walls.
+  * Winterpine Taiga: rolling snowy hills and spruce forest, snow on the branches.
+  * Blightlands: craters and cracks glowing purple from below, twisted dead trees.
+  * Petrified Kingdom: badlands of layered tablelands and hoodoos, stone trees.
+  * Stormbreak Coast: green headlands ending in 40-70 block sea cliffs, sea stacks.
+  * Giants' Grasslands: wide rolling hills with flower meadows and tablelands ending in
+    escarpments.
+
+  High ground is snowbound above ~150 blocks (bare rock on its cliffs), snow settles on
+  leaves in the cold biomes, and frozen biomes' lakes are iced over. **Biomes blend:**
+  how much a place belongs to each biome (`biome::weights`) comes from the same rules as
+  choosing it, each a soft step over a margin, and the land is the weighted mix of the
+  styles. Rivers are cut afterwards.
+* **Trees at real sizes** (a block is a metre): redwoods 60-85 m, grown oaks to ~22 m,
+  ancient ones ~40 m, spruces and firs 14-28 m (giants half again), palms 11-18 m, swamp
+  cypresses 18-28 m.
 * **Rivers** (`Terrain::river`): along the zero lines of a large, domain-warped noise, so
   they meander for kilometres. They start as streams a few blocks wide in the hills (none
   on the mountains) and widen to ~25 blocks towards the coast, where they meet the sea.
