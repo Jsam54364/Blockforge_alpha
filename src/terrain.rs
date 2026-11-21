@@ -68,7 +68,10 @@ pub struct TerrainSample {
     /// 0 at the coast (and at sea), 1 well inland.
     pub inland: f32,
     /// The surface of a river flowing here, in blocks (`NO_RIVER` where there is none).
+    /// Set by `WorldGen`, which carves rivers after shaping the land per biome.
     pub water: f32,
+    /// How much of the point is land: 0 at sea, 1 inland, a narrow band between at the coast.
+    pub land: f32,
 }
 
 /// `TerrainSample::water` where no river flows.
@@ -216,7 +219,7 @@ impl Terrain {
         let deep = smoothstep(COAST, COAST - 0.4, c);
         let sea = -3.0 - 48.0 * deep + 4.0 * self.sea_floor.at(x, z, cell);
         if land <= 0.0 {
-            return TerrainSample { height: sea, smooth: sea, inland: 0.0, water: NO_RIVER };
+            return TerrainSample { height: sea, smooth: sea, inland: 0.0, water: NO_RIVER, land: 0.0 };
         }
 
         let mut s = self.shape(x, z, cell);
@@ -247,17 +250,10 @@ impl Terrain {
             let stepped = (f.floor() + smoothstep(0.55, 0.85, f.fract())) * s.terrace;
             h += (stepped - h) * s.terraced;
         }
-        let mut water = NO_RIVER;
-        if land > 0.5 {
-            if let Some((carved, level)) = self.river(x, z, cell, h, smooth_h, inland) {
-                h = carved;
-                water = level;
-            }
-        }
         // Land stays at least a little above the sea, except in wetlands' ponds and at the coast.
         let height = sea + (h.max(-4.0) - sea) * land;
         let smooth = sea + (smooth_h.max(-4.0) - sea) * land;
-        TerrainSample { height, smooth, inland, water }
+        TerrainSample { height, smooth, inland, water: NO_RIVER, land }
     }
 
     /// The river at `(x, z)`, if one flows here or its valley reaches here: the ground
@@ -268,7 +264,7 @@ impl Terrain {
     /// towards the coast, where they meet the sea. Their surface follows the lie of the land
     /// heavily smoothed (the terrain seen from 600 blocks up), so it falls gently towards the
     /// sea, a step at a time, and the valley sides slope down to it.
-    fn river(&self, x: f32, z: f32, cell: f32, h: f32, smooth_h: f32, inland: f32) -> Option<(f32, f32)> {
+    pub(crate) fn river(&self, x: f32, z: f32, cell: f32, h: f32, smooth_h: f32, inland: f32) -> Option<(f32, f32)> {
         // Sources in the hills: no rivers on the mountains.
         let fade = 1.0 - smoothstep(48.0, 85.0, smooth_h);
         if fade <= 0.0 {

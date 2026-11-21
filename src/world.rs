@@ -414,8 +414,10 @@ mod tests {
         let t = w.column_top(x, z);
         assert_eq!((t.top_q, t.block), (4 * (ground_y + 7), stone.id()));
         assert_eq!((t.top_q, t.block), real_top(&mut w));
+        // A pit in the neighbour, dug from its own top block down.
+        let n_top = (w.column_top(x + 1, z).top_q - 1).div_euclid(4);
         for dy in 0..3 {
-            w.set_block(BlockPos::new(x + 1, ground_y - dy, z), crate::block::AIR, true);
+            w.set_block(BlockPos::new(x + 1, n_top - dy, z), crate::block::AIR, true);
         }
         let pit = w.column_top(x + 1, z);
         // Unloaded now: the journal still knows.
@@ -424,10 +426,10 @@ mod tests {
             w.unload(p);
         }
         assert_eq!(w.column_top(x + 1, z), pit);
-        assert!(pit.top_q <= 4 * (ground_y - 2), "{pit:?} vs ground {ground_y}");
+        assert!(pit.top_q <= 4 * (n_top - 2), "{pit:?} vs its ground {n_top}");
         let cols = w.journal().edited_columns();
         assert_eq!(cols.get(&(x, z)), Some(&(ground_y + 6)));
-        assert!(cols.get(&(x + 1, z)).is_some_and(|&y| y <= ground_y), "(the neighbour's ground may be lower)");
+        assert!(cols.get(&(x + 1, z)).is_some_and(|&y| y <= n_top));
         assert_eq!(cols.len(), 2);
         assert_eq!(w.edited_column_tops(), vec![w.column_top(x, z), pit]);
     }

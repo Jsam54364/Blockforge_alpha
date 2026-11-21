@@ -475,6 +475,20 @@ cover decided separately.
   its ground (a surface, a block showing through it in patches, a subsurface) and its two
   stones (under the ground, on cliffs, in boulders and spires: ground three blocks steeper
   than a neighbour shows stone). **To add a biome, add an entry and a rule in `choose`.**
+* **Each biome shapes its own land** (`WorldGen::style`), keeping the large shape of the
+  landforms and remaking what sits on it: the grasslands smooth it into vast gentle plains;
+  the Wildwood rolls in hills cut by steep ravines; Amberwood rolls gently in hills and
+  valleys; the taiga rolls with rocky knolls; the tundra lies flat and open; the glacier
+  rises in smooth domes of ice split by crevasses; the Frostpeak Highlands climb in
+  cliff-stepped plateaus with jagged peaks; the Stonefang Mountains raise sharp ridges and
+  fangs of rock over deep canyons; the Sunscorched Expanse piles long dunes and stands
+  layered mesas out of its flat floor; the oasis lies low and lush round pools; the swamp
+  sinks almost to the water among hummocks and open pools; the Blightlands are scarred
+  with craters and cracks; the Petrified Kingdom is badlands of layered tablelands and
+  hoodoos; the Stormbreak Coast ends in cliffs over the sea. **Biomes blend:** how much a
+  place belongs to each biome (`biome::weights`) comes from the same rules as choosing it,
+  each a soft step over a margin, and the land is the weighted mix of the styles, so one
+  style fades into the next over a few hundred blocks. Rivers are cut afterwards.
 * **Rivers** (`Terrain::river`): along the zero lines of a large, domain-warped noise, so
   they meander for kilometres. They start as streams a few blocks wide in the hills (none
   on the mountains) and widen to ~25 blocks towards the coast, where they meet the sea.

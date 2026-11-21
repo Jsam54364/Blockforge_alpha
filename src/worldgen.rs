@@ -26,7 +26,7 @@ use crate::terrain::{Terrain, TerrainSample, NO_RIVER};
 pub const SEA_LEVEL: i32 = 0;
 /// Bumped whenever the same seed would generate different terrain: worlds saved by an
 /// older generator are kept apart (their edits would land on different ground).
-pub const WORLDGEN_VERSION: u32 = 6;
+pub const WORLDGEN_VERSION: u32 = 7;
 pub const BEDROCK_Y: i32 = -128;
 /// No caves below this; deep chunks collapse to a single uniform entry (except under the
 /// Hollow Earth, whose tunnels go down to its caverns).
@@ -130,6 +130,24 @@ impl FeatureGrid {
 }
 
 
+/// The noises the biome terrain styles are made of.
+struct Styles {
+    /// Rolling hills, a hundred-odd blocks across, and broad swells.
+    roll: Fbm,
+    swell: Fbm,
+    /// Ravines, cracks and canyons follow the zero lines of these.
+    ravines: Fbm,
+    canyons: Fbm,
+    crevasses: Fbm,
+    /// Ridged noise for jagged peaks and knolls, and finer for fangs and hoodoos.
+    spikes: Fbm,
+    fangs: Fbm,
+    /// Tablelands where these are high, pools and craters where these are.
+    mesas: Fbm,
+    basins: Fbm,
+    hummocks: Fbm,
+}
+
 /// Feature tiers: big things on a coarse grid, ordinary ones on a fine grid, and the
 /// Hollow Earth's on their own.
 const TIERS: [(u8, i32); 3] = [(0, 24), (1, 5), (2, 10)];
@@ -162,6 +180,8 @@ pub struct WorldGen {
     patches: Fbm,
     /// Groves and glades: where trees grow thick (see `grove`).
     groves: Fbm,
+    /// The noises of the biomes' terrain styles (see `style`).
+    styles: Styles,
     fb: FeatureBlocks,
     ores: HashMap<&'static str, u16>,
     rock_ids: Vec<u16>,
@@ -335,6 +355,18 @@ impl WorldGen {
             hollow: Fbm::new(s(14), 1600.0, 2, 0.5),
             patches: Fbm::new(s(15), 22.0, 2, 0.55),
             groves: Fbm::new(s(16), 150.0, 3, 0.5),
+            styles: Styles {
+                roll: Fbm::new(s(20), 140.0, 3, 0.5),
+                swell: Fbm::new(s(21), 520.0, 2, 0.5),
+                ravines: Fbm::new(s(22), 700.0, 2, 0.45),
+                spikes: Fbm::new(s(23), 260.0, 4, 0.5),
+                fangs: Fbm::new(s(24), 70.0, 2, 0.5),
+                canyons: Fbm::new(s(25), 900.0, 2, 0.45),
+                crevasses: Fbm::new(s(26), 260.0, 2, 0.45),
+                mesas: Fbm::new(s(27), 340.0, 3, 0.5),
+                basins: Fbm::new(s(28), 120.0, 2, 0.5),
+                hummocks: Fbm::new(s(29), 16.0, 2, 0.5),
+            },
             fb,
             ores,
             rock_ids,
@@ -370,14 +402,14 @@ impl WorldGen {
         if cell <= 1 {
             return self.surface_q(x, z);
         }
-        4 * self.terrain.sample(x as f32, z as f32, cell as f32).height.round() as i32
+        4 * self.sample(x as f32, z as f32, cell as f32).height.round() as i32
     }
 
     /// The surface at full detail, in quarter blocks: whole blocks (the height rounded), plus
     /// a half slab only at the foot of a step, where the ground rises toward a higher
     /// neighbour. Slopes get smoothed; flat ground stays flat.
     fn surface_q(&self, x: i32, z: i32) -> i32 {
-        let h = |x: i32, z: i32| self.terrain.sample(x as f32, z as f32, 1.0).height;
+        let h = |x: i32, z: i32| self.sample(x as f32, z as f32, 1.0).height;
         surface_from(h(x, z), [h(x + 1, z), h(x - 1, z), h(x, z + 1), h(x, z - 1)])
     }
 
@@ -390,6 +422,143 @@ impl WorldGen {
         self.rocks[i as usize]
     }
 
+    /// The terrain at `(x, z)`, for cells `cell` blocks wide: the landforms and coasts
+    /// (`Terrain::sample`), shaped in the style of each biome there by how much the place
+    /// belongs to it (`biome::weights`, so styles blend across borders), then cut by rivers.
+    pub fn sample(&self, x: f32, z: f32, cell: f32) -> TerrainSample {
+        let mut t = self.terrain.sample(x, z, cell);
+        if t.land <= 0.0 {
+            return t;
+        }
+        let alt = t.smooth.max(0.0);
+        let c = self.climate.at(x, z, alt, t.inland, cell);
+        let w = biome::weights(c.temperature, c.rainfall, self.place(x as i32, z as i32, alt, t.inland, cell));
+        let (mut sum, mut total) = (0.0f32, 0.0f32);
+        for (b, &k) in w.iter().enumerate() {
+            if k > 0.01 {
+                sum += k * self.style(b, x, z, cell, &t);
+                total += k;
+            }
+        }
+        if total > 0.0 {
+            let styled = sum / total;
+            t.height += (styled - t.height) * smoothstep(0.0, 0.6, t.land);
+        }
+        if t.land > 0.5 {
+            if let Some((carved, level)) = self.terrain.river(x, z, cell, t.height, t.smooth, t.inland) {
+                t.height = carved;
+                t.water = level;
+            }
+        }
+        t
+    }
+
+    /// The land at `(x, z)` shaped as biome `b` would have it, from the landforms' terrain `t`.
+    /// Each style keeps the large shape of the land (its smoothed height) and remakes what
+    /// sits on it: the grasslands smooth it into wide plains, the Stonefang raise fangs of
+    /// rock, the desert piles dunes and mesas, the swamp sinks almost to the water...
+    fn style(&self, b: usize, x: f32, z: f32, cell: f32, t: &TerrainSample) -> f32 {
+        use biome::*;
+        let (h, s) = (t.height, t.smooth);
+        let d = h - s; // the landforms' small bumps and terraces
+        let st = &self.styles;
+        let roll = st.roll.at(x, z, cell);
+        let swell = st.swell.at(x, z, cell);
+        // Keep land land, except where a biome wants pools.
+        let keep = |v: f32| if h >= 1.0 { v.max(1.0) } else { v };
+        match b {
+            GRASSLANDS => keep(s * 0.9 + 2.0 + 5.0 * swell + 2.0 * roll + d * 0.25),
+            WILDWOOD => {
+                // Rolling hills cut by steep, narrow ravines.
+                let r = 1.0 - st.ravines.at(x, z, cell).abs();
+                let cut = 11.0 * smoothstep(0.955, 0.995, r);
+                keep(h + 7.0 * roll + 3.0 * swell - cut)
+            }
+            AMBERWOOD => keep(s + d * 0.6 + 8.0 * st.roll.at(x + 1700.0, z, cell) + 3.0 * swell),
+            TAIGA => {
+                let knolls = 14.0 * (st.spikes.ridged(x + 900.0, z, cell) - 0.55).max(0.0);
+                keep(h + 6.0 * roll + knolls)
+            }
+            TUNDRA => keep(s * 0.7 + 2.0 + 3.0 * swell + d * 0.2 + 1.0 * roll),
+            GLACIER => {
+                // Smooth domes of ice split by crevasses.
+                let dome = 16.0 * swell.max(0.0) + 4.0 * roll;
+                let crev = st.crevasses.at(x, z, cell).abs();
+                let cut = 8.0 * (1.0 - smoothstep(0.0, 0.025, crev));
+                keep(s + 4.0 + dome - cut)
+            }
+            FROSTPEAK => {
+                // High plateaus stepped by cliffs, jagged peaks rising off them.
+                let f = (h + 6.0 * roll) / 9.0;
+                let stepped = (f.floor() + smoothstep(0.62, 0.9, f.fract())) * 9.0;
+                let peaks = 55.0 * st.spikes.ridged(x, z, cell).powi(3) * smoothstep(30.0, 70.0, s);
+                keep(stepped + peaks)
+            }
+            STONEFANG => {
+                // Sharp ridges and fangs of rock, deep canyons between.
+                let r = st.spikes.ridged(x, z, cell);
+                let f = ((st.fangs.ridged(x, z, cell) - 0.7).max(0.0) / 0.3).min(1.0);
+                let fangs = 24.0 * f * f;
+                let canyon = 1.0 - st.canyons.at(x, z, cell).abs();
+                let cut = 22.0 * smoothstep(0.93, 0.99, canyon);
+                keep(h + 60.0 * r.powi(4) + fangs - cut)
+            }
+            SUNSCORCHED => {
+                // Long dunes on a flat floor, with mesas standing out of it.
+                let warp = 40.0 * st.swell.at(x + 3000.0, z, cell);
+                let k = smoothstep(60.0, 20.0, cell);
+                let dune = (0.5 + 0.5 * (((x * 0.8 + z * 0.6) + warp) / 13.0).sin()).powi(2);
+                let dunes = 8.0 * dune * smoothstep(-0.2, 0.4, st.roll.at(x - 500.0, z, cell)) * k;
+                // Mesas: flat tops 20 blocks up, their sides stepped in 4-block layers.
+                let k = smoothstep(0.32, 0.4, st.mesas.at(x, z, cell));
+                let floor = s * 0.75 + 3.0 + 2.0 * swell;
+                let mesa = floor + 20.0 * k;
+                let mesa = if k > 0.0 && k < 1.0 { (mesa / 4.0).floor() * 4.0 } else { mesa };
+                keep((floor + dunes).max(mesa))
+            }
+            OASIS => {
+                // Low, lush ground with pools (the sea's level fills them).
+                let base = s * 0.55 + 2.0 + 3.0 * roll;
+                let pool = smoothstep(0.35, 0.5, st.basins.at(x, z, cell));
+                base + (-2.5 - base) * pool
+            }
+            MURKWATER => {
+                // Almost flat, just above the water, hummocks and pools of open water.
+                let base = (h - SEA_LEVEL as f32) * 0.18 + 1.2 + 1.3 * st.hummocks.at(x, z, cell);
+                let pool = smoothstep(-0.25, -0.45, roll);
+                base + (-1.5 - base) * pool
+            }
+            BLIGHT => {
+                // Scarred ground: craters with raised rims, jagged cracks.
+                let c = st.basins.at(x + 4000.0, z, cell);
+                let pit = 13.0 * smoothstep(0.42, 0.58, c);
+                let rim = 3.5 * smoothstep(0.32, 0.42, c) * (1.0 - smoothstep(0.42, 0.5, c));
+                let crack = 4.0 * smoothstep(0.96, 0.995, 1.0 - st.ravines.at(x + 2000.0, z, cell).abs());
+                h + d * 0.6 + 3.0 * roll + rim - pit - crack
+            }
+            PETRIFIED => {
+                // Badlands: eroded tablelands in layers, with hoodoos.
+                let raised = h + 16.0 * smoothstep(-0.1, 0.35, st.mesas.at(x + 2500.0, z, cell)) + 3.0 * roll;
+                let f = raised / 4.0;
+                let layered = (f.floor() + smoothstep(0.55, 0.9, f.fract())) * 4.0;
+                let hoodoos = 9.0 * ((st.fangs.ridged(x + 700.0, z, cell) - 0.82).max(0.0) / 0.18);
+                keep(layered + hoodoos)
+            }
+            STORMBREAK => {
+                // Rugged headlands ending in cliffs over the sea.
+                let cliff = 15.0 * smoothstep(0.0, 0.05, t.inland) * (0.7 + 0.3 * swell);
+                keep(h + cliff + d * 0.4 + 3.0 * roll)
+            }
+            _ => h,
+        }
+    }
+
+    /// What a point is like besides its climate (see `biome::Place`).
+    fn place(&self, x: i32, z: i32, alt: f32, inland: f32, cell: f32) -> Place {
+        let (fx, fz) = (x as f32, z as f32);
+        Place { altitude: alt, inland, blight: self.blight.at(fx, fz, cell), ancient: self.ancient.at(fx, fz, cell), oasis: self.oasis.at(fx, fz, cell) }
+    }
+
     /// The biome at `(x, z)` (index into `BIOMES`), for terrain `t` there.
     pub fn biome_at(&self, x: i32, z: i32, t: &TerrainSample, cell: f32) -> usize {
         let alt = t.smooth.max(0.0);
@@ -398,15 +567,7 @@ impl WorldGen {
     }
 
     fn biome_for(&self, x: i32, z: i32, c: ClimateSample, alt: f32, inland: f32, cell: f32) -> usize {
-        let (fx, fz) = (x as f32, z as f32);
-        let place = Place {
-            altitude: alt,
-            inland,
-            blight: self.blight.at(fx, fz, cell),
-            ancient: self.ancient.at(fx, fz, cell),
-            oasis: self.oasis.at(fx, fz, cell),
-        };
-        biome::choose(c.temperature, c.rainfall, place)
+        biome::choose(c.temperature, c.rainfall, self.place(x, z, alt, inland, cell))
     }
 
     /// How much of the Hollow Earth lies under `(x, z)`: 0 none .. 1 its heart.
@@ -479,7 +640,7 @@ impl WorldGen {
     /// the biome's grass colour (sRGB) and, in the last byte, a brightness variation (128 is
     /// neutral) that varies over tens of blocks and hides how textures repeat.
     pub fn ground_tint(&self, x: i32, z: i32, cell: i32) -> [u8; 4] {
-        let t = self.terrain.sample(x as f32, z as f32, cell as f32);
+        let t = self.sample(x as f32, z as f32, cell as f32);
         let [r, g, b] = biome::grass_rgb(&BIOMES[self.biome_at(x, z, &t, cell as f32)]);
         let v = self.variation.at(x as f32, z as f32, cell as f32);
         [r, g, b, (128.0 + 127.0 * v.clamp(-1.0, 1.0)) as u8]
@@ -487,7 +648,7 @@ impl WorldGen {
 
     /// Biome, landform, height and climate of the column at `(x, z)`.
     pub fn describe(&self, x: i32, z: i32) -> GroundInfo {
-        let t = self.terrain.sample(x as f32, z as f32, 1.0);
+        let t = self.sample(x as f32, z as f32, 1.0);
         let c = self.climate.at(x as f32, z as f32, t.smooth.max(0.0), t.inland, 1.0);
         let biome = if t.height < (SEA_LEVEL + 1) as f32 {
             "sea"
@@ -570,7 +731,7 @@ impl WorldGen {
     /// from above; trees and other features are not drawn far away) for `cell == 1`, and is
     /// band-limited for coarser cells.
     pub fn lod_surface(&self, x: i32, z: i32, cell: i32) -> (i32, u16) {
-        let t = self.terrain.sample(x as f32, z as f32, cell as f32);
+        let t = self.sample(x as f32, z as f32, cell as f32);
         let hq = if cell <= 1 { self.surface_q(x, z) } else { 4 * t.height.round() as i32 };
         let top = hq.div_euclid(4);
         let slab = hq.rem_euclid(4) >= 2;
@@ -581,7 +742,7 @@ impl WorldGen {
             return (4 * (wl + 1), self.water);
         }
         let slope = if cell <= 1 {
-            let h = |x: i32, z: i32| self.terrain.sample(x as f32, z as f32, 1.0).height.round() as i32;
+            let h = |x: i32, z: i32| self.sample(x as f32, z as f32, 1.0).height.round() as i32;
             [h(x + 1, z), h(x - 1, z), h(x, z + 1), h(x, z - 1)].iter().map(|n| (n - top).abs()).max().unwrap_or(0)
         } else {
             0
@@ -655,7 +816,7 @@ impl WorldGen {
             }
         }
         if cell > 8 && b != self.water && ground == q {
-            let t = self.terrain.sample(x as f32, z as f32, cell as f32);
+            let t = self.sample(x as f32, z as f32, cell as f32);
             let biome = self.biome_at(x, z, &t, cell as f32);
             let (cover, height, name) = self.canopy(biome);
             let h = hash3(self.seed ^ 0xCA90, x, cell, z);
@@ -679,7 +840,7 @@ impl WorldGen {
 
     /// Just the height part of `lod_surface` (much cheaper: no climate).
     pub fn lod_height(&self, x: i32, z: i32, cell: i32) -> i32 {
-        let t = self.terrain.sample(x as f32, z as f32, cell.max(1) as f32);
+        let t = self.sample(x as f32, z as f32, cell.max(1) as f32);
         let hq = if cell <= 1 { self.surface_q(x, z) } else { 4 * t.height.round() as i32 };
         let top = hq.div_euclid(4);
         let wl = water_level(&t);
@@ -692,7 +853,7 @@ impl WorldGen {
     /// The top of the highest full block of the column at `(x, z)` in quarter blocks, at
     /// full detail: the ground under any half-slab or water.
     pub fn ground_q(&self, x: i32, z: i32) -> i32 {
-        4 * self.terrain.sample(x as f32, z as f32, 1.0).height.round() as i32
+        4 * self.sample(x as f32, z as f32, 1.0).height.round() as i32
     }
 
     pub fn column(&self, cx: i32, cz: i32) -> Column {
@@ -705,7 +866,7 @@ impl WorldGen {
         let samples: Vec<TerrainSample> = (0..W * W)
             .map(|i| {
                 let (x, z) = (cx * CHUNK_SIZE + i % W - 1, cz * CHUNK_SIZE + i / W - 1);
-                self.terrain.sample(x as f32, z as f32, 1.0)
+                self.sample(x as f32, z as f32, 1.0)
             })
             .collect();
         let h = |lx: i32, lz: i32| samples[((lz + 1) * W + lx + 1) as usize].height;
@@ -806,7 +967,7 @@ impl WorldGen {
 
     /// The top full block of the ground at `(x, z)`.
     fn ground_y(&self, x: i32, z: i32) -> i32 {
-        self.terrain.sample(x as f32, z as f32, 1.0).height.round() as i32 - 1
+        self.sample(x as f32, z as f32, 1.0).height.round() as i32 - 1
     }
 
     /// The feature of tier `tier` in grid cell `(gx, gz)`, if any (cached).
@@ -836,7 +997,7 @@ impl WorldGen {
         if tier == 2 {
             return self.hollow_anchor(x, z, seed, roll, u);
         }
-        let t = self.terrain.sample(x as f32, z as f32, 1.0);
+        let t = self.sample(x as f32, z as f32, 1.0);
         let y = t.height.round() as i32 - 1;
         let b = self.biome_at(x, z, &t, 1.0);
         if water_level(&t) > SEA_LEVEL && y < water_level(&t) + 1 {
@@ -1063,7 +1224,7 @@ impl WorldGen {
             return;
         }
         let (cx, cz) = (x0 + CHUNK_SIZE / 2, z0 + CHUNK_SIZE / 2);
-        let t = self.terrain.sample(cx as f32, cz as f32, 1.0);
+        let t = self.sample(cx as f32, cz as f32, 1.0);
         let b = self.biome_at(cx, cz, &t, 1.0);
         let mut rng = Rng::new(hash3(self.seed ^ 0x0E5, pos.x, pos.y, pos.z));
         let n = 5 + rng.below(5);
@@ -1424,13 +1585,41 @@ mod tests {
     }
 
     #[test]
+    fn each_biome_has_its_own_lie_of_the_land() {
+        let (_, g) = make();
+        // How rough the land is around the first place found in a biome: the mean height
+        // change between neighbours 4 blocks apart, and the mean height.
+        let survey = |biome: &str| {
+            let (cx, cz) = find_biome(&g, biome, (-400, -400));
+            let (x0, z0) = (cx * CHUNK_SIZE, cz * CHUNK_SIZE);
+            let h = |x: i32, z: i32| g.sample(x as f32, z as f32, 1.0).height;
+            let (mut rough, mut mean, mut n) = (0.0, 0.0, 0.0);
+            for j in 0..16 {
+                for i in 0..16 {
+                    let (x, z) = (x0 + i * 4, z0 + j * 4);
+                    rough += (h(x + 4, z) - h(x, z)).abs();
+                    mean += h(x, z);
+                    n += 1.0;
+                }
+            }
+            (rough / n, mean / n)
+        };
+        let (plains, _) = survey("Giants' Grasslands");
+        let (fangs, _) = survey("Stonefang Mountains");
+        let (_, swamp) = survey("Murkwater Swamp");
+        assert!(fangs > plains * 3.0, "Stonefang {fangs} vs grasslands {plains}");
+        assert!(plains < 1.2, "plains are gentle: {plains}");
+        assert!(swamp < 5.0, "the swamp lies near the water: {swamp}");
+    }
+
+    #[test]
     fn rivers_flow_above_the_sea_in_beds_cut_into_the_land() {
         let (_, g) = make();
         // A river column well above the sea: water from its bed up to its level, then air.
         let (x, z): (i32, i32) = (0..400_000)
             .map(|i: i32| ((i % 800) * 6 - 2400, (i / 800) * 6 - 1500))
             .find(|&(x, z)| {
-                let t = g.terrain.sample(x as f32, z as f32, 1.0);
+                let t = g.sample(x as f32, z as f32, 1.0);
                 water_level(&t) >= SEA_LEVEL + 2 && (t.height.round() as i32) < water_level(&t)
             })
             .expect("a river");

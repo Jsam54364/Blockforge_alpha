@@ -80,50 +80,55 @@ pub struct Place {
     pub oasis: f32,
 }
 
-/// The biome (index into `BIOMES`) for a climate at a place.
-pub fn choose(temperature: f32, rainfall: f32, p: Place) -> usize {
+fn hi(v: f32, at: f32, margin: f32) -> f32 {
+    crate::noise::smoothstep(at - margin, at + margin, v)
+}
+
+fn lo(v: f32, at: f32, margin: f32) -> f32 {
+    1.0 - hi(v, at, margin)
+}
+
+/// How much each biome (indexed as `BIOMES`) a climate at a place belongs to, summing to 1.
+/// The rules of `choose`, each a soft step across a margin (1.5 degrees, 0.04 rainfall,
+/// some blocks of altitude...), so terrain shaped per biome blends from one biome's style
+/// to the next instead of jumping at the border.
+pub fn weights(temperature: f32, rainfall: f32, p: Place) -> [f32; 15] {
     let (t, r, alt) = (temperature, rainfall, p.altitude);
-    if t < -13.0 {
-        return GLACIER;
-    }
-    // Mountains: snowy granite highlands where it is cold, bare fangs of basalt below.
-    if alt >= 62.0 {
-        return if t < 2.0 { FROSTPEAK } else { STONEFANG };
-    }
-    if p.blight > 0.36 && t > -6.0 {
-        return BLIGHT;
-    }
-    if p.ancient > 0.33 && r < 0.55 && t > 4.0 {
-        return PETRIFIED;
-    }
-    if p.inland < 0.1 && alt < 24.0 && (-3.0..21.0).contains(&t) {
-        return STORMBREAK;
-    }
-    if t < -2.0 {
-        return if r < 0.45 { TUNDRA } else { TAIGA };
-    }
-    if t < 5.0 {
-        return if alt > 42.0 { FROSTPEAK } else { TAIGA };
-    }
-    if r >= 0.7 && alt < 16.0 && t >= 8.0 {
-        return MURKWATER;
-    }
-    if t >= 19.0 {
-        if r < 0.34 {
-            return if p.oasis > 0.55 { OASIS } else { SUNSCORCHED };
+    let mut w = [0.0f32; 15];
+    let mut rest = 1.0f32;
+    // Each rule takes its share of what earlier rules left.
+    let take = |w: &mut [f32; 15], rest: &mut f32, share: f32, split: &[(usize, f32)]| {
+        let g = share.clamp(0.0, 1.0) * *rest;
+        for &(b, k) in split {
+            w[b] += g * k;
         }
-        return if r >= 0.52 { OASIS } else { GRASSLANDS };
-    }
-    if alt > 46.0 {
-        return STONEFANG;
-    }
-    if r < 0.33 {
-        return GRASSLANDS;
-    }
-    if r < 0.48 {
-        return AMBERWOOD;
-    }
-    WILDWOOD
+        *rest -= g;
+    };
+    take(&mut w, &mut rest, lo(t, -13.0, 1.5), &[(GLACIER, 1.0)]);
+    let cold = lo(t, 2.0, 1.5);
+    take(&mut w, &mut rest, hi(alt, 62.0, 8.0), &[(FROSTPEAK, cold), (STONEFANG, 1.0 - cold)]);
+    take(&mut w, &mut rest, hi(p.blight, 0.36, 0.05) * hi(t, -6.0, 1.5), &[(BLIGHT, 1.0)]);
+    take(&mut w, &mut rest, hi(p.ancient, 0.33, 0.05) * lo(r, 0.55, 0.04) * hi(t, 4.0, 1.5), &[(PETRIFIED, 1.0)]);
+    take(&mut w, &mut rest, lo(p.inland, 0.1, 0.03) * lo(alt, 24.0, 6.0) * hi(t, -3.0, 1.5) * lo(t, 21.0, 1.5), &[(STORMBREAK, 1.0)]);
+    let dry = lo(r, 0.45, 0.04);
+    take(&mut w, &mut rest, lo(t, -2.0, 1.5), &[(TUNDRA, dry), (TAIGA, 1.0 - dry)]);
+    let high = hi(alt, 42.0, 6.0);
+    take(&mut w, &mut rest, lo(t, 5.0, 1.5), &[(FROSTPEAK, high), (TAIGA, 1.0 - high)]);
+    take(&mut w, &mut rest, hi(r, 0.7, 0.04) * lo(alt, 16.0, 5.0) * hi(t, 8.0, 1.5), &[(MURKWATER, 1.0)]);
+    let (desert, oasis, wet) = (lo(r, 0.34, 0.04), hi(p.oasis, 0.55, 0.08), hi(r, 0.52, 0.04));
+    take(&mut w, &mut rest, hi(t, 19.0, 1.5), &[(OASIS, desert * oasis + (1.0 - desert) * wet), (SUNSCORCHED, desert * (1.0 - oasis)), (GRASSLANDS, (1.0 - desert) * (1.0 - wet))]);
+    take(&mut w, &mut rest, hi(alt, 46.0, 6.0), &[(STONEFANG, 1.0)]);
+    take(&mut w, &mut rest, lo(r, 0.33, 0.04), &[(GRASSLANDS, 1.0)]);
+    take(&mut w, &mut rest, lo(r, 0.48, 0.04), &[(AMBERWOOD, 1.0)]);
+    w[WILDWOOD] += rest;
+    w
+}
+
+/// The biome (index into `BIOMES`) for a climate at a place: the one it belongs to most
+/// (`weights`).
+pub fn choose(temperature: f32, rainfall: f32, p: Place) -> usize {
+    let w = weights(temperature, rainfall, p);
+    (0..w.len()).max_by(|&a, &b| w[a].partial_cmp(&w[b]).unwrap()).unwrap_or(GRASSLANDS)
 }
 
 /// A biome's grass colour as sRGB bytes.
@@ -149,6 +154,20 @@ mod tests {
                 i
             );
         }
+    }
+
+    #[test]
+    fn weights_sum_to_one_and_blend_across_borders() {
+        let land = Place { altitude: 10.0, inland: 0.8, ..Default::default() };
+        for t in [-20.0, -5.0, 3.0, 12.0, 25.0] {
+            for r in [0.1, 0.3, 0.5, 0.8] {
+                let w = weights(t, r, land);
+                assert!((w.iter().sum::<f32>() - 1.0).abs() < 1e-4, "{t} {r}");
+            }
+        }
+        // Right at the grasslands / Amberwood border, both share the place.
+        let w = weights(12.0, 0.33, land);
+        assert!(w[GRASSLANDS] > 0.3 && w[AMBERWOOD] > 0.3, "{w:?}");
     }
 
     #[test]
