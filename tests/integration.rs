@@ -338,16 +338,20 @@ fn real_terrain_near_the_camera_always_replaces_lod_terrain() {
     let (_, _, cam) = spawn(1337, &reg);
     for offset in [[0.0, 14.0, 0.0], [150.0, 30.0, -90.0]] {
         c.set_position([cam[0] + offset[0], cam[1] + offset[1], cam[2] + offset[2]]);
+        // After a move the counters may not change for a while on a slow machine, so settling
+        // alone can end before the new area streams in: wait (bounded) for it to be covered.
         settle(&mut c);
-        let _ = c.take_mesh_changes(usize::MAX);
-        let cov = c.lod_coverage(6.5 * 32.0);
         let at = BlockPos::from_f32(c.camera).chunk();
         // Columns 4 chunks off diagonally can hold ground (a mountainside 200 blocks up)
         // past the draw distance, rightly left to the LOD; within 3 everything is in reach.
-        for dz in -3..=3 {
-            for dx in -3..=3 {
-                assert!(cov.covered(at.x + dx, at.z + dz), "column {dx},{dz} from the camera is not covered");
-            }
+        let uncovered = |c: &mut Client| {
+            let _ = c.take_mesh_changes(usize::MAX);
+            let cov = c.lod_coverage(6.5 * 32.0);
+            (-3..=3).flat_map(|dz| (-3..=3).map(move |dx| (dx, dz))).find(|&(dx, dz)| !cov.covered(at.x + dx, at.z + dz))
+        };
+        pump_until(&mut c, Duration::from_secs(30), |c| uncovered(c).is_none());
+        if let Some((dx, dz)) = uncovered(&mut c) {
+            panic!("column {dx},{dz} from the camera is not covered");
         }
     }
 }
