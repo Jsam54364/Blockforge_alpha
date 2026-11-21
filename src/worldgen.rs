@@ -26,7 +26,7 @@ use crate::terrain::{Terrain, TerrainSample, NO_RIVER};
 pub const SEA_LEVEL: i32 = 0;
 /// Bumped whenever the same seed would generate different terrain: worlds saved by an
 /// older generator are kept apart (their edits would land on different ground).
-pub const WORLDGEN_VERSION: u32 = 8;
+pub const WORLDGEN_VERSION: u32 = 9;
 pub const BEDROCK_Y: i32 = -128;
 /// No caves below this; deep chunks collapse to a single uniform entry (except under the
 /// Hollow Earth, whose tunnels go down to its caverns).
@@ -466,6 +466,14 @@ impl WorldGen {
             let styled = sum / total;
             t.height += (styled - t.height) * smoothstep(0.0, 0.6, t.land);
         }
+        // The Stonefang's pillars stand only well inside it (never spilling half-height into
+        // its neighbours), growing to full height as the biome takes over.
+        let fang = w[biome::STONEFANG];
+        if fang > 0.7 && cell <= 32.0 && t.land > 0.9 {
+            if let Some(top) = self.pillar(x, z, &self.styles) {
+                t.height += top * smoothstep(0.7, 0.95, fang);
+            }
+        }
         if t.land > 0.5 {
             if let Some((carved, level)) = self.terrain.river(x, z, cell, t.height, t.smooth, t.inland) {
                 t.height = carved;
@@ -533,12 +541,10 @@ impl WorldGen {
                 // green tops, standing in green valleys, before jagged ridges.
                 let valley = s * 0.7 + 4.0 + 7.0 * roll;
                 let ridges = 150.0 * st.alps.ridged(x + 3000.0, z, cell).powi(3);
-                let pillar = if cell <= 16.0 { self.pillar(x, z, st) } else { None };
-                let base = valley + ridges;
-                keep(match pillar {
-                    Some(top) => base.max(valley + top + 2.0 * roll),
-                    None => base,
-                })
+                // Jagged crags between, and the pillars themselves (added in `sample`, only well
+                // inside the biome).
+                let crags = 55.0 * st.spikes.ridged(x - 1300.0, z, cell).powf(2.5);
+                keep(valley + ridges + crags)
             }
             SUNSCORCHED => {
                 // A sea of dunes with sharp crests, and bare, jagged mountains rising out of it.
@@ -601,27 +607,27 @@ impl WorldGen {
         smoothstep(0.965, 0.995, 1.0 - self.styles.ravines.at(x + 2000.0, z * 1.3, cell).abs())
     }
 
-    /// The top of a rock pillar standing over `(x, z)`, if one does: pillars stand on a
-    /// 34-block jittered grid (most cells have one), 5-13 blocks across their ragged edge,
-    /// 60-220 blocks tall.
+    /// The top of a rock pillar standing over `(x, z)`, if one does: massive pillars on a
+    /// 96-block jittered grid (half the cells have one), 28-60 blocks across their ragged
+    /// edge, 50-140 blocks tall, with green tops.
     fn pillar(&self, x: f32, z: f32, st: &Styles) -> Option<f32> {
-        const CELL: f32 = 34.0;
+        const CELL: f32 = 96.0;
         let (gx, gz) = ((x / CELL).floor() as i32, (z / CELL).floor() as i32);
         let mut best: Option<f32> = None;
         for dz in -1..=1 {
             for dx in -1..=1 {
                 let (cx, cz) = (gx + dx, gz + dz);
                 let hsh = hash3(self.seed ^ 0x9111A5, cx, 0, cz);
-                if unit(hsh) > 0.7 {
+                if unit(hsh) > 0.5 {
                     continue;
                 }
                 let px = (cx as f32 + 0.2 + 0.6 * unit(hsh.rotate_left(11))) * CELL;
                 let pz = (cz as f32 + 0.2 + 0.6 * unit(hsh.rotate_left(23))) * CELL;
-                let r = 5.0 + 8.0 * unit(hsh.rotate_left(37));
+                let r = 14.0 + 16.0 * unit(hsh.rotate_left(37));
                 let (ddx, ddz) = (x - px, z - pz);
-                let ragged = 1.0 + 0.18 * st.fangs.at(x * 2.0, z * 2.0, 1.0);
+                let ragged = 1.0 + 0.15 * st.fangs.at(x, z, 1.0);
                 if ddx * ddx + ddz * ddz < (r * ragged) * (r * ragged) {
-                    let top = 60.0 + 160.0 * unit(hsh.rotate_left(49)).powi(2);
+                    let top = 50.0 + 90.0 * unit(hsh.rotate_left(49)).powi(2);
                     best = Some(best.map_or(top, |b: f32| b.max(top)));
                 }
             }
@@ -902,35 +908,57 @@ impl WorldGen {
         let (mut q, mut b) = self.lod_surface(x, z, cell);
         let ground = q;
         let half = cell / 2;
+        // Each feature is sampled at four points across the cell (one at full detail) and
+        // raises the cell by its average height over them, if it covers at least half of
+        // them: a tree narrower than a cell can't turn into a cell-wide tower.
+        let pts: &[(i32, i32)] = if cell <= 1 { &[(0, 0)] } else { &[(-1, -1), (1, -1), (-1, 1), (1, 1)] };
+        let k = (cell / 4).max(1);
         for f in feats.near(x, z) {
             let (r, _, _) = f.kind.reach();
             if (f.x - x).abs() > r + half || (f.z - z).abs() > r + half {
                 continue;
             }
-            if let Some((h, blk)) = f.lod_top(x - f.x, z - f.z) {
-                let top = 4 * (f.y + 1) + (h * 4.0) as i32;
-                if top > q {
-                    (q, b) = (top, blk);
+            // Past 8-block cells a single tree would be a block-wide lump: forests show as the
+            // canopy below, and only rock (spires, arches, boulders) stays.
+            let tree = matches!(f.kind, Kind::Broadleaf(..) | Kind::Redwood(_) | Kind::Conifer { .. } | Kind::Palm(_) | Kind::Acacia(_) | Kind::Willow(_) | Kind::Cypress(_) | Kind::Bamboo(_) | Kind::Dead { .. } | Kind::Mushroom { .. } | Kind::Bush(_));
+            if tree && cell > 8 {
+                continue;
+            }
+            let (mut sum, mut hits, mut blk) = (0.0f32, 0, 0u16);
+            for &(px, pz) in pts {
+                if let Some((h, bb)) = f.lod_top(x + px * k - f.x, z + pz * k - f.z) {
+                    sum += h.max(0.0);
+                    hits += 1;
+                    blk = bb;
                 }
             }
+            if hits * 2 < pts.len() as i32 && pts.len() > 1 {
+                continue;
+            }
+            if hits == 0 {
+                continue;
+            }
+            let top = 4 * (f.y + 1) + (4.0 * sum / pts.len() as f32) as i32;
+            if top > q {
+                (q, b) = (top, blk);
+            }
         }
-        if cell > 8 && b != self.water && ground == q {
+        // Past 8-block cells forests are a canopy: a smooth layer over the groves, as high as
+        // the biome's trees stand where they grow thickest, thinning to nothing in glades.
+        if cell > 8 && cell <= 64 && b != self.water && ground == q {
             let t = self.sample(x as f32, z as f32, cell as f32);
             let biome = self.biome_at(x, z, &t, cell as f32);
             let (cover, height, name) = self.canopy(biome);
-            let h = hash3(self.seed ^ 0xCA90, x, cell, z);
-            // Groves show as solid canopy, glades as open ground, and the edge between them
-            // a little ragged.
             let g = self.grove(x, z, cell as f32);
             let density = cover * match biome {
                 biome::WILDWOOD | biome::TAIGA | biome::AMBERWOOD | biome::MURKWATER | biome::OASIS => 0.45 + 0.6 * g,
                 biome::FROSTPEAK | biome::BLIGHT | biome::PETRIFIED | biome::STORMBREAK => 0.2 + g,
                 _ => 0.1 + 2.0 * g * g,
             };
-            if cover > 0.0 && density > 0.42 + 0.2 * unit(h) {
+            let thick = smoothstep(0.4, 0.7, density);
+            if thick > 0.05 {
                 if let Some(&blk) = self.canopy_blocks.get(name) {
-                    let top = ground + (4.0 * height * (0.7 + 0.6 * unit(h.rotate_left(21)))) as i32;
-                    (q, b) = (top, blk);
+                    (q, b) = (ground + (4.0 * height * 0.8 * thick) as i32, blk);
                 }
             }
         }
@@ -1196,8 +1224,8 @@ impl WorldGen {
                 (0.1, Kind::FallenLog { log: self.w("redwood").log, moss: self.fb.moss, big: true }),
             ]),
             AMBERWOOD => (0.3, vec![(0.35, Kind::Broadleaf(self.w("goldbark"), 2)), (0.25, Kind::Broadleaf(self.w("maple"), 2)), (0.25, boulder(true)), (0.15, Kind::FallenLog { log: self.w("maple").log, moss: self.fb.moss, big: true })]),
-            FROSTPEAK => (0.25, vec![(0.5, boulder(false)), (0.25, spire), (0.25, Kind::Conifer { wood: self.w("fir"), open: false, giant: true })]),
-            STONEFANG => (0.5, vec![(0.5, spire), (0.15, Kind::Arch { stone: bb.stone, band: bb.stone_b }), (0.35, boulder(false))]),
+            FROSTPEAK => (0.25, vec![(0.55, boulder(false)), (0.1, spire), (0.35, Kind::Conifer { wood: self.w("fir"), open: false, giant: true })]),
+            STONEFANG => (0.4, vec![(0.25, spire), (0.15, Kind::Arch { stone: bb.stone, band: bb.stone_b }), (0.6, boulder(false))]),
             SUNSCORCHED => (0.18, vec![(0.35, spire), (0.35, boulder(false)), (0.3, Kind::Skeleton(self.fb.bone))]),
             OASIS => (0.2, vec![(0.6, boulder(true)), (0.4, Kind::Broadleaf(self.w("fig"), 2))]),
             MURKWATER => (0.35, vec![(0.55, Kind::Cypress(self.w("cypress"))), (0.2, boulder(true)), (0.25, Kind::Mushroom { stem: self.fb.stem, cap: self.fb.red_cap, giant: true })]),
@@ -1737,15 +1765,20 @@ mod tests {
     #[test]
     fn each_biome_has_its_own_lie_of_the_land() {
         let (_, g) = make();
-        // How rough the land is around the first place found in a biome: the mean height
-        // change between neighbours 4 blocks apart, and the mean height.
-        let survey = |biome: &str| {
-            let (cx, cz) = find_biome(&g, biome, (-400, -400));
-            let (x0, z0) = (cx * CHUNK_SIZE, cz * CHUNK_SIZE);
-            let h = |x: i32, z: i32| g.sample(x as f32, z as f32, 1.0).height;
+        // Each style over the same stretch of inland terrain: how rough it is (mean height
+        // change between columns 4 blocks apart) and how high it lies on average.
+        let (x0, z0) = (0..2000)
+            .map(|i| ((i % 50) * 200 - 5000, (i / 50) * 200 - 4000))
+            .find(|&(x, z)| {
+                let t = g.terrain.sample(x as f32, z as f32, 1.0);
+                t.land >= 1.0 && t.inland > 0.5 && (10.0..40.0).contains(&t.smooth)
+            })
+            .expect("inland ground");
+        let survey = |b: usize| {
+            let h = |x: i32, z: i32| g.style(b, x as f32, z as f32, 1.0, &g.terrain.sample(x as f32, z as f32, 1.0));
             let (mut rough, mut mean, mut n) = (0.0, 0.0, 0.0);
-            for j in 0..16 {
-                for i in 0..16 {
+            for j in 0..32 {
+                for i in 0..32 {
                     let (x, z) = (x0 + i * 4, z0 + j * 4);
                     rough += (h(x + 4, z) - h(x, z)).abs();
                     mean += h(x, z);
@@ -1754,12 +1787,12 @@ mod tests {
             }
             (rough / n, mean / n)
         };
-        let (plains, _) = survey("Giants' Grasslands");
-        let (fangs, _) = survey("Stonefang Mountains");
-        let (_, swamp) = survey("Murkwater Swamp");
-        assert!(fangs > plains * 3.0, "Stonefang {fangs} vs grasslands {plains}");
-        assert!(plains < 3.0, "plains are gentle: {plains}");
-        assert!(swamp < 20.0, "the swamp lies near the water: {swamp}");
+        let (plains, _) = survey(biome::GRASSLANDS);
+        let (crags, high) = survey(biome::STONEFANG);
+        let (tundra, _) = survey(biome::TUNDRA);
+        let (_, swamp) = survey(biome::MURKWATER);
+        assert!(crags > plains * 2.0 && crags > tundra * 2.0, "Stonefang {crags} vs grasslands {plains}, tundra {tundra}");
+        assert!(swamp < 5.0 && swamp < high, "the swamp lies near the water: {swamp}");
     }
 
     #[test]

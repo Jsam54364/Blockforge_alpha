@@ -481,8 +481,10 @@ cover decided separately.
   * Amberwood: soft hills carpeted in fallen leaves under red and gold maples.
   * Frostpeak Highlands: alpine massifs with sharp ridges and peaks up to ~400 blocks
     over snowy spruce valleys.
-  * Stonefang Mountains: sheer rock pillars 60-220 blocks tall with green tops
-    (`WorldGen::pillar`, like Zhangjiajie's) in green valleys, jagged ridges behind.
+  * Stonefang Mountains: jagged crags and ridges, and well inside the biome massive rock
+    pillars 28-60 blocks across and 50-140 tall with green tops (`WorldGen::pillar`, like
+    Zhangjiajie's) in green valleys. Pillars rise only where the place is mostly
+    Stonefang, so none stand half-height in neighbouring biomes.
   * Sunscorched Expanse: a sea of sharp-crested dunes up to ~20 blocks, bare jagged
     mountains rising from it.
   * Emerald Oasis: red-rock tablelands ~45 blocks up, cut by canyons with stepped walls,
@@ -543,9 +545,11 @@ cover decided separately.
 * **Features in distant (LOD) terrain** (`WorldGen::lod_cell`, `Feature::lod_top`): each
   feature has an outline (crowns as domes and cones, spires as tapering columns, arches,
   boulders, giant logs) from the same sizes it is drawn with, and a cell shows the highest
-  outline over its sample point. Cells up to 8 blocks show every feature, up to 32 the big
-  ones, and past 8 forests show as their biome's canopy over the share of cells its crowns
-  cover (dense in the Wildwood and the taiga, scattered on the grasslands). Features are
+  outline averaged over four points across the cell (and only where it covers at least
+  two, so a tree narrower than a cell never becomes a cell-wide tower). Cells up to 8
+  blocks show every feature; past that trees are left to a smooth canopy over the groves
+  as high as the biome's trees, and only rock features (spires, arches, boulders) show
+  individually up to 32-block cells (dense in the Wildwood and the taiga, scattered on the grasslands). Features are
   bucketed per section (`FeatureGrid`), so sections cost a few milliseconds.
 * `cargo run --release --example chunk_bench` times chunk generation in a few biomes
   (well under a millisecond a chunk on a desktop).
