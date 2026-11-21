@@ -1109,9 +1109,25 @@ impl Ui {
             let label = if tw > 110.0 * dp { *name } else { "" };
             self.button(out, Style::Stone, r, label, Some(icon), Serif, Action::BlockGroup(n as u8), true, on);
         }
-        let top = gy + th + 6.0 * dp;
+        // The biome filter: arrows either side of its name.
+        let fy = gy + th + 4.0 * dp;
+        let fh = (30.0 * dp).min(gh * 0.16);
+        self.button(out, Style::Stone, (gx + 2.0 * dp, fy, fh, fh), "", Some("chevron_left"), Serif, Action::BlockBiome(-1), true, false);
+        self.button(out, Style::Stone, (gx + gw - fh - 2.0 * dp, fy, fh, fh), "", Some("chevron_right"), Serif, Action::BlockBiome(1), true, false);
+        let biome = match self.block_biome {
+            0 => "All biomes",
+            b => crate::icons::BIOMES[(b as usize - 1) % crate::icons::BIOMES.len()].1,
+        };
+        let size = draw::fit(Serif, biome, fh * 0.6, gw - 2.0 * fh - 16.0 * dp);
+        draw::centered(out, Serif, biome, gx + gw * 0.5, fy + fh * 0.5, size, INK, true);
+        let top = fy + fh + 6.0 * dp;
         let (area_h, bar) = (gy + gh - top, 6.0 * dp);
-        let shown: Vec<usize> = (0..self.blocks.len()).filter(|&i| self.blocks[i].group == self.block_group).collect();
+        let (g, b) = (self.block_group, self.block_biome);
+        let shown: Vec<usize> = (0..self.blocks.len()).filter(|&i| self.blocks[i].group == g && (b == 0 || self.blocks[i].biome == b)).collect();
+        if shown.is_empty() {
+            let msg = "No blocks of this kind for this biome.";
+            draw::centered(out, Serif, msg, gx + gw * 0.5, top + area_h * 0.4, draw::fit(Serif, msg, 16.0 * dp, gw * 0.9), DIM, true);
+        }
         let cols = ((gw - bar) / (50.0 * dp)).floor().clamp(4.0, 12.0) as usize;
         // As many whole rows as fill the window (the slots a little smaller to fit them).
         let sw = ((gw - bar - 4.0 * dp) / cols as f32).min(60.0 * dp);

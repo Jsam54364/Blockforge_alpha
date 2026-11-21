@@ -28,9 +28,120 @@ pub fn placeable(reg: &BlockRegistry) -> Vec<u16> {
         .collect()
 }
 
+/// The icons drawn so far: thumbnail-texture slots handed out as items show on screen,
+/// the least recently shown given up when all are taken (there are thousands of items and
+/// room for `gfx::ICON_SLOTS` icons). The app draws the ones handed out (`take_pending`).
+struct IconCache {
+    /// item -> (slot, drawn yet)
+    map: std::collections::HashMap<u16, (usize, bool)>,
+    /// Each slot's item and the frame it last showed.
+    slots: Vec<(u16, u64)>,
+    frame: u64,
+    pending: Vec<(usize, u16)>,
+}
+
+static CACHE: std::sync::Mutex<Option<IconCache>> = std::sync::Mutex::new(None);
+
+fn with_cache<R>(f: impl FnOnce(&mut IconCache) -> R) -> R {
+    let mut g = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    let c = g.get_or_insert_with(IconCache::new);
+    f(c)
+}
+
+/// The slot of item `item`'s icon, once it is drawn (until then None; it is queued).
+pub fn icon_slot(item: u16) -> Option<usize> {
+    with_cache(|c| c.slot(item, crate::gfx::ICON_SLOTS))
+}
+
+impl IconCache {
+    fn new() -> IconCache {
+        IconCache { map: Default::default(), slots: Vec::new(), frame: 1, pending: Vec::new() }
+    }
+
+    /// `icon_slot` with room for `cap` icons.
+    fn slot(&mut self, item: u16, cap: usize) -> Option<usize> {
+        let c = self;
+        let frame = c.frame;
+        if let Some(&(slot, drawn)) = c.map.get(&item) {
+            c.slots[slot].1 = frame;
+            return drawn.then_some(slot);
+        }
+        let slot = if c.slots.len() < cap {
+            c.slots.push((item, frame));
+            c.slots.len() - 1
+        } else {
+            // The slot shown longest ago, if not this frame.
+            let (slot, &(old, used)) = c.slots.iter().enumerate().min_by_key(|(_, s)| s.1)?;
+            if used >= frame {
+                return None;
+            }
+            c.map.remove(&old);
+            c.pending.retain(|p| p.0 != slot);
+            c.slots[slot] = (item, frame);
+            slot
+        };
+        c.map.insert(item, (slot, false));
+        c.pending.push((slot, item));
+        None
+    }
+}
+
+/// A new frame of the UI (icons shown before it may be given up).
+pub fn next_icon_frame() {
+    with_cache(|c| c.frame += 1);
+}
+
+/// Up to `max` icons to draw now: (slot, item). They count as drawn.
+pub fn take_pending(max: usize) -> Vec<(usize, u16)> {
+    with_cache(|c| {
+        let n = c.pending.len().min(max);
+        let out: Vec<_> = c.pending.drain(..n).collect();
+        for &(_, item) in &out {
+            if let Some(e) = c.map.get_mut(&item) {
+                e.1 = true;
+            }
+        }
+        out
+    })
+}
+
+/// Forgets every icon (a new thumbnails texture).
+pub fn reset_icons() {
+    with_cache(|c| {
+        c.map.clear();
+        c.slots.clear();
+        c.pending.clear();
+    })
+}
+
 /// The inventory's groups, as tabs, in order: (key in blocks.toml, name, icon).
 pub const GROUPS: [(&str, &str, &str); 4] =
     [("building", "Building", "fort"), ("natural", "Natural", "landscape"), ("wood", "Wood", "forest"), ("minerals", "Minerals", "diamond")];
+
+/// The biomes blocks belong to (their `biome` in blocks.toml) and their names: the Blocks
+/// window shows one at a time, or all (filter 0; biome n is filter n + 1).
+pub const BIOMES: [(&str, &str); 15] = [
+    ("wildwood", "Ancient Wildwood"),
+    ("amberwood", "Amberwood"),
+    ("frostpeak", "Frostpeak Highlands"),
+    ("stonefang", "Stonefang Mountains"),
+    ("sunscorched", "Sunscorched Expanse"),
+    ("oasis", "Emerald Oasis"),
+    ("murkwater", "Murkwater Swamp"),
+    ("tundra", "Whitewind Tundra"),
+    ("glacier", "Crystal Glacier"),
+    ("taiga", "Winterpine Taiga"),
+    ("blight", "Blightlands"),
+    ("petrified", "Petrified Kingdom"),
+    ("hollow", "Hollow Earth"),
+    ("stormbreak", "Stormbreak Coast"),
+    ("grasslands", "Giants' Grasslands"),
+];
+
+/// A block's biome filter (`BIOMES` index + 1; 0: none).
+pub fn biome_of(reg: &BlockRegistry, id: u16) -> u8 {
+    reg.def(id).biome.as_deref().and_then(|b| BIOMES.iter().position(|(k, _)| *k == b)).map_or(0, |i| i as u8 + 1)
+}
 
 /// The group of a block (its index in `GROUPS`; unknown groups are natural).
 pub fn group_of(reg: &BlockRegistry, id: u16) -> u8 {
@@ -195,14 +306,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn icons_are_drawn_as_they_show_and_the_oldest_give_way() {
+        let mut c = IconCache::new();
+        // Asked for: queued, not drawn yet.
+        assert_eq!(c.slot(10, 2), None);
+        assert_eq!(c.slot(11, 2), None);
+        assert_eq!(c.pending, vec![(0, 10), (1, 11)]);
+        c.map.values_mut().for_each(|e| e.1 = true);
+        c.pending.clear();
+        assert_eq!((c.slot(10, 2), c.slot(11, 2)), (Some(0), Some(1)));
+        // Full, and both shown this frame: nothing gives way.
+        assert_eq!(c.slot(12, 2), None);
+        assert!(c.pending.is_empty());
+        // Next frame, with 11 shown again, 10 gives way to 12.
+        c.frame += 1;
+        c.slot(11, 2);
+        assert_eq!(c.slot(12, 2), None);
+        assert_eq!(c.pending, vec![(0, 12)]);
+        assert!(!c.map.contains_key(&10));
+    }
+
+    #[test]
     fn every_placeable_block_gets_a_cube_with_three_lit_faces() {
         let reg = BlockRegistry::builtin();
         let ids = placeable(&reg);
         let names: Vec<&str> = ids.iter().map(|&i| reg.def(i).name.as_str()).collect();
         assert!(names.contains(&"stone") && names.contains(&"grass") && names.contains(&"log"));
         assert!(!names.contains(&"air") && !names.contains(&"water") && !names.contains(&"bedrock"));
-        let items = items(&reg);
-        assert!(items.len() <= crate::gfx::ICON_SLOTS, "{} icons: the thumbnails texture has room for {}", items.len(), crate::gfx::ICON_SLOTS);
         for &id in &ids {
             let px = render(&reg, id);
             assert_eq!(px.len(), (ICON * ICON * 4) as usize);

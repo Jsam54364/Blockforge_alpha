@@ -220,8 +220,9 @@ and quads drawn. The HUD and menus are drawn by a small immediate-mode layer (`u
   slots beside the character, turned by the arrows under him). The right window's tabs (top
   right, by the X): **Gear** (things to wear; none exist yet) and **Blocks** (the creative
   palette, organised like Minecraft's: a tab each for Building, Natural, Wood and Minerals,
-  each tab's blocks by material with every block's slab after it, scrolled by dragging,
-  with a scroll bar). Along the bottom: **Move Similar** (hotbar stacks of blocks the inventory already
+  each tab's blocks by material with every block's slab after it, a biome filter under the
+  tabs (arrows step through All biomes and each of the 15), scrolled by dragging, with a
+  scroll bar). Along the bottom: **Move Similar** (hotbar stacks of blocks the inventory already
   holds go in with them), **Move All** (the whole hotbar into the inventory), **Sort** (the
   inventory merged and ordered), the hotbar in the middle, and a line about what is picked.
   Items are stacks of up to 64. Tap a slot to pick it up (it lights), then tap where it goes:
@@ -511,6 +512,23 @@ Next: trees and plants per biome, rivers, rain shadows behind mountains.
   * Not yet: plants that need a crossed-quad model (flowers, ferns, reeds, seaweed) and
     stairs, which the mesher can't draw yet. World generation doesn't place the new blocks
     yet either: for now they come from the inventory.
+* **About a hundred blocks for every biome** (`tools/biomeblocks.py`, painted by
+  `blockset.py`): each of the 15 biomes has its own two stones, two woods, plaster, accent
+  colour, soil and sand, and every block is one of those in a pattern. For each stone:
+  the stone, mossy, cracked, weathered, rubble and layered (natural), and 24 building
+  patterns (cobbles, bricks, polished, small and large bricks, herringbone, tiles, diagonal
+  tiles, chiselled, pillar, cracked and mossy bricks, mossy cobbles, flagstones, pebble
+  mosaic, ashlar, framed, chequered, frieze, rough-hewn, shingles, inlaid, cut stone,
+  basketweave). For each wood: stripped log, vertical planks, parquet, diagonal planks,
+  panel, carved panel, shingles, timber frame, crate, log wall, lattice (and log, planks and
+  leaves for the 18 new species). Then plaster, timbered and cross-timbered plaster, painted
+  plaster, wattle, daub, roof tiles, mosaic, coarse, stony and rooty soil, path, pebbles and
+  sand. A block's `biome` field names its biome; the Blocks window filters by it.
+* **Room for ~2,000 textures:** the texture array takes as many layers as the GPU allows
+  (usually 2048); on a GPU with fewer, textures past its limit are drawn as the closest in
+  colour under it (`gfx::texture_layers`, `BlockRegistry::remap_textures`). Distant terrain
+  keeps a texture in 11 bits. Item icons are drawn as they come on screen, into 288 slots
+  reused least-recently-shown first (`icons::icon_slot`), so any number of items fits.
 * **Groups, families and slabs** (fields of a block in `blocks.toml`): `group` is the
   inventory tab (building, natural, wood, minerals), `family` the material it sits with,
   `label` its name there, and `slab = true` adds its slab as an item of its own. An item is a

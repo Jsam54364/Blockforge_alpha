@@ -36,6 +36,8 @@ pub struct BlockDef {
     pub label: Option<String>,
     /// Also offered as a slab.
     pub slab: bool,
+    /// The biome it belongs to (its key, e.g. "wildwood"), if any.
+    pub biome: Option<String>,
 }
 
 #[derive(Debug)]
@@ -192,6 +194,7 @@ impl BlockRegistry {
             let family = get_str(t, "family", &name)?.unwrap_or(name.as_str()).to_string();
             let label = get_str(t, "label", &name)?.map(|s| s.to_string());
             let slab = get_bool(t, "slab", &name)?.unwrap_or(false);
+            let biome = get_str(t, "biome", &name)?.map(|s| s.to_string());
 
             let id = reg.defs.len() as u16;
             reg.by_name.insert(name.clone(), id);
@@ -208,6 +211,7 @@ impl BlockRegistry {
                 family,
                 label,
                 slab,
+                biome,
             });
         }
 
@@ -254,6 +258,19 @@ impl BlockRegistry {
 
     pub fn get(&self, state: BlockState) -> &BlockDef {
         self.def(state.id())
+    }
+
+    /// A copy whose blocks draw texture `map[t]` in place of texture `t` (for a GPU that has
+    /// room for fewer textures than there are: the ones past its limit are drawn as a similar
+    /// one under it). Names, ids and the source text stay the same.
+    pub fn remap_textures(&self, map: &[u16]) -> BlockRegistry {
+        let mut defs = self.defs.clone();
+        for d in &mut defs {
+            for t in &mut d.tex {
+                *t = map.get(*t as usize).copied().unwrap_or(*t);
+            }
+        }
+        BlockRegistry { defs, by_name: self.by_name.clone(), textures: self.textures.clone(), source: self.source.clone() }
     }
 
     pub fn texture_names(&self) -> &[String] {

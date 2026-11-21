@@ -528,8 +528,8 @@ fn the_inventory_has_two_windows_whose_tabs_change_only_their_own_window() {
                 }
                 let (cx, cy) = (fx + fw * 0.5, fy + fh * 0.5);
                 u.press(7, cx, cy);
-                u.moved(7, cx, cy - fh * 2.2);
-                assert_eq!(u.release(7, cx, cy - fh * 2.2), None, "a drag picks nothing");
+                u.moved(7, cx, cy - fh * 30.0);
+                assert_eq!(u.release(7, cx, cy - fh * 30.0), None, "a drag picks nothing");
                 build(&mut u);
             }
             assert!(palette(&u).contains(mine.last().unwrap()), "{w}x{h}: group {g} scrolls to its end");

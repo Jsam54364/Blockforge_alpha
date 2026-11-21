@@ -192,7 +192,7 @@ fn strikes_to_break(hardness: f32) -> u32 {
 pub fn block_items(reg: &BlockRegistry) -> Vec<BlockItem> {
     crate::icons::items(reg)
         .into_iter()
-        .map(|id| BlockItem { id, name: crate::icons::item_name(reg, id), group: crate::icons::group_of(reg, id) })
+        .map(|id| BlockItem { id, name: crate::icons::item_name(reg, id), group: crate::icons::group_of(reg, id), biome: crate::icons::biome_of(reg, id) })
         .collect()
 }
 
@@ -960,7 +960,12 @@ mod tests {
         assert!(makes("maple_log", "maple_planks") && makes("log", "oak_planks") && makes("basalt", "cobbled_basalt"));
         assert!(makes("cobbled_basalt", "basalt_bricks") && makes("basalt_bricks", "basalt_bricks:slab") && makes("basalt_bricks:slab", "basalt_bricks"));
         // Every texture fits the texture array and the distant terrain's 8 bits.
-        assert!(reg.texture_names().len() < 256 && items.len() <= crate::gfx::ICON_SLOTS);
+        assert!(reg.texture_names().len() < 2048);
+        // About a hundred blocks for every biome.
+        for (n, (key, _)) in crate::icons::BIOMES.iter().enumerate() {
+            let k = (1..reg.len() as u16).filter(|&id| crate::icons::biome_of(&reg, id) == n as u8 + 1).count();
+            assert!((95..=110).contains(&k), "{key}: {k} blocks");
+        }
     }
 
     #[test]

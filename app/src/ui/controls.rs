@@ -140,8 +140,9 @@ impl Layout {
 pub struct BlockItem {
     pub id: u16,
     pub name: String,
-    /// Its tab in the Blocks window (`icons::GROUPS`).
+    /// Its tab in the Blocks window (`icons::GROUPS`) and its biome (`icons::biome_of`).
     pub group: u8,
+    pub biome: u8,
 }
 
 /// The stick as drawn: where it sits, where the thumb is, its radius and how visible it is
@@ -233,9 +234,13 @@ impl Ui {
         }
     }
 
-    /// The icon slot of the block with this id (`gfx::icon_uv`).
+    /// The icon slot of the item with this id (`gfx::icon_uv`), once drawn
+    /// (`icons::icon_slot`).
     pub fn icon_of(&self, id: u16) -> Option<usize> {
-        self.blocks.iter().position(|b| b.id == id)
+        if id == 0 {
+            return None;
+        }
+        crate::icons::icon_slot(id)
     }
 
     /// The block in the hotbar's picked slot (0: none).

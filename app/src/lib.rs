@@ -372,6 +372,10 @@ impl App {
         };
         ui.seconds = seconds;
         ui.build(&self.perf, &mut self.hud);
+        // The icons the UI asked for, a few dozen a frame (the rest show over the next ones).
+        for (slot, item) in crate::icons::take_pending(48) {
+            g.draw_icon(&self.registry, slot, item);
+        }
         let over_world = ui.over_world();
         let (under, figure) = (ui.under, ui.showcase);
         let result = match (&mut self.game, over_world) {
@@ -432,6 +436,11 @@ impl ApplicationHandler for App {
         let size = window.inner_size();
         match pollster::block_on(gfx::Gfx::new(window.clone(), &self.registry)) {
             Ok(mut g) => {
+                // A GPU with room for fewer textures than the blocks have: mesh with the
+                // registry that draws the extra ones as similar ones (games open later use it).
+                if let Some(map) = &g.texture_remap {
+                    self.registry = Arc::new(self.registry.remap_textures(map));
+                }
                 self.surface = (size.width, size.height, window.scale_factor());
                 self.ui.set_surface(size.width, size.height, window.scale_factor());
                 self.ui.vsync_supported = g.vsync_supported();
@@ -446,9 +455,7 @@ impl ApplicationHandler for App {
                 }
                 self.gfx = Some(g);
                 self.window = Some(window);
-                if let Some(g) = &self.gfx {
-                    g.set_block_icons(&self.registry);
-                }
+                crate::icons::reset_icons();
                 self.default_thumbnail();
                 self.refresh_worlds();
             }

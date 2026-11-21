@@ -315,6 +315,11 @@ impl Ui {
             // (what is picked up stays picked up: it can be taken to another tab)
             Action::LeftTab(t) => self.left_tab = t.min(LEFT_TABS.len() as u8 - 1),
             Action::RightTab(t) => self.right_tab = t.min(RIGHT_TABS.len() as u8 - 1),
+            Action::BlockBiome(d) => {
+                let n = crate::icons::BIOMES.len() as i32 + 1;
+                self.block_biome = (self.block_biome as i32 + d as i32).rem_euclid(n) as u8;
+                self.palette_scroll = 0;
+            }
             Action::BlockGroup(g) => {
                 self.block_group = g.min(crate::icons::GROUPS.len() as u8 - 1);
                 self.palette_scroll = 0;

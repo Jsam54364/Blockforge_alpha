@@ -149,7 +149,7 @@ fn vs_lod(v: VsIn) -> VsOut {
     let inx = f32((a >> 15u) & 3u) - 1.0;
     let inz = f32((a >> 17u) & 3u) - 1.0;
     let top = f32((a >> 19u) & 1u);
-    let tex = (a >> 20u) & 255u;
+    let tex = ((a >> 20u) & 255u) | (((a >> 29u) & 7u) << 8u);
     let base = vec3<f32>(
         v.origin.x + f32(a & 63u) * cell,
         f32(bitcast<i32>(v.packed.y << 16u) >> 16u) * 0.25, // an i16 of quarter blocks

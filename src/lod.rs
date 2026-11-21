@@ -382,7 +382,7 @@ impl LodSettings {
 ///
 /// ```text
 ///   a: x(6) | z(6)<<6 | face(3)<<12 | in_x(2)<<15 | in_z(2)<<17 | top(1)<<19 | texture(8)<<20
-///      | smooth(1)<<28
+///      | smooth(1)<<28 | texture's high bits(3)<<29 (an 11-bit texture: up to 2048)
 ///   b: y in quarter blocks, as an i16 | normal x(8)<<16 | normal z(8)<<24
 /// ```
 ///
@@ -420,7 +420,7 @@ impl LodVertex {
         (self.a >> 19) & 1 == 1
     }
     pub fn texture(self) -> u32 {
-        (self.a >> 20) & 255
+        ((self.a >> 20) & 255) | (((self.a >> 29) & 7) << 8)
     }
     pub fn y_q(self) -> i32 {
         self.b as u16 as i16 as i32
@@ -585,7 +585,7 @@ fn border_min(gen: &WorldGen, key: SectionKey, i: i32, j: i32) -> i32 {
 fn tex(reg: &BlockRegistry, block: u16, face: Face) -> u32 {
     // Tall LOD side faces repeat the side texture once per block, grass fringe and all: that
     // is what the stepped slopes they stand for look like up close.
-    reg.def(block).tex[face.index()] as u32 & 255
+    reg.def(block).tex[face.index()] as u32 & 2047
 }
 
 /// Accumulates quads; tracks the vertical extent.
@@ -621,7 +621,8 @@ impl Emit {
                 | (((inx + 1) as u32) << 15)
                 | (((inz + 1) as u32) << 17)
                 | ((top as u32) << 19)
-                | ((texture & 255) << 20);
+                | ((texture & 255) << 20)
+                | ((texture >> 8 & 7) << 29);
             let (a, b) = match &self.normals {
                 Some(n) => (a | 1 << 28, (y as i16 as u16 as u32) | (n[(z * (CELLS + 1) + x) as usize] << 16)),
                 None => (a, y as i16 as u16 as u32),
@@ -1120,6 +1121,13 @@ fn cover_with_children(built: &HashSet<SectionKey>, k: SectionKey, out: &mut Vec
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn textures_past_255_keep_their_high_bits() {
+        let mut e = Emit { verts: Vec::new(), min_q: i32::MAX, max_q: i32::MIN, normals: None };
+        e.quad(Face::PosY, 0, 1, 4, 4, 0, 1, 1733);
+        assert!(e.verts.iter().all(|v| v.texture() == 1733 && v.normal().is_none()));
+    }
 
     fn world() -> (BlockRegistry, WorldGen) {
         let reg = BlockRegistry::builtin();

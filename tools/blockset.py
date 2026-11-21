@@ -998,7 +998,7 @@ OLD = {
 
 def toml_block(name, group, family, tex, kw):
     lines = ['[[block]]', f'name = "{name}"', f'group = "{group}"', f'family = "{family}"']
-    for k in ('label', 'solid', 'opaque', 'render', 'light', 'hardness', 'behavior', 'slab'):
+    for k in ('label', 'biome', 'solid', 'opaque', 'render', 'light', 'hardness', 'behavior', 'slab'):
         if k in kw:
             v = kw[k]
             lines.append(f'{k} = ' + (('true' if v else 'false') if isinstance(v, bool) else (f'"{v}"' if isinstance(v, str) else f'{v}')))
@@ -1011,7 +1011,7 @@ def toml_block(name, group, family, tex, kw):
     return '\n'.join(lines)
 
 
-def write_toml():
+def write_toml(blocks):
     src = open(TOML).read()
     head = src.split(GEN_MARK)[0].rstrip() + '\n'
     # Group, family and label for the hand-written blocks (added once, kept).
@@ -1026,13 +1026,21 @@ def write_toml():
                 block = block.replace(m[0], m[0] + extra, 1)
         out.append(block)
     head = '[[block]]'.join(out)
-    body = '\n\n'.join(toml_block(*b) for b in BLOCKS)
+    body = '\n\n'.join(toml_block(*b) for b in blocks)
     with open(TOML, 'w') as f:
         f.write(head.rstrip() + '\n\n' + GEN_MARK + '\n# The 15 biomes\' blocks (see tools/blockset.py for which biome each is for).\n\n' + body + '\n')
 
 
 def main():
+    import biomeblocks
     t = build_textures()
+    biome_blocks, biome_tex = biomeblocks.build()
+    dup = set(t) & set(biome_tex)
+    assert not dup, f'textures painted twice: {sorted(dup)[:5]}'
+    t.update(biome_tex)
+    blocks = BLOCKS + biome_blocks
+    names = [b[0] for b in blocks]
+    assert len(names) == len(set(names)), [n for n in names if names.count(n) > 1][:5]
     for name, img in t.items():
         if img is None:
             continue
@@ -1051,7 +1059,7 @@ def main():
             side[y, x] *= 0.8
     save(side * 255, 'prairie_grass_side')
     save(over, 'prairie_grass_side_overlay', 'RGBA')
-    write_toml()
+    write_toml(blocks)
     # The list of texture files the game embeds (every png in assets/textures).
     names = sorted(f[:-4] for f in os.listdir(P.OUT) if f.endswith('.png'))
     with open(FILES_RS, 'w') as f:
@@ -1060,7 +1068,7 @@ def main():
         for n in names:
             f.write(f'    "{n}",\n')
         f.write(');\n')
-    print(f'{len(t) + 3} textures painted, {len(BLOCKS)} generated blocks, {len(names)} texture files')
+    print(f'{len(t) + 3} textures painted, {len(blocks)} generated blocks, {len(names)} texture files')
     if '--sheet' in sys.argv:
         sheet(names)
 

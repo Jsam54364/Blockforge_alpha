@@ -23,7 +23,8 @@ fn fully_tinted(name: &str) -> bool {
 }
 
 fn file(name: &str) -> Option<&'static [u8]> {
-    FILES.iter().find(|(n, _)| *n == name).map(|(_, b)| *b)
+    // (FILES is sorted by name: tools/blockset.py writes it so)
+    FILES.binary_search_by(|(n, _)| (*n).cmp(name)).ok().map(|i| FILES[i].1)
 }
 
 /// Decodes a 32 x 32 PNG (grey, grey + alpha, RGB or RGBA) to RGBA8.
@@ -81,6 +82,7 @@ mod tests {
 
     #[test]
     fn every_file_decodes_to_32_by_32() {
+        assert!(FILES.windows(2).all(|w| w[0].0 < w[1].0), "FILES is sorted");
         for (name, bytes) in FILES {
             let px = decode(bytes).unwrap_or_else(|e| panic!("{name}: {e}"));
             assert_eq!(px.len(), SIZE * SIZE * 4, "{name}");

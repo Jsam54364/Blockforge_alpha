@@ -212,14 +212,36 @@ pub fn array_layers(n: usize) -> u32 {
     }
 }
 
+/// The block texture array's layers on a GPU with room for `max`, and, when there are more
+/// textures than that, which texture each draws instead: the one under the limit closest in
+/// colour.
+fn texture_layers(names: &[String], max: u32) -> (u32, Option<Vec<u16>>) {
+    let layers = array_layers(names.len());
+    if layers <= max {
+        return (layers, None);
+    }
+    let cap = if max % 6 == 0 { max - 1 } else { max };
+    let avg: Vec<[f32; 3]> = names.iter().map(|n| texgen::average_linear(&textures::load(n))).collect();
+    let map = (0..names.len())
+        .map(|t| {
+            if t < cap as usize {
+                return t as u16;
+            }
+            let d = |u: usize| (0..3).map(|i| (avg[u][i] - avg[t][i]).powi(2)).sum::<f32>();
+            (1..cap as usize).min_by(|&a, &b| d(a).partial_cmp(&d(b)).unwrap()).unwrap_or(0) as u16
+        })
+        .collect();
+    (cap, Some(map))
+}
+
 /// Mip levels of the block textures: 32, 16, 8, 4, 2, 1 texels.
 const TEXTURE_MIPS: u32 = 6;
 
 /// All block textures as one array texture (layer = texture id), with mipmaps, and the
 /// sampler for it: crisp texels up close, smoothly averaged further away.
-fn block_textures(device: &wgpu::Device, queue: &wgpu::Queue, reg: &BlockRegistry) -> (wgpu::TextureView, wgpu::Sampler) {
+fn block_textures(device: &wgpu::Device, queue: &wgpu::Queue, reg: &BlockRegistry) -> (wgpu::TextureView, wgpu::Sampler, Option<Vec<u16>>) {
     let names = reg.texture_names();
-    let layers = array_layers(names.len());
+    let (layers, remap) = texture_layers(names, device.limits().max_texture_array_layers);
     let size = texgen::SIZE as u32;
     let tex = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("block textures"),
@@ -268,7 +290,7 @@ fn block_textures(device: &wgpu::Device, queue: &wgpu::Queue, reg: &BlockRegistr
         mipmap_filter: wgpu::FilterMode::Linear,
         ..Default::default()
     });
-    (view, sampler)
+    (view, sampler, remap)
 }
 
 /// What god rays need besides the frame itself, remade when the surface changes size: the
@@ -593,6 +615,9 @@ struct GpuLod {
 }
 
 pub struct Gfx {
+    /// When the GPU has room for fewer textures than the blocks have: which texture each
+    /// draws instead (`BlockRegistry::remap_textures`; the app meshes with that registry).
+    pub texture_remap: Option<Vec<u16>>,
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -688,7 +713,12 @@ impl Gfx {
                     } else {
                         wgpu::Features::empty()
                     },
-                    required_limits: wgpu::Limits::downlevel_defaults().using_resolution(adapter.limits()),
+                    // As many texture layers as the GPU has (often 2048; at least 256): one
+                    // per block texture.
+                    required_limits: wgpu::Limits {
+                        max_texture_array_layers: adapter.limits().max_texture_array_layers.max(256),
+                        ..wgpu::Limits::downlevel_defaults().using_resolution(adapter.limits())
+                    },
                     memory_hints: wgpu::MemoryHints::default(),
                 },
                 None,
@@ -794,7 +824,7 @@ impl Gfx {
             ],
         });
         let (tint_tex, tint_view, tint_sampler) = tint_texture(&device);
-        let (block_view, block_sampler) = block_textures(&device, &queue, reg);
+        let (block_view, block_sampler, texture_remap) = block_textures(&device, &queue, reg);
         let mut sky = Sky::new();
         let (sky_view, sky_sampler) = sky_texture(&device, &queue, &sky.map);
         sky.map.keep_levels_up_to(64); // the GPU has the rest; the light needs only these
@@ -945,6 +975,7 @@ impl Gfx {
         let timer = if want_ts { Some(GpuTimer::new(&device, &queue)) } else { None };
 
         Ok(Gfx {
+            texture_remap,
             surface,
             device,
             queue,
@@ -1099,12 +1130,13 @@ impl Gfx {
         self.queue.write_buffer(&self.ui.uniform, 0, as_bytes(&size));
     }
 
-    /// Draws every item's icon into the thumbnails texture, in `icons::items` order (the
-    /// order of `Ui::blocks`).
-    pub fn set_block_icons(&self, reg: &BlockRegistry) {
+    /// Draws item `item`'s icon into icon slot `slot` of the thumbnails texture
+    /// (`icons::icon_slot` hands the slots out).
+    pub fn draw_icon(&self, reg: &BlockRegistry, slot: usize, item: u16) {
         let n = crate::icons::ICON;
-        for (i, id) in crate::icons::items(reg).into_iter().enumerate().take(ICON_SLOTS) {
-            let (x, y) = icon_origin(i);
+        let id = item;
+        {
+            let (x, y) = icon_origin(slot);
             self.queue.write_texture(
                 wgpu::ImageCopyTexture { texture: &self.ui.thumbs, mip_level: 0, origin: wgpu::Origin3d { x, y, z: 0 }, aspect: wgpu::TextureAspect::All },
                 &crate::icons::render(reg, id),
@@ -2291,10 +2323,25 @@ mod tests {
     }
 
     #[test]
+    fn textures_past_the_gpu_limit_are_drawn_as_similar_ones_under_it() {
+        let reg = BlockRegistry::builtin();
+        let names = reg.texture_names();
+        assert_eq!(texture_layers(names, 4096), (array_layers(names.len()), None));
+        let (layers, map) = texture_layers(names, 256);
+        let map = map.expect("a remap");
+        assert_eq!(layers, 256);
+        assert!(map.iter().all(|&t| (t as u32) < layers));
+        assert!(map.iter().enumerate().take(255).all(|(i, &t)| i == t as usize));
+        let r = reg.remap_textures(&map);
+        assert!((1..r.len() as u16).all(|id| r.def(id).tex.iter().all(|&t| (t as u32) < layers)));
+        assert_eq!(r.id("mossrock_herringbone"), reg.id("mossrock_herringbone"));
+    }
+
+    #[test]
     fn every_builtin_texture_gets_a_colour_and_fits_the_palette() {
         let reg = BlockRegistry::builtin();
         // (the distant terrain keeps a texture in 8 bits, the texture array a layer each)
-        assert!(reg.texture_names().len() < 256, "{} textures", reg.texture_names().len());
+        assert!(reg.texture_names().len() < 2048, "{} textures", reg.texture_names().len());
         let p = build_palette(&reg);
         for (i, name) in reg.texture_names().iter().enumerate().take(32) {
             if name == "air" {

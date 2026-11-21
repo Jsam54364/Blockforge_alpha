@@ -383,6 +383,8 @@ pub enum Action {
     RightTab(u8),
     /// The Blocks window's tab (`icons::GROUPS`).
     BlockGroup(u8),
+    /// The Blocks window's biome filter, one step back or on (all biomes, then each).
+    BlockBiome(i8),
     MoveAll,
     MoveSimilar,
     SortItems,
@@ -522,6 +524,7 @@ pub struct Ui {
     /// The Blocks window: its tab, how many rows it is scrolled, the most it can scroll (set
     /// as it is drawn) and its rows' height, and a finger dragging it (as `list_drag`).
     pub block_group: u8,
+    pub block_biome: u8,
     pub palette_scroll: usize,
     palette_max: usize,
     palette_row: f32,
@@ -695,6 +698,7 @@ impl Ui {
             right_tab: items::RIGHT_DEFAULT,
             item_note: None,
             block_group: 0,
+            block_biome: 0,
             palette_scroll: 0,
             palette_max: 0,
             palette_row: 1.0,
@@ -962,7 +966,7 @@ impl Ui {
                 self.showcase_yaw += d as f32 * std::f32::consts::FRAC_PI_4;
                 false
             }
-            Action::Item(_) | Action::LeftTab(_) | Action::RightTab(_) | Action::BlockGroup(_) | Action::MoveAll | Action::MoveSimilar | Action::SortItems => {
+            Action::Item(_) | Action::LeftTab(_) | Action::RightTab(_) | Action::BlockGroup(_) | Action::BlockBiome(_) | Action::MoveAll | Action::MoveSimilar | Action::SortItems => {
                 self.apply_items(a);
                 false
             }
@@ -1153,6 +1157,7 @@ impl Ui {
 
     /// Rebuilds the vertex list and the button list for this frame.
     pub fn build(&mut self, perf: &Perf, out: &mut Vec<HudVertex>) {
+        crate::icons::next_icon_frame();
         out.clear();
         self.buttons.clear();
         self.showcase = None;
