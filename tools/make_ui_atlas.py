@@ -72,6 +72,7 @@ ICON_CODES = {
     "description": 0xE873, "event": 0xE878, "monitor": 0xEF5B, "insert_drive_file": 0xE24D,
     # The inventory's tabs and buttons.
     "handyman": 0xF10B, "shield": 0xE9E0, "checkroom": 0xF19E, "view_in_ar": 0xE9FE,
+    "fort": 0xEAAD, "landscape": 0xE3F7, "forest": 0xEA99, "diamond": 0xEAD5,
     "merge_type": 0xE252, "sort": 0xE164, "arrow_forward": 0xE5C8,
 }
 

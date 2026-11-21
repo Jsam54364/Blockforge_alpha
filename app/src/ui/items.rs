@@ -315,6 +315,10 @@ impl Ui {
             // (what is picked up stays picked up: it can be taken to another tab)
             Action::LeftTab(t) => self.left_tab = t.min(LEFT_TABS.len() as u8 - 1),
             Action::RightTab(t) => self.right_tab = t.min(RIGHT_TABS.len() as u8 - 1),
+            Action::BlockGroup(g) => {
+                self.block_group = g.min(crate::icons::GROUPS.len() as u8 - 1);
+                self.palette_scroll = 0;
+            }
             Action::MoveAll => self.move_all(),
             Action::MoveSimilar => self.move_similar(),
             Action::SortItems => self.sort_inventory(),

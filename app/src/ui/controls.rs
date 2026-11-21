@@ -140,6 +140,8 @@ impl Layout {
 pub struct BlockItem {
     pub id: u16,
     pub name: String,
+    /// Its tab in the Blocks window (`icons::GROUPS`).
+    pub group: u8,
 }
 
 /// The stick as drawn: where it sits, where the thumb is, its radius and how visible it is
@@ -500,6 +502,7 @@ impl Ui {
     /// A finger moved: drags the control it holds in the editor.
     pub fn moved(&mut self, id: u64, x: f32, y: f32) {
         self.drag_list(id, y);
+        self.drag_palette(id, y);
         let Some((did, i, dx, dy)) = self.drag else { return };
         if did != id {
             return;

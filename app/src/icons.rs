@@ -2,6 +2,7 @@
 //! from above and to the side, from its own textures, on the CPU when the renderer starts.
 
 use blockforge::coords::Face;
+use blockforge::block::{BlockState, Shape};
 use blockforge::registry::BlockRegistry;
 
 use crate::texgen::SIZE as TEX;
@@ -25,6 +26,67 @@ pub fn placeable(reg: &BlockRegistry) -> Vec<u16> {
             d.solid && d.hardness >= 0.0 && d.name != "water"
         })
         .collect()
+}
+
+/// The inventory's groups, as tabs, in order: (key in blocks.toml, name, icon).
+pub const GROUPS: [(&str, &str, &str); 4] =
+    [("building", "Building", "fort"), ("natural", "Natural", "landscape"), ("wood", "Wood", "forest"), ("minerals", "Minerals", "diamond")];
+
+/// The group of a block (its index in `GROUPS`; unknown groups are natural).
+pub fn group_of(reg: &BlockRegistry, id: u16) -> u8 {
+    let g = &reg.def(id).group;
+    GROUPS.iter().position(|(k, _, _)| k == g).unwrap_or(1) as u8
+}
+
+/// The slab item of block `id` (its bottom-slab state: item ids are block states).
+pub fn slab_item(id: u16) -> u16 {
+    BlockState::new(id, Shape::SlabBottom).0
+}
+
+/// Whether an item is a slab.
+pub fn is_slab(item: u16) -> bool {
+    BlockState(item).shape() != Shape::Full
+}
+
+/// Everything the inventory offers, in its order: by group (`GROUPS`), then by family (in
+/// the order families first appear in blocks.toml), then in the file's order, each block's
+/// slab just after it. An item is a block state: a placeable block's id, or its slab's
+/// state. The icons are drawn in this order (`gfx::set_block_icons`).
+pub fn items(reg: &BlockRegistry) -> Vec<u16> {
+    let blocks = placeable(reg);
+    let mut families: Vec<&str> = Vec::new();
+    for id in 1..reg.len() as u16 {
+        let f = reg.def(id).family.as_str();
+        if !families.contains(&f) {
+            families.push(f);
+        }
+    }
+    let rank = |id: u16| {
+        let fam = families.iter().position(|f| *f == reg.def(id).family).unwrap_or(usize::MAX);
+        (group_of(reg, id), fam, id)
+    };
+    let mut sorted = blocks.clone();
+    sorted.sort_by_key(|&id| rank(id));
+    let mut out = Vec::new();
+    for id in sorted {
+        out.push(id);
+        if reg.def(id).slab {
+            out.push(slab_item(id));
+        }
+    }
+    out
+}
+
+/// An item's name: the block's label (or its name, "dry_grass" -> "Dry Grass"), "Slab" after
+/// a slab's.
+pub fn item_name(reg: &BlockRegistry, item: u16) -> String {
+    let d = reg.def(item);
+    let base = d.label.clone().unwrap_or_else(|| display_name(&d.name));
+    if is_slab(item) {
+        format!("{base} Slab")
+    } else {
+        base
+    }
 }
 
 /// "dry_grass" -> "Dry Grass".
@@ -56,9 +118,12 @@ fn face_texels(reg: &BlockRegistry, tex: u16) -> Vec<[f32; 3]> {
         .collect()
 }
 
-/// The block `id` as a cube icon: `ICON` x `ICON` RGBA, transparent around the cube.
+/// The item `id` as a cube icon (a slab: the lower half of one): `ICON` x `ICON` RGBA,
+/// transparent around it.
 pub fn render(reg: &BlockRegistry, id: u16) -> Vec<u8> {
     let def = reg.def(id);
+    // How tall it is (a slab: half, its sides showing the lower half of their texture).
+    let tall = if is_slab(id) { 0.5 } else { 1.0 };
     let faces = [
         face_texels(reg, def.tex[Face::PosY.index()]),
         face_texels(reg, def.tex[Face::PosZ.index()]),
@@ -73,7 +138,7 @@ pub fn render(reg: &BlockRegistry, id: u16) -> Vec<u8> {
     let c = [s * 0.5, top + vh];
     let ax = [hx, hy];
     let az = [-hx, hy];
-    let ay = [0.0, -vh];
+    let ay = [0.0, -vh * tall];
     // p = o + a*u + b*v  ->  (u, v), or None if outside the face.
     let solve = |p: [f32; 2], o: [f32; 2], a: [f32; 2], b: [f32; 2]| -> Option<(f32, f32)> {
         let det = a[0] * b[1] - a[1] * b[0];
@@ -100,9 +165,9 @@ pub fn render(reg: &BlockRegistry, id: u16) -> Vec<u8> {
                     let found = if let Some((u, v)) = solve(p, add(c, ay), ax, az) {
                         Some((0, u, v))
                     } else if let Some((u, v)) = solve(p, add(c, az), ax, ay) {
-                        Some((1, u, 1.0 - v))
+                        Some((1, u, 1.0 - v * tall))
                     } else {
-                        solve(p, add(c, ax), az, ay).map(|(u, v)| (2, 1.0 - u, 1.0 - v))
+                        solve(p, add(c, ax), az, ay).map(|(u, v)| (2, 1.0 - u, 1.0 - v * tall))
                     };
                     if let Some((f, u, v)) = found {
                         let t = texel(&faces[f], u, v);
@@ -136,7 +201,8 @@ mod tests {
         let names: Vec<&str> = ids.iter().map(|&i| reg.def(i).name.as_str()).collect();
         assert!(names.contains(&"stone") && names.contains(&"grass") && names.contains(&"log"));
         assert!(!names.contains(&"air") && !names.contains(&"water") && !names.contains(&"bedrock"));
-        assert!(ids.len() <= 32, "{} icons: the thumbnails texture has room for 32", ids.len());
+        let items = items(&reg);
+        assert!(items.len() <= crate::gfx::ICON_SLOTS, "{} icons: the thumbnails texture has room for {}", items.len(), crate::gfx::ICON_SLOTS);
         for &id in &ids {
             let px = render(&reg, id);
             assert_eq!(px.len(), (ICON * ICON * 4) as usize);

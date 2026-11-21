@@ -463,6 +463,24 @@ fn the_action_grid_and_the_block_picker_open_on_top() {
 }
 
 /// The game's HUD with the inventory screen open.
+/// Scrolls the Blocks window until palette slot `slot` shows.
+fn reveal(u: &mut Ui, slot: Slot) {
+    let Slot::Palette(k) = slot else { return };
+    for n in 0..200 {
+        if palette(u).contains(&k) {
+            return;
+        }
+        u.palette_scroll = n;
+        build(u);
+    }
+    panic!("block {k} never shows");
+}
+
+/// The palette slots shown, in order.
+fn palette(u: &Ui) -> Vec<u16> {
+    u.buttons.iter().filter_map(|b| if let Action::Item(Slot::Palette(k)) = b.action { Some(k) } else { None }).collect()
+}
+
 fn inventory(w: u32, h: u32) -> Ui {
     let mut u = hud(w, h, true);
     build(&mut u);
@@ -490,10 +508,33 @@ fn the_inventory_has_two_windows_whose_tabs_change_only_their_own_window() {
             let b = find(&u, Action::Item(Slot::Inv(n)));
             assert!(b.w >= 30.0 * 2.75 && b.x + b.w < wf * 0.56, "{w}x{h}: inventory slot {n}: {} at {}", b.w, b.x);
         }
-        for k in 0..u.blocks.len() as u16 {
-            let b = find(&u, Action::Item(Slot::Palette(k)));
-            assert!(b.w >= 30.0 * 2.75 && b.x > wf * 0.5, "{w}x{h}: block {k}");
+        // The blocks: a tab per group, each group's blocks only, in order, scrolled by
+        // dragging until its last block shows.
+        for g in 0..crate::icons::GROUPS.len() as u8 {
+            tap(&mut u, Action::BlockGroup(g));
+            let mine: Vec<u16> = (0..u.blocks.len() as u16).filter(|&k| u.blocks[k as usize].group == g).collect();
+            assert!(mine.len() > 4, "group {g}");
+            let shown = palette(&u);
+            assert_eq!(shown[..], mine[..shown.len()], "{w}x{h}: group {g} starts at its first block");
+            for &k in &shown {
+                let b = find(&u, Action::Item(Slot::Palette(k)));
+                assert!(b.w >= 30.0 * 2.75 && b.x > wf * 0.5 && b.y + b.h <= hf, "{w}x{h}: block {k}");
+            }
+            let f = find(&u, Action::Item(Slot::Palette(mine[0])));
+            let (fx, fy, fw, fh) = (f.x, f.y, f.w, f.h);
+            for _ in 0..40 {
+                if palette(&u).contains(mine.last().unwrap()) {
+                    break;
+                }
+                let (cx, cy) = (fx + fw * 0.5, fy + fh * 0.5);
+                u.press(7, cx, cy);
+                u.moved(7, cx, cy - fh * 2.2);
+                assert_eq!(u.release(7, cx, cy - fh * 2.2), None, "a drag picks nothing");
+                build(&mut u);
+            }
+            assert!(palette(&u).contains(mine.last().unwrap()), "{w}x{h}: group {g} scrolls to its end");
         }
+        tap(&mut u, Action::BlockGroup(0));
         let hot: Vec<_> = (0..9u8).map(|n| find(&u, Action::Item(Slot::Hotbar(n)))).collect();
         let sort = find(&u, Action::SortItems);
         assert!(hot.iter().all(|b| b.y > hf * 0.8 && b.y == hot[0].y) && hot[0].x > sort.x + sort.w);
@@ -509,7 +550,7 @@ fn the_inventory_has_two_windows_whose_tabs_change_only_their_own_window() {
             find(&u, Action::Item(Slot::Craft(n)));
         }
         find(&u, Action::Item(Slot::Result));
-        find(&u, Action::Item(Slot::Palette(0)));
+        assert!(!palette(&u).is_empty());
         // Equipment: four slots and the character between them and the window's middle.
         tap(&mut u, Action::LeftTab(2));
         check_layout(&mut u, wf, hf);
@@ -523,7 +564,7 @@ fn the_inventory_has_two_windows_whose_tabs_change_only_their_own_window() {
         // The right window's equipment tab: the left window keeps the equipment.
         tap(&mut u, Action::RightTab(0));
         check_layout(&mut u, wf, hf);
-        assert!(!has(&u, Action::Item(Slot::Palette(0))));
+        assert!(palette(&u).is_empty());
         find(&u, Action::Item(Slot::Equip(0)));
         // The other tabs show no character.
         tap(&mut u, Action::LeftTab(0));
@@ -537,8 +578,10 @@ fn slots_are_tapped_to_pick_up_and_put_down_merge_swap_and_put_away() {
     let id = |u: &Ui, name: &str| u.blocks.iter().find(|b| b.name == name).unwrap().id;
     let (granite, dirt) = (id(&u, "Granite"), id(&u, "Dirt"));
     let pal = |u: &Ui, name: &str| Slot::Palette(u.blocks.iter().position(|b| b.name == name).unwrap() as u16);
+    tap(&mut u, Action::BlockGroup(1));
     // A block from the palette fills a slot with a full stack.
-    let (pal_granite, pal_stone) = (pal(&u, "Granite"), pal(&u, "Stone"));
+    let (pal_granite, pal_stone) = (pal(&u, "Granite"), pal(&u, "Andesite"));
+    reveal(&mut u, pal_granite);
     tap(&mut u, Action::Item(pal_granite));
     assert_eq!(u.picked, Some(pal_granite));
     tap(&mut u, Action::Item(Slot::Inv(0)));
@@ -565,6 +608,7 @@ fn slots_are_tapped_to_pick_up_and_put_down_merge_swap_and_put_away() {
     tap(&mut u, Action::Item(Slot::Hotbar(4)));
     assert_eq!((u.slot, u.held_block()), (4, granite));
     // Back onto the palette: put away.
+    reveal(&mut u, pal_stone);
     tap(&mut u, Action::Item(pal_stone));
     assert!(u.hotbar[4].is_empty() && u.picked.is_none());
     // Tapping a picked slot again puts it down where it was.
@@ -615,7 +659,7 @@ fn the_crafting_grid_makes_things_and_gives_back_what_is_left() {
 fn move_all_move_similar_and_sort() {
     let mut u = inventory(2400, 1080);
     let id = |u: &Ui, name: &str| u.blocks.iter().find(|b| b.name == name).unwrap().id;
-    let (stone, dirt, sand) = (id(&u, "Stone"), id(&u, "Dirt"), id(&u, "Sand"));
+    let (stone, dirt, sand) = (id(&u, "Andesite"), id(&u, "Dirt"), id(&u, "Sand"));
     u.inventory = [Stack::EMPTY; 36];
     u.hotbar = [Stack::EMPTY; 9];
     u.hotbar[0] = Stack::of(stone, 10);

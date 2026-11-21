@@ -14,13 +14,8 @@ macro_rules! files {
     };
 }
 
-const FILES: &[(&str, &[u8])] = files!(
-    "stone", "granite", "basalt", "limestone", "sandstone", "dirt", "sand", "gravel", "snow", "log_side", "log_top", "bedrock", "glowstone", "leaves",
-    "grass_top", "grass_side", "grass_side_overlay",
-    "dry_grass_top", "dry_grass_side", "dry_grass_side_overlay",
-    "lush_grass_top", "lush_grass_side", "lush_grass_side_overlay",
-    "cold_grass_top", "cold_grass_side", "cold_grass_side_overlay",
-);
+// Every texture in assets/textures (written by tools/blockset.py).
+include!("texture_files.rs");
 
 /// Textures multiplied by the biome colour all over.
 fn fully_tinted(name: &str) -> bool {

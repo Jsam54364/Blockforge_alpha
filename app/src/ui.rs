@@ -381,6 +381,8 @@ pub enum Action {
     Item(Slot),
     LeftTab(u8),
     RightTab(u8),
+    /// The Blocks window's tab (`icons::GROUPS`).
+    BlockGroup(u8),
     MoveAll,
     MoveSimilar,
     SortItems,
@@ -517,6 +519,13 @@ pub struct Ui {
     pub left_tab: u8,
     pub right_tab: u8,
     pub item_note: Option<String>,
+    /// The Blocks window: its tab, how many rows it is scrolled, the most it can scroll (set
+    /// as it is drawn) and its rows' height, and a finger dragging it (as `list_drag`).
+    pub block_group: u8,
+    pub palette_scroll: usize,
+    palette_max: usize,
+    palette_row: f32,
+    palette_drag: Option<(u64, f32, usize, bool)>,
     slot_changed: f32,
     /// The floating stick, while it shows (the game moves it).
     pub joystick: Option<Joy>,
@@ -685,6 +694,11 @@ impl Ui {
             left_tab: items::LEFT_DEFAULT,
             right_tab: items::RIGHT_DEFAULT,
             item_note: None,
+            block_group: 0,
+            palette_scroll: 0,
+            palette_max: 0,
+            palette_row: 1.0,
+            palette_drag: None,
             slot: 0,
             slot_changed: -10.0,
             joystick: None,
@@ -718,6 +732,9 @@ impl Ui {
         if let Action::SelectWorld(_) = a {
             self.list_drag = Some((id, y, self.scroll, false));
         }
+        if let Action::Item(items::Slot::Palette(_)) = a {
+            self.palette_drag = Some((id, y, self.palette_scroll, false));
+        }
         if self.screen == Screen::Playing || matches!(a, Action::Key(_) | Action::Backspace | Action::Shift | Action::Nothing) {
             return Some(a);
         }
@@ -734,6 +751,15 @@ impl Ui {
         if let Some((did, _, _, dragged)) = self.list_drag {
             if did == id {
                 self.list_drag = None;
+                if dragged {
+                    self.pressed = None;
+                    return None;
+                }
+            }
+        }
+        if let Some((did, _, _, dragged)) = self.palette_drag {
+            if did == id {
+                self.palette_drag = None;
                 if dragged {
                     self.pressed = None;
                     return None;
@@ -780,6 +806,21 @@ impl Ui {
         let max = self.worlds.len().saturating_sub(1) as i64;
         self.scroll = (s0 as i64 + rows).clamp(0, max) as usize;
         self.list_drag = Some((did, y0, s0, true));
+    }
+
+    /// A finger moved on the Blocks window: scrolls it a row at a time, as `drag_list`.
+    fn drag_palette(&mut self, id: u64, y: f32) {
+        let Some((did, y0, s0, dragged)) = self.palette_drag else { return };
+        if did != id {
+            return;
+        }
+        let dy = y - y0;
+        if !dragged && dy.abs() < 10.0 * self.dp {
+            return;
+        }
+        let rows = (-dy / self.palette_row.max(1.0)).round() as i64;
+        self.palette_scroll = (s0 as i64 + rows).clamp(0, self.palette_max as i64) as usize;
+        self.palette_drag = Some((did, y0, s0, true));
     }
 
     /// The next thing the app has to do for the world screens.
@@ -921,7 +962,7 @@ impl Ui {
                 self.showcase_yaw += d as f32 * std::f32::consts::FRAC_PI_4;
                 false
             }
-            Action::Item(_) | Action::LeftTab(_) | Action::RightTab(_) | Action::MoveAll | Action::MoveSimilar | Action::SortItems => {
+            Action::Item(_) | Action::LeftTab(_) | Action::RightTab(_) | Action::BlockGroup(_) | Action::MoveAll | Action::MoveSimilar | Action::SortItems => {
                 self.apply_items(a);
                 false
             }

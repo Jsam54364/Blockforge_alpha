@@ -29,6 +29,13 @@ pub struct BlockDef {
     /// Texture id per face, indexed by `Face::index()`.
     pub tex: [u16; 6],
     pub behavior: Option<String>,
+    /// The inventory's grouping: its tab ("building", "natural", "wood", "minerals"), the
+    /// material family it sits with, and its name there (None: made from `name`).
+    pub group: String,
+    pub family: String,
+    pub label: Option<String>,
+    /// Also offered as a slab.
+    pub slab: bool,
 }
 
 #[derive(Debug)]
@@ -181,6 +188,10 @@ impl BlockRegistry {
             let tex = [side, side, top, bottom, side, side];
 
             let behavior = get_str(t, "behavior", &name)?.map(|s| s.to_string());
+            let group = get_str(t, "group", &name)?.unwrap_or("natural").to_string();
+            let family = get_str(t, "family", &name)?.unwrap_or(name.as_str()).to_string();
+            let label = get_str(t, "label", &name)?.map(|s| s.to_string());
+            let slab = get_bool(t, "slab", &name)?.unwrap_or(false);
 
             let id = reg.defs.len() as u16;
             reg.by_name.insert(name.clone(), id);
@@ -193,6 +204,10 @@ impl BlockRegistry {
                 hardness,
                 tex,
                 behavior,
+                group,
+                family,
+                label,
+                slab,
             });
         }
 
@@ -231,9 +246,10 @@ impl BlockRegistry {
         self.id(name).map(BlockState::full)
     }
 
-    /// Unknown ids fall back to air's definition instead of panicking.
+    /// Unknown ids fall back to air's definition instead of panicking. The bits above the id
+    /// (a state's shape) are ignored, so a slab's state finds its block.
     pub fn def(&self, id: u16) -> &BlockDef {
-        self.defs.get(id as usize).unwrap_or(&self.defs[0])
+        self.defs.get((id & crate::block::ID_MASK) as usize).unwrap_or(&self.defs[0])
     }
 
     pub fn get(&self, state: BlockState) -> &BlockDef {

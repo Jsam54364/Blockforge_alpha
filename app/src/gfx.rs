@@ -1099,11 +1099,11 @@ impl Gfx {
         self.queue.write_buffer(&self.ui.uniform, 0, as_bytes(&size));
     }
 
-    /// Draws every placeable block's icon into the thumbnails texture, in `icons::placeable`
-    /// order (the order of `Ui::blocks`).
+    /// Draws every item's icon into the thumbnails texture, in `icons::items` order (the
+    /// order of `Ui::blocks`).
     pub fn set_block_icons(&self, reg: &BlockRegistry) {
         let n = crate::icons::ICON;
-        for (i, id) in crate::icons::placeable(reg).into_iter().enumerate().take(ICON_SLOTS) {
+        for (i, id) in crate::icons::items(reg).into_iter().enumerate().take(ICON_SLOTS) {
             let (x, y) = icon_origin(i);
             self.queue.write_texture(
                 wgpu::ImageCopyTexture { texture: &self.ui.thumbs, mip_level: 0, origin: wgpu::Origin3d { x, y, z: 0 }, aspect: wgpu::TextureAspect::All },
@@ -1978,9 +1978,11 @@ pub fn showcase_view_proj(sc: crate::ui::Showcase, w: f32, h: f32) -> (math::Mat
 /// (`icons.rs`) the rows under them.
 pub const THUMB_SLOTS: usize = 24;
 pub const THUMBS_SIZE: u32 = 1024;
+/// The thumbnails texture is twice as tall as wide: room for 288 icons.
+pub const THUMBS_HEIGHT: u32 = 2 * THUMBS_SIZE;
 const ICONS_Y: u32 = 6 * THUMB_H;
 const ICONS_PER_ROW: u32 = THUMBS_SIZE / crate::icons::ICON;
-pub const ICON_SLOTS: usize = (ICONS_PER_ROW * ((THUMBS_SIZE - ICONS_Y) / crate::icons::ICON)) as usize;
+pub const ICON_SLOTS: usize = (ICONS_PER_ROW * ((THUMBS_HEIGHT - ICONS_Y) / crate::icons::ICON)) as usize;
 
 /// Where block icon `i` sits in the thumbnails texture.
 pub fn icon_origin(i: usize) -> (u32, u32) {
@@ -1991,9 +1993,9 @@ pub fn icon_origin(i: usize) -> (u32, u32) {
 /// Block icon `i`'s texture coordinates: u0, v0, u1, v1.
 pub fn icon_uv(i: usize) -> [f32; 4] {
     let (x, y) = icon_origin(i);
-    let s = THUMBS_SIZE as f32;
+    let (s, t) = (THUMBS_SIZE as f32, THUMBS_HEIGHT as f32);
     let n = crate::icons::ICON;
-    [x as f32 / s, y as f32 / s, (x + n) as f32 / s, (y + n) as f32 / s]
+    [x as f32 / s, y as f32 / t, (x + n) as f32 / s, (y + n) as f32 / t]
 }
 
 /// Where thumbnail slot `slot` starts in the thumbnails' texture, in pixels.
@@ -2004,8 +2006,8 @@ pub fn thumb_origin(slot: usize) -> (u32, u32) {
 /// The thumbnails' texture coordinates of slot `slot` (u0, v0, u1, v1).
 pub fn thumb_uv(slot: usize) -> [f32; 4] {
     let (x, y) = thumb_origin(slot);
-    let s = THUMBS_SIZE as f32;
-    [x as f32 / s, y as f32 / s, (x + THUMB_W) as f32 / s, (y + THUMB_H) as f32 / s]
+    let (s, t) = (THUMBS_SIZE as f32, THUMBS_HEIGHT as f32);
+    [x as f32 / s, y as f32 / t, (x + THUMB_W) as f32 / s, (y + THUMB_H) as f32 / t]
 }
 
 struct UiGpu {
@@ -2089,7 +2091,7 @@ fn ui_pipeline(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::Texture
         wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(4 * aw), rows_per_image: Some(ah) },
         wgpu::Extent3d { width: aw, height: ah, depth_or_array_layers: 1 },
     );
-    let thumbs = texture("world thumbnails", THUMBS_SIZE, THUMBS_SIZE);
+    let thumbs = texture("world thumbnails", THUMBS_SIZE, THUMBS_HEIGHT);
     let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
         label: Some("ui"),
         mag_filter: wgpu::FilterMode::Linear,
@@ -2291,9 +2293,10 @@ mod tests {
     #[test]
     fn every_builtin_texture_gets_a_colour_and_fits_the_palette() {
         let reg = BlockRegistry::builtin();
-        assert!(reg.texture_names().len() <= 32);
+        // (the distant terrain keeps a texture in 8 bits, the texture array a layer each)
+        assert!(reg.texture_names().len() < 256, "{} textures", reg.texture_names().len());
         let p = build_palette(&reg);
-        for (i, name) in reg.texture_names().iter().enumerate() {
+        for (i, name) in reg.texture_names().iter().enumerate().take(32) {
             if name == "air" {
                 continue; // never drawn
             }

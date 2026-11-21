@@ -1091,19 +1091,50 @@ impl Ui {
                     draw::centered(out, Serif, l, gx + gw * 0.5, gy + gh * 0.4 + n as f32 * size * 1.4, size, DIM, true);
                 }
             }
-            _ => {
-                let (gx, gy, gw, gh) = rbox;
-                let n = self.blocks.len().max(1);
-                let size_for = |cols: usize| (gw / cols as f32).min(gh / n.div_ceil(cols) as f32).min(56.0 * dp);
-                let cols = (3..=10).max_by(|&a, &b| size_for(a).partial_cmp(&size_for(b)).unwrap()).unwrap_or(6);
-                let s = size_for(cols);
-                let ox = gx + (gw - s * cols as f32) * 0.5;
-                for i in 0..self.blocks.len() {
-                    self.item_slot(out, Slot::Palette(i as u16), ox + (i % cols) as f32 * s, gy + (i / cols) as f32 * s, s, false);
-                }
-            }
+            _ => self.draw_blocks(out, rbox),
         }
         self.under = out.len();
+    }
+
+    /// BLOCKS: a tab for each group (building, natural, wood, minerals) and the group's
+    /// blocks under them, by material, scrolled by dragging.
+    fn draw_blocks(&mut self, out: &mut Vec<HudVertex>, (gx, gy, gw, gh): (f32, f32, f32, f32)) {
+        let dp = self.dp;
+        let groups = crate::icons::GROUPS;
+        let th = (36.0 * dp).min(gh * 0.2);
+        let tw = gw / groups.len() as f32;
+        for (n, (_, name, icon)) in groups.iter().enumerate() {
+            let on = self.block_group as usize == n;
+            let r = (gx + n as f32 * tw + 2.0 * dp, gy, tw - 4.0 * dp, th);
+            let label = if tw > 110.0 * dp { *name } else { "" };
+            self.button(out, Style::Stone, r, label, Some(icon), Serif, Action::BlockGroup(n as u8), true, on);
+        }
+        let top = gy + th + 6.0 * dp;
+        let (area_h, bar) = (gy + gh - top, 6.0 * dp);
+        let shown: Vec<usize> = (0..self.blocks.len()).filter(|&i| self.blocks[i].group == self.block_group).collect();
+        let cols = ((gw - bar) / (50.0 * dp)).floor().clamp(4.0, 12.0) as usize;
+        // As many whole rows as fill the window (the slots a little smaller to fit them).
+        let sw = ((gw - bar - 4.0 * dp) / cols as f32).min(60.0 * dp);
+        let vis = ((area_h / sw).round() as usize).max(1);
+        let s = sw.min(area_h / vis as f32);
+        let rows = shown.len().div_ceil(cols);
+        self.palette_max = rows.saturating_sub(vis);
+        self.palette_row = s;
+        self.palette_scroll = self.palette_scroll.min(self.palette_max);
+        let ox = gx + (gw - bar - s * cols as f32) * 0.5;
+        let first = self.palette_scroll * cols;
+        for (k, &i) in shown.iter().enumerate().skip(first).take(vis * cols) {
+            let k = k - first;
+            self.item_slot(out, Slot::Palette(i as u16), ox + (k % cols) as f32 * s, top + (k / cols) as f32 * s, s, false);
+        }
+        // The scroll bar: where the shown rows are among all of them.
+        if self.palette_max > 0 {
+            let x = gx + gw - bar;
+            let h = vis as f32 * s;
+            rect(out, x, top, bar * 0.6, h, [60, 50, 40, 120]);
+            let (t0, t1) = (self.palette_scroll as f32 / rows as f32, (self.palette_scroll + vis) as f32 / rows as f32);
+            rect(out, x, top + h * t0, bar * 0.6, h * (t1 - t0), [235, 215, 175, 220]);
+        }
     }
 
     /// A slot of the inventory screen: its frame, what is in it and how many, lit while
@@ -1156,9 +1187,12 @@ impl Ui {
         let mut y = oy + 2.0 * s + 16.0 * dp;
         draw::left(out, Serif, "Recipes", gx, y, 15.0 * dp, INK, true);
         y += 18.0 * dp;
+        // With blocks in the grid, the recipes that use them; else every recipe (as many as fit).
+        let held: Vec<u16> = self.craft.iter().filter(|s| !s.is_empty()).map(|s| s.id).collect();
         let lines: Vec<String> = self
             .recipes
             .iter()
+            .filter(|r| held.is_empty() || r.inputs.iter().any(|(id, _)| held.contains(id)))
             .map(|r| {
                 let ins: Vec<String> = r.inputs.iter().map(|(id, n)| format!("{n} {}", self.item_name(*id))).collect();
                 format!("{}  =  {} {}", ins.join(" + "), r.output.count, self.item_name(r.output.id))

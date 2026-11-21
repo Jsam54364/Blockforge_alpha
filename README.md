@@ -219,7 +219,9 @@ and quads drawn. The HUD and menus are drawn by a small immediate-mode layer (`u
   2 x 2 grid, what it makes, and the recipes) and **Equipment** (Head, Body, Legs and Feet
   slots beside the character, turned by the arrows under him). The right window's tabs (top
   right, by the X): **Gear** (things to wear; none exist yet) and **Blocks** (the creative
-  palette). Along the bottom: **Move Similar** (hotbar stacks of blocks the inventory already
+  palette, organised like Minecraft's: a tab each for Building, Natural, Wood and Minerals,
+  each tab's blocks by material with every block's slab after it, scrolled by dragging,
+  with a scroll bar). Along the bottom: **Move Similar** (hotbar stacks of blocks the inventory already
   holds go in with them), **Move All** (the whole hotbar into the inventory), **Sort** (the
   inventory merged and ordered), the hotbar in the middle, and a line about what is picked.
   Items are stacks of up to 64. Tap a slot to pick it up (it lights), then tap where it goes:
@@ -485,6 +487,42 @@ Next: trees and plants per biome, rivers, rain shadows behind mountains.
   what is underground, and what shows where a biome's ground is bare rock. Adding one is a
   painter function, a block in `assets/blocks.toml`, a name in `app/src/textures.rs` and a
   place in `rock_at`.
+* **The biome block set** (`tools/blockset.py`): the blocks the 15 biomes need, about 130 of
+  them, painted by the same helpers in the same manner. Run `python3 tools/blockset.py
+  --sheet` to repaint them; it also writes the generated end of `assets/blocks.toml` (its first
+  part is hand-written and keeps the oldest ids; the script adds group, family and label to
+  those blocks once) and `app/src/texture_files.rs`, the list of textures the game embeds.
+  `BLOCKS` in the script is append-only, since saved worlds store block ids.
+  * Rocks: red sandstone, slate, blightstone (sickly veins), deepstone, chalk, marble, and
+    for each of the eleven rocks a cobbled, a bricks and a polished block. Also mossy cobbles
+    and bricks, mud, clay, ice and snow bricks, petrified-wood bricks and polished blocks.
+  * Trees: redwood, maple, birch, pine, spruce, fir, palm, cypress, willow and blightwood,
+    each with a log, planks and leaves; oak planks, golden oak leaves (Amberwood),
+    driftwood and petrified logs. Leaves other than oak have their own colours.
+  * Ground: forest floor, leaf litter, needle floor, prairie grass (tinted), snowy grass,
+    tundra moss, permafrost, rich soil, mud, peat, clay, blighted soil and turf, moss and
+    glowing cave moss, red sand, shelly sand, shingle, cracked earth, ice, packed and glacial
+    ice.
+  * Minerals: coal, iron, copper (also in sandstone), silver, gold, ruby, sapphire and
+    blightshard ores, rock salt, fossil stone, amber, and frost and glow crystals that give
+    light.
+  * Specials: cactus, mushroom stems and caps, glowcaps, hay bales, reed thatch, bone blocks,
+    weathered stone and glowing runestones.
+  * Not yet: plants that need a crossed-quad model (flowers, ferns, reeds, seaweed) and
+    stairs, which the mesher can't draw yet. World generation doesn't place the new blocks
+    yet either: for now they come from the inventory.
+* **Groups, families and slabs** (fields of a block in `blocks.toml`): `group` is the
+  inventory tab (building, natural, wood, minerals), `family` the material it sits with,
+  `label` its name there, and `slab = true` adds its slab as an item of its own. An item is a
+  block state, so a slab item is the block's bottom-slab state. Placed on top of a block a
+  slab lies at the bottom of the cell; under one, at the top; on a side, in the half the
+  crosshair points at. A slab placed on the open half of the same slab makes the whole block.
+  In saves a slab is `name:slab`.
+* **Recipes for the set** (`game::recipes`): a log makes 4 planks; a rock makes its cobbles,
+  4 cobbles make 4 bricks, 4 of the rock make 4 polished blocks; 2 blocks make 4 slabs and 2
+  slabs make the block back. Moss on cobbles or bricks makes them mossy; 4 clay, mud, ice,
+  snow or petrified logs make bricks. With blocks in the grid, the recipe list shows only
+  the recipes that use them.
 * **Greyscale grass, coloured by biome** (Minecraft's way): grass tops and leaves are
   greyscale; a grass side is soil plus `<name>_overlay.png`, grass hanging most of the way down
   (so grassy slopes are green, with soil only at the foot of each step). Each biome has a

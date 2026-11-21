@@ -17,9 +17,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use blockforge::behavior::BehaviorTable;
-use blockforge::block::BlockState;
+use blockforge::block::{BlockState, Shape};
 use blockforge::client::Client;
-use blockforge::coords::{BlockPos, CHUNK_SIZE};
+use blockforge::coords::{BlockPos, Face, CHUNK_SIZE};
 use blockforge::mesh::Mesher;
 use blockforge::raycast::{raycast, RayHit};
 use blockforge::registry::BlockRegistry;
@@ -190,17 +190,36 @@ fn strikes_to_break(hardness: f32) -> u32 {
 
 /// The blocks the hotbar can hold (in `icons::placeable` order, the icons' order).
 pub fn block_items(reg: &BlockRegistry) -> Vec<BlockItem> {
-    crate::icons::placeable(reg)
+    crate::icons::items(reg)
         .into_iter()
-        .map(|id| BlockItem { id, name: crate::icons::display_name(&reg.def(id).name) })
+        .map(|id| BlockItem { id, name: crate::icons::item_name(reg, id), group: crate::icons::group_of(reg, id) })
         .collect()
+}
+
+/// An item's name in saves: the block's, ":slab" after a slab's.
+fn item_save_name(reg: &BlockRegistry, item: u16) -> String {
+    let n = reg.def(item).name.clone();
+    if crate::icons::is_slab(item) {
+        n + ":slab"
+    } else {
+        n
+    }
+}
+
+/// The item a save names (`item_save_name`).
+fn item_by_name(reg: &BlockRegistry, name: &str) -> Option<u16> {
+    let name = name.trim();
+    match name.strip_suffix(":slab") {
+        Some(block) => reg.id(block).map(crate::icons::slab_item),
+        None => reg.id(name),
+    }
 }
 
 /// The hotbar saved in a world's state (`hotbar=stone*64,dirt*12,...` and `slot=n`; older
 /// saves name the blocks alone: full stacks), or the default one; unknown blocks leave their
 /// slot empty.
 fn saved_hotbar(text: &str, reg: &BlockRegistry, items: &[BlockItem]) -> ([Stack; 9], usize) {
-    let id_of = |name: &str| reg.id(name.trim()).filter(|id| items.iter().any(|b| b.id == *id));
+    let id_of = |name: &str| item_by_name(reg, name).filter(|id| items.iter().any(|b| b.id == *id));
     let mut bar = [Stack::EMPTY; 9];
     match text.lines().find_map(|l| l.trim().strip_prefix("hotbar=")) {
         Some(line) => crate::ui::items::from_text(line, &mut bar, id_of),
@@ -216,7 +235,7 @@ fn saved_hotbar(text: &str, reg: &BlockRegistry, items: &[BlockItem]) -> ([Stack
 
 /// A container saved in a world's state under `key=` (as the hotbar is), into `slots`.
 fn saved_stacks(text: &str, key: &str, reg: &BlockRegistry, items: &[BlockItem], slots: &mut [Stack]) {
-    let id_of = |name: &str| reg.id(name.trim()).filter(|id| items.iter().any(|b| b.id == *id));
+    let id_of = |name: &str| item_by_name(reg, name).filter(|id| items.iter().any(|b| b.id == *id));
     if let Some(line) = text.lines().find_map(|l| l.trim().strip_prefix(key)?.strip_prefix('=')) {
         crate::ui::items::from_text(line, slots, id_of);
     }
@@ -224,13 +243,50 @@ fn saved_stacks(text: &str, key: &str, reg: &BlockRegistry, items: &[BlockItem],
 
 /// The crafting recipes (`ui::items::RECIPES`) for the blocks this registry has.
 pub fn recipes(reg: &BlockRegistry) -> Vec<Recipe> {
-    crate::ui::items::RECIPES
+    let mut out: Vec<Recipe> = crate::ui::items::RECIPES
         .iter()
         .filter_map(|(inputs, (out, n))| {
             let inputs = inputs.iter().map(|(name, k)| Some((reg.id(name)?, *k))).collect::<Option<Vec<_>>>()?;
             Some(Recipe { inputs, output: Stack::of(reg.id(out)?, *n) })
         })
-        .collect()
+        .collect();
+    let mut add = |inputs: &[(&str, u8)], output: &str, n: u16| {
+        let ins = inputs.iter().map(|(name, k)| Some((item_by_name(reg, name)?, *k))).collect::<Option<Vec<_>>>();
+        if let (Some(inputs), Some(o)) = (ins, item_by_name(reg, output)) {
+            out.push(Recipe { inputs, output: Stack::of(o, n) });
+        }
+    };
+    // Every block of the set by how it is made: logs into planks; a rock into its cobbles,
+    // cobbles into bricks, four of the rock into polished blocks; two blocks into four slabs
+    // and two slabs back into a block.
+    add(&[("log", 1)], "oak_planks", 4);
+    for id in 1..reg.len() as u16 {
+        let name = reg.def(id).name.as_str();
+        if let Some(sp) = name.strip_suffix("_log") {
+            add(&[(name, 1)], &format!("{sp}_planks"), 4);
+        }
+        if let Some(rock) = name.strip_prefix("cobbled_") {
+            add(&[(rock, 1)], name, 1);
+            add(&[(name, 4)], &format!("{rock}_bricks"), 4);
+            add(&[(rock, 4)], &format!("polished_{rock}"), 4);
+        }
+    }
+    add(&[("cobbled_stone", 1), ("moss_block", 1)], "mossy_cobbled_stone", 2);
+    add(&[("stone_bricks", 1), ("moss_block", 1)], "mossy_stone_bricks", 2);
+    for (from, to) in [("clay", "clay_bricks"), ("mud", "mud_bricks"), ("ice", "ice_bricks"), ("snow", "snow_bricks"), ("petrified_log", "petrified_wood_bricks"), ("dry_grass", "hay_bale")] {
+        add(&[(from, 4)], to, 4);
+    }
+    add(&[("petrified_wood_bricks", 4)], "polished_petrified_wood", 4);
+    add(&[("weathered_stone", 1), ("glow_crystal", 1)], "runestone", 1);
+    for id in 1..reg.len() as u16 {
+        let d = reg.def(id);
+        if d.slab {
+            let slab = format!("{}:slab", d.name);
+            add(&[(d.name.as_str(), 2)], &slab, 4);
+            add(&[(slab.as_str(), 2)], &d.name, 1);
+        }
+    }
+    out
 }
 
 /// The world a game is opened on.
@@ -400,7 +456,7 @@ impl Game {
     /// The world's `state.txt`: camera, time of day, the character, the hotbar.
     fn state_text(&self) -> String {
         let p = self.player.position();
-        let name = |id: u16| self.registry.def(id).name.clone();
+        let name = |id: u16| item_save_name(&self.registry, id);
         format!(
             "{}{}player={},{},{}\ngen={WORLDGEN_VERSION}\nhotbar={}\nslot={}\ninventory={}\ncraft={}\n",
             self.cam.to_text(),
@@ -837,15 +893,38 @@ impl Game {
     }
 
     fn place_target(&mut self) {
-        let block = self.ui.held_block();
-        if block == 0 {
+        let item = self.ui.held_block();
+        if item == 0 {
             return;
         }
         if let Some(hit) = self.target() {
-            let cell = hit.pos.neighbor(hit.face);
+            let block = BlockState(item).id();
+            let mut cell = hit.pos.neighbor(hit.face);
+            let mut state = BlockState::full(block);
+            if crate::icons::is_slab(item) {
+                // A slab onto the top of a block lies at the bottom of the cell above it, under
+                // a block at its top; on a side, in the half the cursor points at. A slab onto
+                // the open half of the same slab makes the whole block.
+                let fill = match (self.client.block_at(hit.pos), hit.face) {
+                    (Some(s), Face::PosY) if s.id() == block && s.shape() == Shape::SlabBottom => true,
+                    (Some(s), Face::NegY) if s.id() == block && s.shape() == Shape::SlabTop => true,
+                    _ => false,
+                };
+                if fill {
+                    cell = hit.pos;
+                } else {
+                    let y = self.cam.pos[1] + self.cam.forward()[1] * hit.distance;
+                    let upper = match hit.face {
+                        Face::PosY => false,
+                        Face::NegY => true,
+                        _ => y - y.floor() > 0.5,
+                    };
+                    state = BlockState::new(block, if upper { Shape::SlabTop } else { Shape::SlabBottom });
+                }
+            }
             // Don't entomb the camera or the character.
             if cell != BlockPos::from_f32(self.cam.pos) && !self.player.occupies(cell) {
-                self.client.place_block(cell, BlockState::full(block));
+                self.client.place_block(cell, state);
                 // Put down with both hands (it is carried in both).
                 self.player.press("interact_both");
             }
@@ -856,6 +935,33 @@ impl Game {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_block_set_is_grouped_has_slabs_and_recipes_and_saves_by_name() {
+        let reg = BlockRegistry::builtin();
+        let items = block_items(&reg);
+        // In tab order, each tab's blocks by material: a rock's cobbles, bricks and polished
+        // blocks together, each with its slab after it.
+        assert!(items.windows(2).all(|w| w[0].group <= w[1].group));
+        let at = |name: &str| items.iter().position(|b| b.name == name).unwrap_or_else(|| panic!("no {name}"));
+        let c = at("Cobbled Granite");
+        assert_eq!([at("Cobbled Granite Slab"), at("Granite Bricks"), at("Granite Bricks Slab"), at("Polished Granite")], [c + 1, c + 2, c + 3, c + 4]);
+        assert!(at("Oak Log") < at("Oak Planks") && at("Oak Planks") < at("Redwood Log"));
+        // A slab is an item of its own that saves by name.
+        let slab = item_by_name(&reg, "slate_bricks:slab").unwrap();
+        assert!(crate::icons::is_slab(slab) && reg.def(slab).name == "slate_bricks");
+        assert_eq!(item_save_name(&reg, slab), "slate_bricks:slab");
+        // Recipes for the set.
+        let rs = recipes(&reg);
+        let makes = |ins: &str, out: &str| {
+            let (i, o) = (item_by_name(&reg, ins).unwrap(), item_by_name(&reg, out).unwrap());
+            rs.iter().any(|r| r.inputs.iter().any(|x| x.0 == i) && r.output.id == o)
+        };
+        assert!(makes("maple_log", "maple_planks") && makes("log", "oak_planks") && makes("basalt", "cobbled_basalt"));
+        assert!(makes("cobbled_basalt", "basalt_bricks") && makes("basalt_bricks", "basalt_bricks:slab") && makes("basalt_bricks:slab", "basalt_bricks"));
+        // Every texture fits the texture array and the distant terrain's 8 bits.
+        assert!(reg.texture_names().len() < 256 && items.len() <= crate::gfx::ICON_SLOTS);
+    }
 
     #[test]
     fn harder_blocks_take_more_strikes() {
