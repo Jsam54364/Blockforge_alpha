@@ -1297,10 +1297,16 @@ impl Controller {
         let kv = (dt * f.accel).min(1.0); // slow easing: flight carries momentum
         self.vel_x += (tx - self.vel_x) * kv;
         self.vel_z += (tz - self.vel_z) * kv;
-        if self.vel_x * self.vel_x + self.vel_z * self.vel_z > 1e-5 {
-            self.pos[0] += self.vel_x * dt;
-            self.pos[2] += self.vel_z * dt;
-            self.collide(world);
+        let v2 = self.vel_x * self.vel_x + self.vel_z * self.vel_z;
+        if v2 > 1e-5 {
+            // App extension: fast flight moves in steps of at most 0.4 m, so it can't pass
+            // through a wall or a leaf in one frame (one step at the kit's speeds).
+            let n = (v2.sqrt() * dt / 0.4).ceil().max(1.0) as usize;
+            for _ in 0..n {
+                self.pos[0] += self.vel_x * dt / n as f64;
+                self.pos[2] += self.vel_z * dt / n as f64;
+                self.collide(world);
+            }
         }
         if !locked {
             self.yaw += ang(ly, self.yaw) * (dt * f.turn_rate).min(1.0); // the body faces the view; the limbs show the travel direction

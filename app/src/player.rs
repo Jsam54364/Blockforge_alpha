@@ -84,10 +84,23 @@ fn step_lag(before: f64, after: f64, on_ground: bool) -> f64 {
     }
 }
 
+/// Flight speeds, metres a second: cruising, flat out, and rising or sinking.
+pub const FLY_SPEED: f64 = 18.0;
+pub const FLY_FAST_SPEED: f64 = 72.0;
+pub const FLY_VERTICAL: f64 = 18.0;
+
 impl Player {
     /// A character to be put down at `at` (feet) when the world there is ready.
     pub fn new(at: [f64; 3], view: View) -> Player {
-        let cfg = Config::builtin();
+        let mut cfg = Config::builtin();
+        // Creative flight much faster than the kit's (6 / 11 m/s): a cruise for looking
+        // around, and with the stick pushed all the way a sprint for crossing the big biomes.
+        if let Some(fly) = cfg.fly.as_mut() {
+            fly.speed = FLY_SPEED;
+            fly.fast_speed = FLY_FAST_SPEED;
+            fly.vertical = FLY_VERTICAL;
+            fly.max_accel = fly.max_accel.max(FLY_FAST_SPEED * 1.5);
+        }
         let rig = Rig::builtin(&cfg);
         let mut ctl = Controller::new(cfg, view);
         ctl.snap_down = STEP;
@@ -348,6 +361,31 @@ mod tests {
             lift *= (-STEP_EASE / 60.0f64).exp();
         }
         assert!(lift < 0.06 && lift > 0.01, "{lift}");
+    }
+
+    #[test]
+    fn creative_flight_is_fast_and_still_stops_at_walls() {
+        use crate::hyrig::controller::Input;
+        use crate::hyrig::world::{BoxShape, BoxWorld};
+        let input = Input { move_y: 1.0, ..Default::default() };
+        let fly = |world: &BoxWorld, frames: usize| {
+            let mut p = Player::new([0.0, 0.0, 0.0], View::Follow);
+            p.ctl.pos = [0.0, 10.0, 0.0];
+            p.ctl.set_fly(world, true);
+            let mut out = None;
+            for _ in 0..frames {
+                out = Some(p.ctl.update(world, 1.0 / 60.0, &input));
+            }
+            (p.ctl.pos, out.unwrap().velocity)
+        };
+        let open = BoxWorld::new(vec![], 100_000.0);
+        let (_, v) = fly(&open, 180);
+        let speed = (v[0] * v[0] + v[2] * v[2]).sqrt();
+        assert!(speed > FLY_FAST_SPEED * 0.9, "flat out after 3 s: {speed} m/s");
+        // A wall a block thick, met at full speed: he stops at it.
+        let wall = BoxWorld::new(vec![BoxShape { x0: -50.0, x1: 50.0, z0: 60.0, z1: 61.0, h: 60.0 }], 100_000.0);
+        let (pos, _) = fly(&wall, 240);
+        assert!(pos[2] < 60.0, "he went through the wall to z = {}", pos[2]);
     }
 
     #[test]

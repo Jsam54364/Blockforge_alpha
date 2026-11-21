@@ -461,6 +461,9 @@ cover decided separately.
   a pole, and the bands repeat beyond) and drops 1.5 C per 10 blocks of altitude, so peaks
   are snowy. Rainfall has Earth-like belts (wet equator, dry subtropics, wet mid-latitudes)
   plus its own map, and coasts are wetter.
+* **Fast creative flight** (`player::FLY_SPEED`): 18 m/s cruising, 72 m/s with the stick
+  pushed all the way, 18 m/s up and down (the kit's 6 / 11 / 4.5 are kept for its parity
+  test); moves in steps of at most 0.4 m so it can't pass through a wall in one frame.
 * **The 15 biomes** (`biome.rs`): chosen from the climate, the altitude, the distance to
   the coast and large region noises for the places to discover. Frostpeak Highlands (cold
   peaks, green below and snowbound up high) and Stonefang Mountains on the high ground;
@@ -493,7 +496,13 @@ cover decided separately.
   deep down, silver and rubies or sapphires in the mountains, rock salt in the drylands,
   amber in Amberwood, fossils in the Petrified Kingdom and the grasslands, blightshard in
   the Blightlands, frost crystals in the glacier, glow crystals near the Hollow Earth.
-* Distant (LOD) terrain shows the ground only: trees appear with the real chunks.
+* **Features in distant (LOD) terrain** (`WorldGen::lod_cell`, `Feature::lod_top`): each
+  feature has an outline (crowns as domes and cones, spires as tapering columns, arches,
+  boulders, giant logs) from the same sizes it is drawn with, and a cell shows the highest
+  outline over its sample point. Cells up to 8 blocks show every feature, up to 32 the big
+  ones, and past 8 forests show as their biome's canopy over the share of cells its crowns
+  cover (dense in the Wildwood and the taiga, scattered on the grasslands). Features are
+  bucketed per section (`FeatureGrid`), so sections cost a few milliseconds.
 * `cargo run --release --example chunk_bench` times chunk generation in a few biomes
   (well under a millisecond a chunk on a desktop).
 * New players start on the nearest open, gentle ground in the Giants' Grasslands, clear of trees (`find_spawn`). The stats

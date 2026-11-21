@@ -5,10 +5,23 @@ use blockforge::registry::BlockRegistry;
 use blockforge::worldgen::WorldGen;
 use std::time::Instant;
 
+fn lod_bench(g: &WorldGen, reg: &BlockRegistry) {
+    use blockforge::lod::{build_section, SectionKey};
+    for level in [1u8, 2, 3, 4, 6] {
+        let t = Instant::now();
+        let n = 6;
+        for k in 0..n {
+            std::hint::black_box(build_section(g, reg, SectionKey::new(level, k, -3)));
+        }
+        println!("LOD level {level}: {:6.2} ms per section", t.elapsed().as_secs_f64() * 1000.0 / n as f64);
+    }
+}
+
 fn main() {
     let reg = BlockRegistry::builtin();
     let seed = std::env::var("SEED").ok().and_then(|v| v.parse().ok()).unwrap_or(1234);
     let g = WorldGen::new(seed, &reg);
+    lod_bench(&g, &reg);
     for biome in ["Ancient Wildwood", "Amberwood", "Winterpine Taiga", "Giants' Grasslands", "Stonefang Mountains", "Murkwater Swamp", "Emerald Oasis", "Petrified Kingdom", "Blightlands", "Sunscorched Expanse"] {
         // The nearest to the origin, in 4-chunk steps out to 12 km.
         let Some((cx, cz)) = (0..200)

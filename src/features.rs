@@ -291,6 +291,129 @@ impl Feature {
     }
 }
 
+impl Feature {
+    /// How high the feature stands over the column `(dx, dz)` from its anchor, in blocks
+    /// above the ground it stands on, and what shows there, for distant (LOD) terrain: the
+    /// shape's outline (crowns as domes and cones, spires as tapering columns) using the
+    /// same sizes as `draw` (its first random draws), without drawing a block. None where it
+    /// doesn't reach.
+    pub fn lod_top(&self, dx: i32, dz: i32) -> Option<(f32, u16)> {
+        let mut rng = Rng::new(self.seed);
+        let d = ((dx * dx + dz * dz) as f32).sqrt();
+        let dome = |top: f32, r: f32, depth: f32, b: u16| (d < r).then(|| (top - depth * (d / r) * (d / r), b));
+        let cone = |top: f32, r: f32, depth: f32, b: u16| (d < r).then(|| (top - depth * d / r, b));
+        match self.kind {
+            Kind::Broadleaf(w, size) => {
+                let h = match size {
+                    0 => 5.0 + rng.next_f32() * 3.0,
+                    1 => 10.0 + rng.next_f32() * 6.0,
+                    _ => 24.0 + rng.next_f32() * 12.0,
+                };
+                let leaf = [2.2, 2.8, 3.6][size.min(2) as usize];
+                if w.leaves == 0 {
+                    return dome(0.85 * h, h * 0.35 + 1.0, h * 0.3, w.log);
+                }
+                let cr = leaf * (1.2 + size as f32 * 0.6);
+                dome(0.85 * h + cr * 0.95, h * 0.45 + leaf, h * 0.35 + cr * 0.5, w.leaves)
+            }
+            Kind::Redwood(w) => {
+                let h = 45.0 + rng.next_f32() * 25.0;
+                cone(h + 3.5, 12.0, 0.58 * h, w.leaves).or_else(|| (d < 3.0).then_some((h, w.log)))
+            }
+            Kind::Conifer { wood, open, giant } => {
+                let h = (9.0 + rng.next_f32() * 12.0) * if giant { 2.0 } else { 1.0 };
+                if open {
+                    dome(h + 1.0, (h * 0.22 + 0.8) * 1.1, h * 0.35, wood.leaves)
+                } else {
+                    cone(h + 2.0, h * 0.3 + 1.4, h * 0.82, wood.leaves)
+                }
+            }
+            Kind::Palm(w) => {
+                let h = 7.0 + rng.next_f32() * 7.0;
+                let a = rng.next_f32() * std::f32::consts::TAU;
+                let bend = 0.25 + rng.next_f32() * 0.35;
+                let (ox, oz) = (a.cos() * bend * h, a.sin() * bend * h);
+                let d2 = ((dx as f32 - ox).powi(2) + (dz as f32 - oz).powi(2)).sqrt();
+                (d2 < 6.5).then(|| (h + 1.3 - 3.0 * (d2 / 6.5).powi(2), w.leaves))
+            }
+            Kind::Acacia(w) => {
+                let h = 4.0 + rng.next_f32() * 3.0;
+                dome(h + 3.6, 6.5, 1.5, w.leaves)
+            }
+            Kind::Willow(w) => {
+                let h = 5.0 + rng.next_f32() * 3.0;
+                dome(h + 5.5, 6.5, 5.0, w.leaves)
+            }
+            Kind::Cypress(w) => {
+                let h = 14.0 + rng.next_f32() * 9.0;
+                dome(h + 2.5, 6.0, 3.0, w.leaves)
+            }
+            Kind::Bamboo(w) => dome(14.0, 3.0, 4.0, w.leaves),
+            Kind::Dead { wood, giant } => {
+                if giant {
+                    let h = 16.0 + rng.next_f32() * 10.0;
+                    dome(h, 3.0, h * 0.2, wood.log)
+                } else {
+                    let h = 5.0 + rng.next_f32() * 8.0;
+                    (d < 1.0).then_some((h, wood.log))
+                }
+            }
+            Kind::Mushroom { cap, giant, .. } => {
+                let (h, _r, cr) = if giant {
+                    (10.0 + rng.next_f32() * 9.0, rng.next_f32(), 5.0 + rng.next_f32() * 3.0)
+                } else {
+                    (3.0 + rng.next_f32() * 3.0, 0.0, 2.0 + rng.next_f32() * 1.2)
+                };
+                dome(h + cr * 0.55, cr, cr * 0.55, cap)
+            }
+            Kind::Boulder { stone, moss, big } => {
+                let r = if big { 3.5 + rng.next_f32() * 3.5 } else { 1.2 + rng.next_f32() * 1.8 };
+                let rx = r * (0.8 + rng.next_f32() * 0.5);
+                let ry = r * (0.6 + rng.next_f32() * 0.3);
+                let rz = r * (0.8 + rng.next_f32() * 0.5);
+                dome(ry * 1.25 - 1.0, rx.max(rz), ry, if moss != 0 { moss } else { stone })
+            }
+            Kind::Spire { stone, .. } => {
+                let h = 16.0 + rng.next_f32() * 30.0;
+                let r = 2.5 + rng.next_f32() * 3.5;
+                if d > r + 0.6 {
+                    return None;
+                }
+                let t = 1.0 - ((d - 0.6).max(0.0) / r).powf(1.0 / 0.55);
+                Some((h * t, stone))
+            }
+            Kind::Arch { stone, .. } => {
+                let span = 7.0 + rng.next_f32() * 6.0;
+                let a = rng.next_f32() * std::f32::consts::TAU;
+                let thick = 2.0 + rng.next_f32() * 1.5;
+                let (ax, az) = (a.cos(), a.sin());
+                let u = dx as f32 * ax + dz as f32 * az;
+                let v = -(dx as f32) * az + dz as f32 * ax;
+                if v.abs() > thick * 1.3 || u.abs() > span + thick {
+                    return None;
+                }
+                let k = (1.0 - (u / span).powi(2)).max(0.0).sqrt();
+                Some((span * 1.25 * k + thick - 3.0, stone))
+            }
+            Kind::FallenLog { log, big: true, .. } => {
+                let len = 12.0 + rng.next_f32() * 12.0;
+                let r = 1.4 + rng.next_f32() * 1.0;
+                let a = rng.next_f32() * std::f32::consts::TAU;
+                let (ax, az) = (a.cos(), a.sin());
+                let u = (dx as f32 * ax + dz as f32 * az).clamp(0.0, len);
+                let (px, pz) = (dx as f32 - ax * u, dz as f32 - az * u);
+                ((px * px + pz * pz).sqrt() < r).then_some((r * 1.6, log))
+            }
+            Kind::Bush(w) => dome(2.5, 1.8, 1.5, w.leaves),
+            Kind::IceSpike { ice, big, .. } => {
+                let (h, r) = if big { (14.0 + rng.next_f32() * 14.0, 2.0 + rng.next_f32() * 1.8) } else { (4.0 + rng.next_f32() * 6.0, 0.9 + rng.next_f32() * 0.7) };
+                cone(h, r + 0.5, h, ice)
+            }
+            _ => None,
+        }
+    }
+}
+
 /// A limb that grows, bends and splits: Vintage Story's branches (they lose width as they
 /// go, droop or rise, and fork into thinner ones) with leaf clusters where they end.
 #[allow(clippy::too_many_arguments)]

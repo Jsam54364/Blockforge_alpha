@@ -96,6 +96,37 @@ struct FeatureBlocks {
     fossil: u16,
 }
 
+/// Features bucketed by where they stand, for looking up the ones near a point.
+#[derive(Default)]
+pub struct FeatureGrid {
+    buckets: HashMap<(i32, i32), Vec<Feature>>,
+}
+
+impl FeatureGrid {
+    /// Bucket width: as wide as the furthest any feature reaches, so the 3 x 3 buckets
+    /// around a point hold every feature that can reach it.
+    const SIZE: i32 = 20;
+
+    pub fn new(feats: Vec<Feature>) -> FeatureGrid {
+        let mut buckets: HashMap<(i32, i32), Vec<Feature>> = HashMap::new();
+        for f in feats {
+            buckets.entry((f.x.div_euclid(Self::SIZE), f.z.div_euclid(Self::SIZE))).or_default().push(f);
+        }
+        FeatureGrid { buckets }
+    }
+
+    /// The features that may stand over `(x, z)`.
+    pub fn near(&self, x: i32, z: i32) -> impl Iterator<Item = &Feature> {
+        let (bx, bz) = (x.div_euclid(Self::SIZE), z.div_euclid(Self::SIZE));
+        (-1..=1).flat_map(move |dz| (-1..=1).map(move |dx| (bx + dx, bz + dz))).filter_map(|k| self.buckets.get(&k)).flatten()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.buckets.is_empty()
+    }
+}
+
+
 /// Feature tiers: big things on a coarse grid, ordinary ones on a fine grid, and the
 /// Hollow Earth's on their own.
 const TIERS: [(u8, i32); 3] = [(0, 24), (1, 6), (2, 10)];
@@ -129,6 +160,7 @@ pub struct WorldGen {
     fb: FeatureBlocks,
     ores: HashMap<&'static str, u16>,
     rock_ids: Vec<u16>,
+    canopy_blocks: HashMap<&'static str, u16>,
     /// Feature anchors already worked out: (tier, cell x, cell z) -> the feature there.
     anchors: Mutex<HashMap<(u8, i32, i32), Option<Feature>>>,
 }
@@ -281,6 +313,13 @@ impl WorldGen {
             fb,
             ores,
             rock_ids,
+            canopy_blocks: [
+                "elder_leaves", "maple_leaves", "spruce_leaves", "fir_leaves", "cragpine_leaves", "palm_leaves", "cypress_leaves", "larch_leaves", "acacia_leaves", "blightwood_log",
+                "petrified_log", "seapine_leaves", "leaves",
+            ]
+            .into_iter()
+            .map(|n| (n, id(n)))
+            .collect(),
             anchors: Mutex::new(HashMap::new()),
         }
     }
@@ -511,6 +550,84 @@ impl WorldGen {
         };
         let surf = self.ground_blocks(x, z, top, &t, cell as f32, slope).0;
         (4 * top + if slab { 2 } else { 0 }, surf)
+    }
+
+    /// The features distant terrain draws in the area `x0..x1, z0..z1` for cells `cell`
+    /// blocks wide: each one, from cells up to 8 blocks; only the big ones (giant trees,
+    /// spires, arches...) up to 32; none past that (`lod_cell` draws forests there as a
+    /// canopy).
+    pub fn lod_features(&self, x0: i32, z0: i32, x1: i32, z1: i32, cell: i32) -> FeatureGrid {
+        let mut out = Vec::new();
+        for &(tier, size) in &TIERS[..2] {
+            if (tier == 1 && cell > 8) || cell > 32 {
+                continue;
+            }
+            let reach = if tier == 0 { 19 } else { 9 };
+            for gz in (z0 - reach).div_euclid(size)..=(z1 + reach).div_euclid(size) {
+                for gx in (x0 - reach).div_euclid(size)..=(x1 + reach).div_euclid(size) {
+                    if let Some(f) = self.anchor(tier, gx, gz) {
+                        out.push(f);
+                    }
+                }
+            }
+        }
+        FeatureGrid::new(out)
+    }
+
+    /// A biome's forest as distant terrain draws it where single trees are smaller than its
+    /// cells: how much of the ground the crowns cover, how high they stand, their block.
+    fn canopy(&self, b: usize) -> (f32, f32, &'static str) {
+        use biome::*;
+        match b {
+            WILDWOOD => (0.85, 18.0, "elder_leaves"),
+            AMBERWOOD => (0.6, 13.0, "maple_leaves"),
+            TAIGA => (0.75, 16.0, "spruce_leaves"),
+            FROSTPEAK => (0.3, 12.0, "fir_leaves"),
+            STONEFANG => (0.15, 9.0, "cragpine_leaves"),
+            OASIS => (0.45, 11.0, "palm_leaves"),
+            MURKWATER => (0.6, 13.0, "cypress_leaves"),
+            TUNDRA => (0.05, 5.0, "larch_leaves"),
+            SUNSCORCHED => (0.02, 6.0, "acacia_leaves"),
+            BLIGHT => (0.2, 9.0, "blightwood_log"),
+            PETRIFIED => (0.15, 10.0, "petrified_log"),
+            STORMBREAK => (0.15, 11.0, "seapine_leaves"),
+            GRASSLANDS => (0.06, 12.0, "leaves"),
+            _ => (0.0, 0.0, ""),
+        }
+    }
+
+    /// The surface distant terrain draws for the cell sampled at `(x, z)`, `cell` blocks
+    /// wide: the ground (`lod_surface`), raised by any of `feats` (from `lod_features`)
+    /// standing over it, and, in cells too big for single trees, by the biome's canopy over
+    /// the share of cells its crowns cover.
+    pub fn lod_cell(&self, x: i32, z: i32, cell: i32, feats: &FeatureGrid) -> (i32, u16) {
+        let (mut q, mut b) = self.lod_surface(x, z, cell);
+        let ground = q;
+        let half = cell / 2;
+        for f in feats.near(x, z) {
+            let (r, _, _) = f.kind.reach();
+            if (f.x - x).abs() > r + half || (f.z - z).abs() > r + half {
+                continue;
+            }
+            if let Some((h, blk)) = f.lod_top(x - f.x, z - f.z) {
+                let top = 4 * (f.y + 1) + (h * 4.0) as i32;
+                if top > q {
+                    (q, b) = (top, blk);
+                }
+            }
+        }
+        if cell > 8 && b != self.water && ground == q {
+            let t = self.terrain.sample(x as f32, z as f32, cell as f32);
+            let (cover, height, name) = self.canopy(self.biome_at(x, z, &t, cell as f32));
+            let h = hash3(self.seed ^ 0xCA90, x, cell, z);
+            if cover > 0.0 && unit(h) < cover {
+                if let Some(&blk) = self.canopy_blocks.get(name) {
+                    let top = ground + (4.0 * height * (0.7 + 0.6 * unit(h.rotate_left(21)))) as i32;
+                    (q, b) = (top, blk);
+                }
+            }
+        }
+        (q, b)
     }
 
     /// Just the height part of `lod_surface` (much cheaper: no climate).
@@ -1230,6 +1347,28 @@ mod tests {
         let f = g.features_for(ChunkPos::new(cx, cy0 + 1, cz), &col);
         assert!(!f.is_empty());
         assert_eq!(g.generate_chunk(ChunkPos::new(cx, cy0 + 1, cz), &col), g.generate_chunk(ChunkPos::new(cx, cy0 + 1, cz), &g.column(cx, cz)));
+    }
+
+    #[test]
+    fn distant_terrain_shows_trees_and_forests() {
+        let (_, g) = make();
+        let (cx, cz) = find_biome(&g, "Ancient Wildwood", (-300, -300));
+        let (x0, z0) = (cx * CHUNK_SIZE, cz * CHUNK_SIZE);
+        // Near: the features themselves. A big tree's anchor shows its crown high above the
+        // ground.
+        let feats = g.lod_features(x0, z0, x0 + 64, z0 + 64, 2);
+        let tall = feats.buckets.values().flatten().filter(|f| matches!(f.kind, Kind::Broadleaf(_, 1 | 2) | Kind::Redwood(_))).find(|f| (x0..x0 + 64).contains(&f.x) && (z0..z0 + 64).contains(&f.z)).expect("a tree");
+        let ground = g.lod_surface(tall.x, tall.z, 1).0;
+        assert!(g.lod_cell(tall.x, tall.z, 1, &feats).0 >= ground + 4 * 8);
+        // Far: the canopy over most of the forest's cells.
+        let cells: Vec<(i32, i32)> = (0..2000)
+            .map(|k| (x0 + (k % 40) * 16 - 320 + 8, z0 + (k / 40) * 16 - 400 + 8))
+            .filter(|&(x, z)| g.describe(x, z).biome == "Ancient Wildwood" && g.lod_surface(x, z, 16).1 != g.water)
+            .take(200)
+            .collect();
+        assert!(cells.len() > 50);
+        let n = cells.iter().filter(|&&(x, z)| g.lod_cell(x, z, 16, &FeatureGrid::default()).0 > g.lod_surface(x, z, 16).0).count();
+        assert!(n * 10 > cells.len() * 7, "{n} of {} cells under a canopy", cells.len());
     }
 
     #[test]
