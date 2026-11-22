@@ -69,6 +69,18 @@ pub struct WorldGen {
 }
 
 /// What the ground at a column is like (see `WorldGen::describe`).
+/// A column of level-of-detail terrain (`WorldGen::lod_column`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LodColumn {
+    /// Top in quarter blocks: the ground, or the water surface over water.
+    pub top_q: i32,
+    /// The top block (water over water), the few blocks under it, and the rock below.
+    pub surface: u16,
+    pub sub: u16,
+    pub rock: u16,
+    pub water: bool,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct GroundInfo {
     pub biome: &'static str,
@@ -265,6 +277,22 @@ impl WorldGen {
         }
         let surf = self.ground_blocks(x, z, top, &t, cell as f32).0;
         (4 * top + if slab { 2 } else { 0 }, surf)
+    }
+
+    /// One column for level-of-detail voxels (see `lod::build_section`), band-limited for
+    /// cells `cell` blocks wide: its top in quarter blocks (the water surface over water), the
+    /// blocks it is made of from the top down, and whether it is under water.
+    pub fn lod_column(&self, x: i32, z: i32, cell: i32) -> LodColumn {
+        let t = self.terrain.sample(x as f32, z as f32, cell as f32);
+        let hq = if cell <= 1 { self.surface_q(x, z) } else { 4 * t.height.round() as i32 };
+        let top = hq.div_euclid(4);
+        let slab = hq.rem_euclid(4) >= 2;
+        let rock = self.rock_at(x, z, cell as f32);
+        let (surface, sub) = self.ground_blocks(x, z, top, &t, cell as f32);
+        if top <= SEA_LEVEL {
+            return LodColumn { top_q: 4 * (SEA_LEVEL + 1), surface: self.water, sub, rock, water: true };
+        }
+        LodColumn { top_q: 4 * top + if slab { 2 } else { 0 }, surface, sub, rock, water: false }
     }
 
     /// Just the height part of `lod_surface` (much cheaper: no climate).

@@ -22,9 +22,8 @@ use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::block::{BlockState, AIR};
-use crate::chunk::Chunk;
-use crate::coords::{BlockPos, ChunkPos, Face, LocalPos, CHUNK_SIZE};
+use crate::block::BlockState;
+use crate::coords::{BlockPos, ChunkPos, Face, CHUNK_SIZE};
 use crate::jobs::JobPool;
 use crate::lod::LodManager;
 use crate::cull::{self, Links};
@@ -98,9 +97,6 @@ pub struct Client {
     /// Chunks whose current geometry is known: meshed (empty or not) at least once since they
     /// arrived. Their mesh may be an older version while an edit is re-meshed.
     resolved: HashSet<ChunkPos>,
-    /// Resolved chunks that block the view from above all over (see `bottom_is_closed` and
-    /// `lod_coverage`).
-    closed_bottom: HashSet<ChunkPos>,
     /// Which faces of each resolved chunk see each other through it (occlusion culling), and
     /// a counter bumped whenever any of them changes.
     links: HashMap<ChunkPos, Links>,
@@ -110,52 +106,44 @@ pub struct Client {
     pub lod: LodManager,
 }
 
-/// Whether nothing below `chunk` can be seen from above through it: each of its 32 x 32
-/// columns holds an opaque block somewhere (every block shape covers its whole footprint).
-/// Not "its bottom layer is solid": a cave crossing the bottom layer far under the ground
-/// would then leave the column uncovered for good, and LOD terrain drawn over the real one.
-fn bottom_is_closed(reg: &BlockRegistry, chunk: &Chunk) -> bool {
-    let closes = |s: BlockState| reg.get(s).opaque;
-    if let Some(s) = chunk.uniform_state() {
-        return closes(s);
-    }
-    let n = CHUNK_SIZE as u8;
-    // Bottom-up: in ground chunks the first block already settles most columns.
-    (0..n).all(|z| (0..n).all(|x| (0..n).any(|y| closes(chunk.get(LocalPos { x, y, z }.index())))))
-}
-
-/// Which chunk columns around the camera show their real surface (meshed and within the
-/// renderer's draw distance), one bit per column in a 64 x 64 window. LOD terrain is hidden
-/// in these columns and drawn everywhere else, so there is neither overlap nor a hole.
+/// Which chunks around the camera are drawn by the real terrain (meshed, uploaded and within
+/// the renderer's draw distance), one bit per chunk in a 32 x 8 x 32 window (8 chunks tall,
+/// from 3 below the camera's chunk to 4 above). LOD terrain is hidden inside these chunks and
+/// drawn everywhere else, so there is neither overlap nor a hole: above and below the band of
+/// loaded chunks (tall cliffs, deep valleys) the LOD shows, and never on top of real terrain.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LodCoverage {
-    /// Chunk column at bit 0.
-    pub origin: (i32, i32),
-    /// Row-major (z then x), 64 bits per row.
-    pub bits: [u32; 128],
+    /// Chunk at bit 0: (x, y, z).
+    pub origin: (i32, i32, i32),
+    /// x fastest, then z, then y: 32 bits per row, 1024 per layer.
+    pub bits: [u32; 256],
 }
 
 impl LodCoverage {
-    pub const SIZE: i32 = 64;
+    pub const SIZE: i32 = 32;
+    pub const HEIGHT: i32 = 8;
+    /// Layers below the camera's chunk.
+    pub const BELOW: i32 = 3;
 
-    pub fn empty(origin: (i32, i32)) -> LodCoverage {
-        LodCoverage { origin, bits: [0; 128] }
+    pub fn empty(origin: (i32, i32, i32)) -> LodCoverage {
+        LodCoverage { origin, bits: [0; 256] }
     }
 
-    pub fn covered(&self, cx: i32, cz: i32) -> bool {
-        let (x, z) = (cx - self.origin.0, cz - self.origin.1);
-        if x < 0 || z < 0 || x >= Self::SIZE || z >= Self::SIZE {
-            return false;
+    fn bit(&self, cx: i32, cy: i32, cz: i32) -> Option<usize> {
+        let (x, y, z) = (cx - self.origin.0, cy - self.origin.1, cz - self.origin.2);
+        if x < 0 || z < 0 || y < 0 || x >= Self::SIZE || z >= Self::SIZE || y >= Self::HEIGHT {
+            return None;
         }
-        let bit = (z * Self::SIZE + x) as usize;
-        self.bits[bit / 32] >> (bit % 32) & 1 == 1
+        Some(((y * Self::SIZE + z) * Self::SIZE + x) as usize)
     }
 
-    fn set(&mut self, cx: i32, cz: i32) {
-        let (x, z) = (cx - self.origin.0, cz - self.origin.1);
-        if x >= 0 && z >= 0 && x < Self::SIZE && z < Self::SIZE {
-            let bit = (z * Self::SIZE + x) as usize;
-            self.bits[bit / 32] |= 1 << (bit % 32);
+    pub fn covered(&self, cx: i32, cy: i32, cz: i32) -> bool {
+        self.bit(cx, cy, cz).is_some_and(|b| self.bits[b / 32] >> (b % 32) & 1 == 1)
+    }
+
+    fn set(&mut self, cx: i32, cy: i32, cz: i32) {
+        if let Some(b) = self.bit(cx, cy, cz) {
+            self.bits[b / 32] |= 1 << (b % 32);
         }
     }
 
@@ -189,7 +177,6 @@ impl Client {
             mesh_budget: 8,
             mesher: Mesher::Simple,
             resolved: HashSet::new(),
-            closed_bottom: HashSet::new(),
             links: HashMap::new(),
             links_gen: 0,
             sight: None,
@@ -291,38 +278,24 @@ impl Client {
     pub fn lod_coverage(&self, draw_distance: f32) -> LodCoverage {
         let cam = BlockPos::from_f32(self.camera).chunk();
         let half = LodCoverage::SIZE / 2;
-        let mut cov = LodCoverage::empty((cam.x - half, cam.z - half));
+        let mut cov = LodCoverage::empty((cam.x - half, cam.y - LodCoverage::BELOW, cam.z - half));
         let not_uploaded: HashSet<ChunkPos> = self.mesh_changes.iter().copied().collect();
-        let vv = self.view_chunks.min(self.vertical_view);
         let r = (self.view_chunks + 1).min(half - 1);
         let d2_max = draw_distance * draw_distance;
-        for dz in -r..=r {
-            for dx in -r..=r {
-                let (cx, cz) = (cam.x + dx, cam.z + dz);
-                // From the top of the streamed window down: skip the sky, then every chunk the
-                // ground passes through must be drawn (known, uploaded, within the draw
-                // distance), down to one that blocks the view all over. Hilly ground often
-                // dips into the chunk below, which is further away when seen from above.
-                let mut ground = false;
-                for cy in (cam.y - vv..=cam.y + vv).rev() {
-                    let p = ChunkPos::new(cx, cy, cz);
-                    let Some(chunk) = self.store.get(p) else { break };
-                    if !self.resolved.contains(&p) || not_uploaded.contains(&p) {
-                        break;
-                    }
-                    if !ground && chunk.uniform_state() == Some(AIR) {
+        let h = CHUNK_SIZE as f32 * 0.5;
+        for cy in cov.origin.1..cov.origin.1 + LodCoverage::HEIGHT {
+            for dz in -r..=r {
+                for dx in -r..=r {
+                    let p = ChunkPos::new(cam.x + dx, cy, cam.z + dz);
+                    // Known, its current geometry meshed and on the GPU (an empty chunk has
+                    // none to upload), and drawn: within the renderer's draw distance.
+                    if self.store.get(p).is_none() || !self.resolved.contains(&p) || not_uploaded.contains(&p) {
                         continue;
                     }
-                    ground = true;
                     let o = p.origin();
-                    let h = CHUNK_SIZE as f32 * 0.5;
                     let c = [o.x as f32 + h - self.camera[0], o.y as f32 + h - self.camera[1], o.z as f32 + h - self.camera[2]];
-                    if c[0] * c[0] + c[1] * c[1] + c[2] * c[2] > d2_max {
-                        break;
-                    }
-                    if self.closed_bottom.contains(&p) {
-                        cov.set(cx, cz);
-                        break;
+                    if c[0] * c[0] + c[1] * c[1] + c[2] * c[2] <= d2_max {
+                        cov.set(p.x, p.y, p.z);
                     }
                 }
             }
@@ -435,7 +408,6 @@ impl Client {
                 self.awaiting_neighbors.remove(&pos);
                 self.versions.remove(&pos);
                 self.resolved.remove(&pos);
-                self.closed_bottom.remove(&pos);
                 if self.links.remove(&pos).is_some() {
                     self.links_gen += 1;
                 }
@@ -548,11 +520,6 @@ impl Client {
                 }
                 // (inline `mark_resolved`: `pool` and `reg` borrow other fields of self)
                 self.resolved.insert(p);
-                if self.store.get(p).map_or(false, |c| bottom_is_closed(reg, c)) {
-                    self.closed_bottom.insert(p);
-                } else {
-                    self.closed_bottom.remove(&p);
-                }
                 // (it is uniform: that is the only way a chunk has no faces)
                 let links = match self.store.get(p).and_then(|c| c.uniform_state()) {
                     Some(s) => cull::links_uniform(reg, s),
@@ -576,21 +543,11 @@ impl Client {
         }
     }
 
-    /// `pos` now has its current geometry; note whether its bottom is closed and how it lets
-    /// sight through.
+    /// `pos` now has its current geometry; note how it lets sight through.
     fn mark_resolved(&mut self, pos: ChunkPos, links: Links) {
         self.resolved.insert(pos);
         if self.links.insert(pos, links) != Some(links) {
             self.links_gen += 1;
-        }
-        let closed = match (self.store.get(pos), self.registry.as_ref()) {
-            (Some(chunk), Some(reg)) => bottom_is_closed(reg, chunk),
-            _ => false,
-        };
-        if closed {
-            self.closed_bottom.insert(pos);
-        } else {
-            self.closed_bottom.remove(&pos);
         }
     }
 

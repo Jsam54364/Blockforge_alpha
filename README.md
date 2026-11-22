@@ -367,9 +367,10 @@ Renderer gaps: pooled vertex buffers, occlusion culling, texture array
 
 ## Level-of-detail terrain (`lod.rs`)
 
-Terrain past the real chunks, out to 32 km, for the look of an endless view. The design is
-Distant Horizons' (the Minecraft LOD mod, LGPL), rewritten from scratch for this engine and for
-phones; no code was copied from it or from other LOD mods.
+Terrain past the real chunks, out to 32 km, for the look of an endless view. Sections are
+streamed like Distant Horizons' (the Minecraft LOD mod), and drawn as voxels like Voxy's: the
+world downscaled into bigger blocks. Both rewritten from scratch for this engine and for
+phones; no code was copied from them or from other LOD mods.
 
 * **Quadtree of sections in widening rings.** A section is 32 x 32 cells; a level-L cell is a
   column 2^L blocks wide. The rings start where the real chunks end: the first has 2-block
@@ -382,40 +383,40 @@ phones; no code was copied from it or from other LOD mods.
   cells and shows wherever a chunk isn't drawn yet, so flying faster than chunks stream in
   shows rough terrain instead of holes.
 * **Built from the seed, not from chunks.** The generator is a pure function of the seed, so a
-  cell is one height sample (`WorldGen::lod_surface`, exactly the generated surface at full
-  detail). Octaves of the height noise finer than a cell are faded to their average instead of
-  aliasing, and heights are rounded to steps that grow with the cell (a quarter of its width),
-  which roughly halves the quads.
-* **Smooth far terrain at no extra cost:** from 4-block cells outward every vertex carries the
-  ground's slope at its corner (the normal from the four unrounded heights around it, packed in
-  the spare 16 bits of its 8-byte vertex), and the shader lights it by that slope instead of
-  by the way its face points. The tops and steps of a hillside then shade as one smooth
-  surface, and steps no steeper than the cell is wide take the top's texture instead of the
-  striped side. Same quads, same memory. The 2-block cells next to the real chunks stay
-  blocky like them.
-* **Blocky meshes like Distant Horizons':** a box per column, sides only where the neighbour is
-  lower, equal faces merged. Border sides reach down to the lowest height a neighbour one level
-  finer or coarser can have, so there are no cracks between levels (the quadtree keeps
-  neighbours within one level; tested).
-* **No holes and no overlap with the real chunks.** Distant Horizons draws its LODs from a
-  distance setting, so they either overlap the real terrain or leave holes while chunks stream
-  in. Here the client reports, per chunk column, whether the real surface is meshed, uploaded
-  and drawn (`Client::lod_coverage`); the LOD vertex shader drops quads exactly in those
-  columns. Near the real chunks (only the two finest levels can touch them) faces are merged
-  only within a chunk column so every corner of a quad agrees, and on every chunk-column line the
-  side faces reach a block below the real ground beside them (the sea floor under water), so
-  where real terrain dips below its LOD cell no slit opens at the seam. LOD water is level with
-  real water and needs none. Sections whose columns are all covered aren't drawn at all.
+  column is one sample (`WorldGen::lod_column`, exactly the generated surface at full detail).
+  Octaves of the height noise finer than a cell are faded to their average instead of
+  aliasing, and heights are rounded to whole voxels.
+* **Voxels, Voxy-style.** Each section is a grid of voxels a cell wide and `voxel_height` tall
+  (cubes of 2, 4 and 8 blocks; farther out slabs a quarter as tall as they are wide, 8 to 32
+  blocks, so far mountains keep their shape), each one block type: the surface block on top,
+  the subsurface block within 4 blocks of it, the local rock below (cliffs show stone). Every
+  voxel face open to air is drawn with that block's texture, once per voxel, so the distant
+  world looks like the near one in bigger blocks; coplanar faces of one texture are merged
+  into rectangles. The grid is filled from the generator's columns (`WorldGen::lod_column`)
+  and can take any voxels (trees, overhangs), not only heights. Water surfaces are flat at
+  their exact height. About half the quads of the old column boxes.
+* Border voxels' sides reach down to the lowest top a neighbour one level finer or coarser can
+  have, so there are no cracks between levels (the quadtree keeps neighbours within one level;
+  tested).
+* **No holes and no overlap with the real chunks, in 3D.** Distant Horizons draws its LODs from
+  a distance setting, so they either overlap the real terrain or leave holes while chunks
+  stream in. Here the client reports, per chunk (a 32 x 8 x 32 window around the camera),
+  whether it is held, meshed, uploaded and drawn (`Client::lod_coverage`); the LOD vertex
+  shader drops quads exactly in those chunks. The server only streams 2 chunks above and below
+  the camera, so tall cliffs and deep valleys beyond that band are LOD, and LOD never shows
+  inside a drawn chunk. Near the real chunks (only the two finest levels can touch them) faces
+  are merged only within one chunk in all three directions, so every corner of a quad agrees,
+  and on every chunk-column line the side faces reach below the real ground beside them, so
+  where real terrain dips below its LOD voxel no slit opens at the seam. Sections whose chunks
+  are all covered aren't drawn at all.
 * **Drawn after the real terrain**, nearest first, so LOD pixels behind real terrain are rejected
   by the depth test before shading. Reverse-Z depth with no far plane keeps precision at 30 km.
 * **Never a gap while detail changes:** a section is replaced only when everything replacing it
   is built *and uploaded to the GPU* (a coarser parent stands in for unready children, or finer
   children for a parent). A test flies the camera with uploads throttled to two sections a
   frame and checks every frame for holes and doubles.
-* A chunk column counts as covered by real terrain once its chunks are drawn down to one that
-  blocks the view from above in every block column (a cave under the ground does not uncover
-  it). LOD terrain also loses depth ties, so the moment both are drawn while chunks arrive
-  does not flicker.
+* LOD terrain loses depth ties, so the moment both are drawn while chunks arrive does not
+  flicker.
 * Fog spans the far part of the LOD view, so the horizon fades into the sky.
 
 Measured on the build machine (headless demo; render distance 6, whole view before culling,

@@ -382,20 +382,16 @@ impl LodSettings {
 ///
 /// ```text
 ///   a: x(6) | z(6)<<6 | face(3)<<12 | in_x(2)<<15 | in_z(2)<<17 | top(1)<<19 | texture(8)<<20
-///      | smooth(1)<<28 | texture's high bits(3)<<29 (an 11-bit texture: up to 2048)
-///   b: y in quarter blocks, as an i16 | normal x(8)<<16 | normal z(8)<<24
+///      | texture's high bits(3)<<29 (an 11-bit texture: up to 2048)
+///   b: y in quarter blocks, as an i16
 /// ```
 ///
-/// With `smooth` set (distant levels, see `SMOOTH_FROM_CELL`) the vertex carries the
-/// terrain's slope where it stands: the ground's normal, its x and z mapped from -1..1 to
-/// 0..254 (y is the rest, always up). The shader lights the face by that instead of the
-/// way the face points, so the boxes shade as the smooth hillside they stand for.
-///
 /// `x` and `z` are corners in cells (0..=32) from the section origin. `in_x`/`in_z` point
-/// from the corner into the quad's own cell (0 = -1, 1 = 0, 2 = +1): the shader steps half
-/// a cell that way to find the chunk column the quad belongs to, and steps slightly the
-/// other way to grow merged quads over T-junction cracks. `top` marks the upper corners of
-/// side faces (grown upwards for the same reason).
+/// from the corner into the quad's own voxel (0 = -1, 1 = 0, 2 = +1): the shader steps half
+/// a cell that way (and a little into the voxel vertically: down from tops and from the
+/// upper corners of sides, up from bottoms and lower corners) to find the chunk the quad
+/// belongs to, and steps slightly the other way to grow merged quads over T-junction cracks.
+/// `top` marks the upper corners of side faces.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LodVertex {
@@ -425,14 +421,6 @@ impl LodVertex {
     pub fn y_q(self) -> i32 {
         self.b as u16 as i16 as i32
     }
-    /// The slope normal a smooth vertex carries (`None`: lit by its face).
-    pub fn normal(self) -> Option<[f32; 3]> {
-        if (self.a >> 28) & 1 == 0 {
-            return None;
-        }
-        let (x, z) = (unpack_unit((self.b >> 16) & 255), unpack_unit(self.b >> 24));
-        Some([x, (1.0 - x * x - z * z).max(0.0).sqrt(), z])
-    }
 }
 
 /// A built section, ready to upload.
@@ -454,89 +442,84 @@ impl LodMesh {
 /// Side length of the sampled grid: the section plus a one-cell ring of neighbours.
 const GRID: i32 = CELLS + 2;
 
-/// From this cell width on, LOD terrain is shaded as smooth slopes (vertex normals from the
-/// terrain's own heights), and low steps take the top texture: far off it reads as hills,
-/// not stairs. Finer levels, next to the real chunks, stay blocky like them.
-pub const SMOOTH_FROM_CELL: i32 = 4;
-
-fn pack_unit(v: f32) -> u32 {
-    ((v.clamp(-1.0, 1.0) + 1.0) * 127.0).round() as u32
-}
-
-fn unpack_unit(b: u32) -> f32 {
-    b as f32 / 127.0 - 1.0
-}
-
-struct Grid {
-    surf: Vec<i32>,
-    block: Vec<u16>,
-    /// Heights before rounding (quarter blocks), ring included: the slopes come from these.
-    raw: Vec<i32>,
-}
-
-impl Grid {
-    fn idx(i: i32, j: i32) -> usize {
-        ((j + 1) * GRID + (i + 1)) as usize
-    }
-    fn surf(&self, i: i32, j: i32) -> i32 {
-        self.surf[Self::idx(i, j)]
-    }
-    fn block(&self, i: i32, j: i32) -> u16 {
-        self.block[Self::idx(i, j)]
-    }
-
-    /// The ground's normal at corner (x, z) of the section (0..=CELLS), from the four cells
-    /// around it, packed for `LodVertex::b`'s top half.
-    fn corner_normal(&self, x: i32, z: i32, cell: i32) -> u32 {
-        let h = |i: i32, j: i32| self.raw[Self::idx(i, j)] as f32 * 0.25;
-        let w = cell as f32;
-        let dx = (h(x, z - 1) + h(x, z) - h(x - 1, z - 1) - h(x - 1, z)) / (2.0 * w);
-        let dz = (h(x - 1, z) + h(x, z) - h(x - 1, z - 1) - h(x, z - 1)) / (2.0 * w);
-        let l = (dx * dx + 1.0 + dz * dz).sqrt();
-        pack_unit(-dx / l) | (pack_unit(-dz / l) << 8)
+/// Height of a voxel layer, in blocks, for cells `cell` blocks wide: cubes up to 8 blocks
+/// (Voxy-style: the world downscaled into bigger blocks), then slabs a quarter as tall as
+/// they are wide (8 to 32 blocks), so distant mountains keep their shape instead of turning
+/// into a few giant steps.
+pub fn voxel_height(cell: i32) -> i32 {
+    if cell <= 8 {
+        cell.max(1)
+    } else {
+        (cell / 4).clamp(8, 32)
     }
 }
 
-/// Height step for a level, in quarter blocks: a quarter of the cell width, at least one
-/// block. Rounding to it is invisible at the distance each level is drawn from, and it
-/// turns smooth slopes into terraces whose faces merge: about half the quads of exact heights.
-fn height_step(cell: i32) -> i32 {
-    cell.max(4)
+/// One column of a section as it is drawn, in voxels.
+#[derive(Clone, Copy, Debug)]
+struct Col {
+    /// Top of its solid voxels, in blocks (a whole number of layers).
+    top: i32,
+    /// The water surface over it, in quarter blocks (drawn as a flat face at that height).
+    water_q: Option<i32>,
+    surface: u16,
+    sub: u16,
+    rock: u16,
 }
 
-fn quantize(surf_q: i32, block: u16, water: u16, cell: i32) -> i32 {
-    if block == water || cell <= 1 {
-        return surf_q;
-    }
-    let step = height_step(cell);
-    // Land never drops below the sea surface (it would read as a hole in the coast).
-    ((surf_q + step / 2).div_euclid(step) * step).max(4 * (crate::worldgen::SEA_LEVEL + 1))
-}
-
-/// The surface of cell `(i, j)` of a section as it is drawn (quantized), in quarter blocks.
-pub fn cell_surface(gen: &WorldGen, key: SectionKey, i: i32, j: i32) -> (i32, u16) {
-    cell_surface_edited(gen, key, i, j, None)
-}
-
-/// `cell_surface`, with the edits in the cell (see `SurfaceEdits`).
-fn cell_surface_edited(gen: &WorldGen, key: SectionKey, i: i32, j: i32, edits: Option<&CellEdits>) -> (i32, u16) {
-    let (q, b, _) = cell_surface_raw(gen, key, i, j, edits);
-    (q, b)
-}
-
-/// `cell_surface_edited`, and the height before rounding.
-fn cell_surface_raw(gen: &WorldGen, key: SectionKey, i: i32, j: i32, edits: Option<&CellEdits>) -> (i32, u16, i32) {
-    let cell = key.cell();
-    let (ox, oz) = key.origin();
-    let (mut s, mut b) = gen.lod_surface(sample_at(ox + i * cell, cell), sample_at(oz + j * cell, cell), cell);
-    if let Some(e) = edits {
-        if e.highest.top_q > s {
-            (s, b) = (e.highest.top_q, e.highest.block);
-        } else if let Some(t) = e.at_sample {
-            (s, b) = (t.top_q, t.block);
+impl Col {
+    /// The block of the solid voxel whose top is at `y`: the surface block in the top layer,
+    /// the subsurface block within 4 blocks of the surface, rock below (cliffs show stone).
+    fn material(&self, y: i32) -> u16 {
+        match self.top - y {
+            d if d <= 0 => self.surface,
+            d if d < 4 => self.sub,
+            _ => self.rock,
         }
     }
-    (quantize(s, b, gen.water_id(), cell), b, s)
+}
+
+fn div_round(a: i32, b: i32) -> i32 {
+    (a + b / 2).div_euclid(b)
+}
+
+/// The lowest whole layer at or above the sea surface: land never sinks under the water (it
+/// would read as a hole in the coast).
+fn lowest_land(vh: i32) -> i32 {
+    (crate::worldgen::SEA_LEVEL + 1 + vh - 1).div_euclid(vh) * vh
+}
+
+/// Column `(i, j)` of a section as drawn, with the edits in its cell.
+fn column(gen: &WorldGen, key: SectionKey, i: i32, j: i32, edits: Option<&CellEdits>) -> Col {
+    let cell = key.cell();
+    let vh = voxel_height(cell);
+    let (ox, oz) = key.origin();
+    let c = gen.lod_column(sample_at(ox + i * cell, cell), sample_at(oz + j * cell, cell), cell);
+    let (mut top_q, mut surface, mut water) = (c.top_q, c.surface, c.water);
+    if let Some(e) = edits {
+        if e.highest.top_q > top_q {
+            (top_q, surface, water) = (e.highest.top_q, e.highest.block, false);
+        } else if let Some(t) = e.at_sample {
+            (top_q, surface, water) = (t.top_q, t.block, t.block == gen.water_id());
+        }
+    }
+    if water {
+        // The sea floor is never seen under LOD water: solid up to a layer below the surface.
+        let floor = (crate::worldgen::SEA_LEVEL).div_euclid(vh) * vh;
+        Col { top: floor.min(div_round(top_q, 4 * vh) * vh), water_q: Some(top_q), surface: c.sub, sub: c.sub, rock: c.rock }
+    } else {
+        let top = (div_round(top_q, 4 * vh) * vh).max(lowest_land(vh));
+        Col { top, water_q: None, surface, sub: c.sub, rock: c.rock }
+    }
+}
+
+/// The surface of cell `(i, j)` of a section as it is drawn, in quarter blocks, and its block:
+/// the water surface over water, else the top of the solid voxels.
+pub fn cell_surface(gen: &WorldGen, key: SectionKey, i: i32, j: i32) -> (i32, u16) {
+    let c = column(gen, key, i, j, None);
+    match c.water_q {
+        Some(q) => (q, gen.water_id()),
+        None => (4 * c.top, c.surface),
+    }
 }
 
 /// Where a level-`cell` cell starting at block `b` is sampled: its centre (whole blocks).
@@ -548,9 +531,11 @@ fn sample_at(b: i32, cell: i32) -> i32 {
     }
 }
 
-/// The lowest surface a neighbouring section can show along one border cell, in quarter
-/// blocks: the neighbour may be at this level, one finer or one coarser (the quadtree keeps
-/// neighbours within one level; see the tests), so sample all three and add a block of slack.
+/// The lowest top a neighbouring section can show along one border cell, in blocks: the
+/// neighbour may be at this level, one finer or one coarser (the quadtree keeps neighbours
+/// within one level; see the tests), so sample all three, allow for each rounding to its own
+/// layers, and add a block of slack. Border voxels' sides reach down to it (skirts): no crack
+/// opens between sections of different detail.
 fn border_min(gen: &WorldGen, key: SectionKey, i: i32, j: i32) -> i32 {
     let cell = key.cell();
     let (ox, oz) = key.origin();
@@ -578,13 +563,11 @@ fn border_min(gen: &WorldGen, key: SectionKey, i: i32, j: i32) -> i32 {
             m = m.min(gen.lod_height(sample_at(fx, h), sample_at(fz, h), h));
         }
     }
-    // Neighbours round their heights to their own step, at most half the coarser step down.
-    m - height_step(cell * 2) / 2 - 4
+    // Rounded to the coarser level's layers, at most half a layer down; and a block of slack.
+    m.div_euclid(4) - voxel_height(c2) / 2 - voxel_height(c2) - 1
 }
 
 fn tex(reg: &BlockRegistry, block: u16, face: Face) -> u32 {
-    // Tall LOD side faces repeat the side texture once per block, grass fringe and all: that
-    // is what the stepped slopes they stand for look like up close.
     reg.def(block).tex[face.index()] as u32 & 2047
 }
 
@@ -593,19 +576,16 @@ struct Emit {
     verts: Vec<LodVertex>,
     min_q: i32,
     max_q: i32,
-    /// Smooth sections: the packed normal at each corner, (CELLS + 1)^2.
-    normals: Option<Vec<u32>>,
 }
 
 impl Emit {
     /// A box face over cells `[x0, x1] x [z0, z1]` and quarter heights `[y0, y1]`.
-    /// `owner` is the horizontal direction from a side face into its own cell.
     #[allow(clippy::too_many_arguments)]
     fn quad(&mut self, face: Face, x0: i32, x1: i32, y0: i32, y1: i32, z0: i32, z1: i32, texture: u32) {
         let fi = face.index() as u32;
         for c in FACE_CORNERS[face.index()] {
             let (x, y, z) = (if c[0] == 1 { x1 } else { x0 }, if c[1] == 1 { y1 } else { y0 }, if c[2] == 1 { z1 } else { z0 });
-            // Into the quad along its extent, into the owning cell across a side face.
+            // Into the quad along its extent, into the owning voxel across a side face.
             let along = |v: i32, lo: i32| if v == lo { 1 } else { -1 };
             let (inx, inz) = match face {
                 Face::PosX => (-1, along(z, z0)),
@@ -614,7 +594,8 @@ impl Emit {
                 Face::NegZ => (along(x, x0), 1),
                 _ => (along(x, x0), along(z, z0)),
             };
-            let top = face != Face::PosY && c[1] == 1;
+            // Upper corners of side faces (the shader looks down from them into the voxel).
+            let top = matches!(face, Face::PosX | Face::NegX | Face::PosZ | Face::NegZ) && y == y1 && y1 != y0;
             let a = (x as u32 & 63)
                 | ((z as u32 & 63) << 6)
                 | (fi << 12)
@@ -623,13 +604,45 @@ impl Emit {
                 | ((top as u32) << 19)
                 | ((texture & 255) << 20)
                 | ((texture >> 8 & 7) << 29);
-            let (a, b) = match &self.normals {
-                Some(n) => (a | 1 << 28, (y as i16 as u16 as u32) | (n[(z * (CELLS + 1) + x) as usize] << 16)),
-                None => (a, y as i16 as u16 as u32),
-            };
-            self.verts.push(LodVertex { a, b });
+            self.verts.push(LodVertex { a, b: y as i16 as u16 as u32 });
             self.min_q = self.min_q.min(y);
             self.max_q = self.max_q.max(y);
+        }
+    }
+}
+
+/// Greedy rectangles over a `w` x `h` grid of face textures (0 = no face), never crossing
+/// a tile boundary (`tile_u`, `tile_v(v)`: the tile of each row). Calls `out(u, v, du, dv, tex)`.
+fn greedy(w: i32, h: i32, mask: &mut [u32], tile_u: i32, tile_v: &dyn Fn(i32) -> i32, out: &mut dyn FnMut(i32, i32, i32, i32, u32)) {
+    for v in 0..h {
+        let mut u = 0;
+        while u < w {
+            let t = mask[(v * w + u) as usize];
+            if t == 0 {
+                u += 1;
+                continue;
+            }
+            let u_end = ((u / tile_u + 1) * tile_u).min(w);
+            let mut du = 1;
+            while u + du < u_end && mask[(v * w + u + du) as usize] == t {
+                du += 1;
+            }
+            let mut dv = 1;
+            'grow: while v + dv < h && tile_v(v + dv) == tile_v(v) {
+                for uu in u..u + du {
+                    if mask[((v + dv) * w + uu) as usize] != t {
+                        break 'grow;
+                    }
+                }
+                dv += 1;
+            }
+            for vv in v..v + dv {
+                for uu in u..u + du {
+                    mask[(vv * w + uu) as usize] = 0;
+                }
+            }
+            out(u, v, du, dv, t);
+            u += du;
         }
     }
 }
@@ -640,93 +653,106 @@ pub fn build_section(gen: &WorldGen, reg: &BlockRegistry, key: SectionKey) -> Lo
 }
 
 /// `build_section` over the terrain as edits left it.
+///
+/// Voxy-style: the section is a grid of voxels `cell` blocks wide and `voxel_height` tall,
+/// each one block type, filled from the generator's columns; every voxel face open to air is
+/// drawn with that block's texture (one texture per voxel: it looks like the world in bigger
+/// blocks), and coplanar faces of one texture are merged into rectangles.
 pub fn build_section_edited(gen: &WorldGen, reg: &BlockRegistry, edits: &SurfaceEdits, key: SectionKey) -> LodMesh {
     let edited = edits.cells(key);
-    let n = (GRID * GRID) as usize;
-    let mut grid = Grid { surf: vec![0; n], block: vec![0; n], raw: vec![0; n] };
+    let cell = key.cell();
+    let vh = voxel_height(cell);
+    let (ox, oz) = key.origin();
+    let water = gen.water_id();
+
+    // Columns, a one-cell ring included (the ring only decides which border faces show; it
+    // is lowered to what any neighbouring section can show there).
+    let gi = |i: i32, j: i32| ((j + 1) * GRID + (i + 1)) as usize;
+    let mut cols = vec![Col { top: 0, water_q: None, surface: 0, sub: 0, rock: 0 }; (GRID * GRID) as usize];
     for j in -1..=CELLS {
         for i in -1..=CELLS {
+            let ring = i == -1 || i == CELLS || j == -1 || j == CELLS;
             let corner = (i == -1 || i == CELLS) && (j == -1 || j == CELLS);
             if corner {
                 continue; // never a neighbour of a face
             }
-            let (s, b, raw) = cell_surface_raw(gen, key, i, j, edited.get(&(i, j)));
-            let k = Grid::idx(i, j);
-            grid.surf[k] = s;
-            grid.block[k] = b;
-            grid.raw[k] = raw;
-        }
-    }
-    // The ring's corners only shape the slope at the section's corners: their two
-    // neighbours' average does.
-    for (i, j, a, b) in [(-1, -1, (0, -1), (-1, 0)), (CELLS, -1, (CELLS - 1, -1), (CELLS, 0)), (-1, CELLS, (0, CELLS), (-1, CELLS - 1)), (CELLS, CELLS, (CELLS - 1, CELLS), (CELLS, CELLS - 1))] {
-        grid.raw[Grid::idx(i, j)] = (grid.raw[Grid::idx(a.0, a.1)] + grid.raw[Grid::idx(b.0, b.1)]) / 2;
-    }
-    let smooth = key.cell() >= SMOOTH_FROM_CELL;
-    // Neighbour heights for border sides: the lowest any neighbouring level can show.
-    for t in 0..CELLS {
-        for (i, j) in [(-1, t), (CELLS, t), (t, -1), (t, CELLS)] {
-            let mut m = border_min(gen, key, i, j);
-            if let Some(e) = edited.get(&(i, j)) {
-                // An edit may have lowered the neighbour (a pit at the border).
-                m = m.min(cell_surface_edited(gen, key, i, j, Some(e)).0 - height_step(key.cell() * 2) / 2 - 4);
-            }
-            grid.surf[Grid::idx(i, j)] = m;
-        }
-    }
-
-    // Faces are merged only inside a tile. For sections that can meet loaded chunks a tile
-    // is one chunk column, so the renderer can hide every quad by its column.
-    let tile = if key.level <= MASKED_MAX_LEVEL { (CHUNK_SIZE >> key.level).max(1) } else { CELLS };
-    let normals = smooth.then(|| {
-        let cell = key.cell();
-        (0..=CELLS).flat_map(|z| (0..=CELLS).map(move |x| (x, z))).map(|(x, z)| grid.corner_normal(x, z, cell)).collect()
-    });
-    let mut e = Emit { verts: Vec::new(), min_q: i32::MAX, max_q: i32::MIN, normals };
-
-    // Tops: greedy rectangles of equal height and texture.
-    let top_key = |i: i32, j: i32| (grid.surf(i, j), tex(reg, grid.block(i, j), Face::PosY));
-    let mut used = vec![false; (CELLS * CELLS) as usize];
-    for j in 0..CELLS {
-        for i in 0..CELLS {
-            if used[(j * CELLS + i) as usize] {
-                continue;
-            }
-            let k = top_key(i, j);
-            let (i_end, j_end) = ((i / tile + 1) * tile, (j / tile + 1) * tile);
-            let mut w = 1;
-            while i + w < i_end && !used[(j * CELLS + i + w) as usize] && top_key(i + w, j) == k {
-                w += 1;
-            }
-            let mut h = 1;
-            'grow: while j + h < j_end {
-                for ii in i..i + w {
-                    if used[((j + h) * CELLS + ii) as usize] || top_key(ii, j + h) != k {
-                        break 'grow;
-                    }
+            let mut c = column(gen, key, i, j, edited.get(&(i, j)));
+            if ring {
+                let mut m = border_min(gen, key, i, j);
+                if edited.contains_key(&(i, j)) {
+                    m = m.min(c.top - voxel_height(cell * 2) - 1); // an edit may have lowered it
                 }
-                h += 1;
+                c.top = m.div_euclid(vh) * vh;
+                c.water_q = None;
             }
-            for jj in j..j + h {
-                for ii in i..i + w {
-                    used[(jj * CELLS + ii) as usize] = true;
-                }
-            }
-            e.quad(Face::PosY, i, i + w, k.0, k.0, j, j + h, k.1);
+            cols[gi(i, j)] = c;
         }
     }
 
-    // Sides: where the neighbour is lower, from its height up to ours, merged along the edge.
-    // On a chunk-column boundary the neighbour may be real terrain instead (the LOD there is
-    // hidden), which can be lower than its LOD cell: the face reaches below the real ground
-    // along that edge, so no slit opens between LOD and real terrain.
-    let cell = key.cell();
-    let (ox, oz) = key.origin();
+    // The voxels between the lowest and the highest top: below is solid, above is air.
+    let lowest = (-1..=CELLS)
+        .flat_map(|j| (-1..=CELLS).map(move |i| (i, j)))
+        .filter(|&(i, j)| !((i == -1 || i == CELLS) && (j == -1 || j == CELLS)))
+        .map(|(i, j)| cols[gi(i, j)].top)
+        .min()
+        .unwrap_or(0);
+    // Where this section can meet real chunks, sides on chunk-column lines may reach down to
+    // the real ground beside them (see `real_min` below): the voxels must go that deep.
     let masked = key.level <= MASKED_MAX_LEVEL;
-    let water = gen.water_id();
-    let real_edge_min = |face: Face, i: i32, j: i32| -> i32 {
-        // The ground just across this cell's `face` edge, at full detail. The ground, not
-        // the water surface: real water is see-through, so the face must reach the sea floor.
+    let lines_low = if masked {
+        let mut m = i32::MAX;
+        for a in 0..=CELLS {
+            if (ox + a * cell).rem_euclid(CHUNK_SIZE) == 0 {
+                for t in 0..CELLS * cell {
+                    m = m.min(gen.ground_q(ox + a * cell, oz + t)).min(gen.ground_q(ox + a * cell - 1, oz + t));
+                }
+            }
+            if (oz + a * cell).rem_euclid(CHUNK_SIZE) == 0 {
+                for t in 0..CELLS * cell {
+                    m = m.min(gen.ground_q(ox + t, oz + a * cell)).min(gen.ground_q(ox + t, oz + a * cell - 1));
+                }
+            }
+        }
+        m.div_euclid(4) - 1
+    } else {
+        i32::MAX
+    };
+    let y0 = (lowest.min(lines_low.div_euclid(vh) * vh)) - vh;
+    let highest = (0..CELLS).flat_map(|j| (0..CELLS).map(move |i| (i, j))).map(|(i, j)| cols[gi(i, j)].top).max().unwrap_or(0);
+    let y1 = highest.max(y0 + vh);
+    let layers = (y1 - y0) / vh;
+    let vi = |i: i32, k: i32, j: i32| ((k * GRID + j + 1) * GRID + i + 1) as usize;
+    let mut vox = vec![0u16; (GRID * GRID * layers) as usize];
+    for j in -1..=CELLS {
+        for i in -1..=CELLS {
+            let c = &cols[gi(i, j)];
+            for k in 0..layers {
+                let top = y0 + (k + 1) * vh;
+                if top <= c.top {
+                    // Ring voxels only need to be solid (any non-zero block).
+                    vox[vi(i, k, j)] = if c.surface == 0 { 1 } else { c.material(top) };
+                }
+            }
+        }
+    }
+    let solid = |i: i32, k: i32, j: i32| -> bool {
+        if k < 0 {
+            return true;
+        }
+        if k >= layers {
+            return false;
+        }
+        vox[vi(i, k, j)] != 0
+    };
+
+    // Where this section can meet real chunks, faces are merged only within one chunk (in
+    // all three directions), so the renderer can hide each quad by the chunk it belongs to.
+    let tile = if masked { (CHUNK_SIZE / cell).max(1) } else { CELLS };
+    let layer_tile = |k: i32| if masked { (y0 + k * vh).div_euclid(CHUNK_SIZE) } else { 0 };
+    // On a chunk-column line the voxel beside may be real terrain instead (its LOD hidden),
+    // which can be lower than its LOD column: sides there reach down to the real ground, so
+    // no slit opens between LOD and real terrain.
+    let real_min = |face: Face, i: i32, j: i32| -> i32 {
         let (x0, z0) = (ox + i * cell, oz + j * cell);
         let mut m = i32::MAX;
         for k in 0..cell {
@@ -738,60 +764,100 @@ pub fn build_section_edited(gen: &WorldGen, reg: &BlockRegistry, edits: &Surface
             };
             m = m.min(gen.ground_q(x, z));
         }
-        m - 4 // and a block of slack
+        m.div_euclid(4) - 1
     };
+
+    let mut e = Emit { verts: Vec::new(), min_q: i32::MAX, max_q: i32::MIN };
+    let yq = |k: i32| 4 * (y0 + k * vh);
+
+    // Tops and bottoms, layer by layer.
+    for (face, up) in [(Face::PosY, 1), (Face::NegY, -1)] {
+        for k in 0..layers {
+            let mut mask = vec![0u32; (CELLS * CELLS) as usize];
+            let mut any = false;
+            for j in 0..CELLS {
+                for i in 0..CELLS {
+                    if solid(i, k, j) && !solid(i, k + up, j) && !(up < 0 && k == 0) {
+                        let b = vox[vi(i, k, j)];
+                        let c = &cols[gi(i, j)];
+                        if up > 0 && c.water_q.is_some_and(|w| w >= 4 * (y0 + (k + 1) * vh)) {
+                            continue; // under the water surface
+                        }
+                        mask[(j * CELLS + i) as usize] = tex(reg, b, face) + 1;
+                        any = true;
+                    }
+                }
+            }
+            if !any {
+                continue;
+            }
+            let y = if up > 0 { yq(k + 1) } else { yq(k) };
+            greedy(CELLS, CELLS, &mut mask, tile, &|v| v / tile, &mut |u, v, du, dv, t| e.quad(face, u, u + du, y, y, v, v + dv, t - 1));
+        }
+    }
+    // Water surfaces: flat, at their exact height (level with real water).
+    {
+        let mut by_height: HashMap<i32, Vec<u32>> = HashMap::new();
+        for j in 0..CELLS {
+            for i in 0..CELLS {
+                if let Some(w) = cols[gi(i, j)].water_q {
+                    by_height.entry(w).or_insert_with(|| vec![0; (CELLS * CELLS) as usize])[(j * CELLS + i) as usize] = tex(reg, water, Face::PosY) + 1;
+                }
+            }
+        }
+        let mut heights: Vec<i32> = by_height.keys().copied().collect();
+        heights.sort_unstable();
+        for w in heights {
+            let mut mask = by_height.remove(&w).unwrap();
+            greedy(CELLS, CELLS, &mut mask, tile, &|v| v / tile, &mut |u, v, du, dv, t| e.quad(Face::PosY, u, u + du, w, w, v, v + dv, t - 1));
+        }
+    }
+
+    // Sides: a voxel face is drawn where the voxel beside is air (and not under water there).
     for face in [Face::PosX, Face::NegX, Face::PosZ, Face::NegZ] {
         let (dx, _, dz) = face.normal();
         for a in 0..CELLS {
-            // `a` walks across the edges, `b` along them. Is this edge a chunk-column line?
+            // `a` walks across the planes; the mask runs along them (u) and up (v = layer).
+            let mut mask = vec![0u32; (CELLS * layers) as usize];
+            let mut any = false;
             let edge_cell = if dx > 0 || dz > 0 { a + 1 } else { a };
             let edge_block = if dx != 0 { ox + edge_cell * cell } else { oz + edge_cell * cell };
             let on_line = masked && edge_block.rem_euclid(CHUNK_SIZE) == 0;
-            let bottom_at = |i: i32, j: i32| -> i32 {
-                let mut nb = grid.surf(i + dx, j + dz);
-                if grid.block(i + dx, j + dz) == water && grid.block(i, j) != water {
-                    nb -= 4; // land beside water: the water surface is drawn a little lower (shader)
+            for u in 0..CELLS {
+                let (i, j) = if dx != 0 { (a, u) } else { (u, a) };
+                let (ni, nj) = (i + dx, j + dz);
+                let own = &cols[gi(i, j)];
+                if own.water_q.is_some() {
+                    continue; // the water surface stands for the whole column
                 }
-                // LOD water is level with real water, which is a full block at the same height:
-                // nothing to close there, and a face under the see-through real water would
-                // show through it as a dark curtain.
-                if on_line && grid.block(i, j) != water {
-                    nb.min(real_edge_min(face, i, j))
-                } else {
-                    nb
-                }
-            };
-            let mut b = 0;
-            while b < CELLS {
-                let (i, j) = if dx != 0 { (a, b) } else { (b, a) };
-                let own = grid.surf(i, j);
-                let bottom = bottom_at(i, j);
-                if own <= bottom {
-                    b += 1;
-                    continue;
-                }
-                // Far off, a low step (no steeper than the cell is wide) is the hillside
-                // itself: it takes the top's texture, not the striped side.
-                let gentle = |own: i32, bottom: i32| smooth && own - bottom <= 4 * cell;
-                let side_tex = |i: i32, j: i32, own: i32, bottom: i32| tex(reg, grid.block(i, j), if gentle(own, bottom) { Face::PosY } else { face });
-                let t = side_tex(i, j, own, bottom);
-                let end = (b / tile + 1) * tile;
-                let mut len = 1;
-                while b + len < end {
-                    let (i2, j2) = if dx != 0 { (a, b + len) } else { (b + len, a) };
-                    if grid.surf(i2, j2) != own || bottom_at(i2, j2) != bottom || side_tex(i2, j2, own, bottom) != t {
-                        break;
+                let across = &cols[gi(ni, nj)];
+                let real = if on_line { real_min(face, i, j) } else { i32::MAX };
+                for k in 0..layers {
+                    if !solid(i, k, j) {
+                        continue;
                     }
-                    len += 1;
+                    let top = y0 + (k + 1) * vh;
+                    let open = !solid(ni, k, nj) || top > real;
+                    let drowned = across.water_q.is_some_and(|w| 4 * top <= w);
+                    if open && !drowned {
+                        mask[(k * CELLS + u) as usize] = tex(reg, vox[vi(i, k, j)], face) + 1;
+                        any = true;
+                    }
                 }
-                match face {
-                    Face::PosX => e.quad(face, a + 1, a + 1, bottom, own, b, b + len, t),
-                    Face::NegX => e.quad(face, a, a, bottom, own, b, b + len, t),
-                    Face::PosZ => e.quad(face, b, b + len, bottom, own, a + 1, a + 1, t),
-                    _ => e.quad(face, b, b + len, bottom, own, a, a, t),
-                }
-                b += len;
             }
+            if !any {
+                continue;
+            }
+            greedy(CELLS, layers, &mut mask, tile, &layer_tile, &mut |u, v, du, dv, t| {
+                let (ya, yb) = (yq(v), yq(v + dv));
+                let t = t - 1;
+                match face {
+                    Face::PosX => e.quad(face, a + 1, a + 1, ya, yb, u, u + du, t),
+                    Face::NegX => e.quad(face, a, a, ya, yb, u, u + du, t),
+                    Face::PosZ => e.quad(face, u, u + du, ya, yb, a + 1, a + 1, t),
+                    _ => e.quad(face, u, u + du, ya, yb, a, a, t),
+                }
+            });
         }
     }
 
@@ -1124,9 +1190,9 @@ mod tests {
 
     #[test]
     fn textures_past_255_keep_their_high_bits() {
-        let mut e = Emit { verts: Vec::new(), min_q: i32::MAX, max_q: i32::MIN, normals: None };
+        let mut e = Emit { verts: Vec::new(), min_q: i32::MAX, max_q: i32::MIN };
         e.quad(Face::PosY, 0, 1, 4, 4, 0, 1, 1733);
-        assert!(e.verts.iter().all(|v| v.texture() == 1733 && v.normal().is_none()));
+        assert!(e.verts.iter().all(|v| v.texture() == 1733));
     }
 
     fn world() -> (BlockRegistry, WorldGen) {
@@ -1387,32 +1453,18 @@ mod tests {
     }
 
     #[test]
-    fn distant_sections_carry_the_slope_and_near_ones_stay_blocky() {
+    fn voxels_are_cubes_near_and_at_most_eight_blocks_tall_far() {
         let (reg, gen) = world();
-        // Near (2-block cells): lit by their faces, like real blocks.
-        let near = build_section(&gen, &reg, SectionKey::new(1, 3, -2));
-        assert!(near.vertices.iter().all(|v| v.normal().is_none()));
-        // Far (16-block cells, over hills): every vertex has the ground's normal at its
-        // corner, pointing up and downhill: it agrees with the heights around the corner.
-        let key = SectionKey::new(4, 1, 2);
-        let far = build_section(&gen, &reg, key);
-        assert!(far.vertices.iter().all(|v| v.normal().is_some_and(|n| n[1] > 0.2)));
-        let cell = key.cell();
-        let (ox, oz) = key.origin();
-        let h = |i: i32, j: i32| gen.lod_surface(ox + i * cell + cell / 2, oz + j * cell + cell / 2, cell).0 as f32 / 4.0;
-        let mut checked = 0;
-        for v in far.vertices.iter().filter(|v| v.x() > 0 && v.z() > 0 && v.x() < 32 && v.z() < 32) {
-            let (x, z) = (v.x() as i32, v.z() as i32);
-            let dx = h(x, z) + h(x, z - 1) - h(x - 1, z) - h(x - 1, z - 1);
-            let n = v.normal().unwrap();
-            if dx.abs() > cell as f32 * 0.5 {
-                assert!(n[0] * dx < 0.0, "the normal leans away from the rise ({dx}, {n:?})");
-                checked += 1;
+        for (level, vh) in [(1u8, 2), (2, 4), (3, 8), (5, 8)] {
+            let key = SectionKey::new(level, 3, -2);
+            let m = build_section(&gen, &reg, key);
+            // Every land vertex sits on a layer boundary (water surfaces are exact).
+            let water = tex(&reg, gen.water_id(), Face::PosY);
+            for v in m.vertices.iter().filter(|v| v.texture() != water) {
+                assert_eq!(v.y_q().rem_euclid(4 * vh), 0, "level {level}: y {} not on a {vh}-block layer", v.y_q());
             }
+            assert_eq!(voxel_height(key.cell()), vh);
         }
-        assert!(checked > 10, "only {checked} sloped corners");
-        // Heights still read back (16 bits now share the word with the normal).
-        assert!(far.vertices.iter().all(|v| (v.y_q() as f32 / 4.0 - far.min_y) > -0.01));
     }
 
     #[test]
@@ -1444,25 +1496,32 @@ mod tests {
     }
 
     #[test]
-    fn quads_near_real_chunks_stay_inside_one_chunk_column() {
+    fn quads_near_real_chunks_stay_inside_one_chunk() {
         let (reg, gen) = world();
         for level in 0..=MASKED_MAX_LEVEL {
-            let key = SectionKey::new(level, 2, -1);
-            let m = build_section(&gen, &reg, key);
-            let (ox, oz) = key.origin();
-            let cell = key.cell();
-            for q in m.vertices.chunks(4) {
-                let cols: HashSet<(i32, i32)> = q
-                    .iter()
-                    .map(|v| {
-                        let (ix, iz) = v.inward();
-                        // Half a cell into the quad, as the shader does.
-                        let x = ox as f32 + (v.x() as f32 + ix as f32 * 0.5) * cell as f32;
-                        let z = oz as f32 + (v.z() as f32 + iz as f32 * 0.5) * cell as f32;
-                        ((x / CHUNK_SIZE as f32).floor() as i32, (z / CHUNK_SIZE as f32).floor() as i32)
-                    })
-                    .collect();
-                assert_eq!(cols.len(), 1, "level {level}: quad spans columns {cols:?}");
+            // Over mountains too, where sides are tall and cross chunks vertically.
+            for key in [SectionKey::new(level, 2, -1), SectionKey::new(level, -7, 12), SectionKey::new(level, 40, 3)] {
+                let m = build_section(&gen, &reg, key);
+                let (ox, oz) = key.origin();
+                let cell = key.cell();
+                for q in m.vertices.chunks(4) {
+                    let chunks: HashSet<(i32, i32, i32)> = q
+                        .iter()
+                        .map(|v| {
+                            let (ix, iz) = v.inward();
+                            // Half a cell into the quad, and a little into its voxel
+                            // vertically, as the shader does.
+                            let x = ox as f32 + (v.x() as f32 + ix as f32 * 0.5) * cell as f32;
+                            let z = oz as f32 + (v.z() as f32 + iz as f32 * 0.5) * cell as f32;
+                            let face = v.face();
+                            let down = face == Face::PosY.index() as u32 || (face != Face::NegY.index() as u32 && v.is_top());
+                            let y = v.y_q() as f32 / 4.0 + if down { -0.25 } else { 0.25 };
+                            let c = |p: f32| (p / CHUNK_SIZE as f32).floor() as i32;
+                            (c(x), c(y), c(z))
+                        })
+                        .collect();
+                    assert_eq!(chunks.len(), 1, "level {level} {key:?}: quad spans chunks {chunks:?}");
+                }
             }
         }
     }
@@ -1494,15 +1553,30 @@ mod tests {
                             continue;
                         }
                         checked += 1;
-                        let ok = m.vertices.chunks(4).any(|q| {
-                            q[0].face() == face.index() as u32
-                                && q[0].x() as i32 == x
-                                && q.iter().map(|v| v.z() as i32).min().unwrap() <= j
-                                && q.iter().map(|v| v.z() as i32).max().unwrap() > j
-                                && q.iter().map(|v| v.y_q()).min().unwrap() < real
-                                && q.iter().map(|v| v.y_q()).max().unwrap() >= own
-                        });
-                        assert!(ok, "{key:?}: no face down to the real ground at line x={x}, cell {j}");
+                        // The faces on this line over this cell, together, cover from below
+                        // the real ground up to the LOD top (bands of grass, dirt and rock).
+                        let mut spans: Vec<(i32, i32)> = m
+                            .vertices
+                            .chunks(4)
+                            .filter(|q| {
+                                q[0].face() == face.index() as u32
+                                    && q[0].x() as i32 == x
+                                    && q.iter().map(|v| v.z() as i32).min().unwrap() <= j
+                                    && q.iter().map(|v| v.z() as i32).max().unwrap() > j
+                            })
+                            .map(|q| (q.iter().map(|v| v.y_q()).min().unwrap(), q.iter().map(|v| v.y_q()).max().unwrap()))
+                            .collect();
+                        spans.sort_unstable();
+                        let mut reach = None::<(i32, i32)>;
+                        for (a, b) in spans {
+                            reach = match reach {
+                                None => Some((a, b)),
+                                Some((lo, hi)) if a <= hi => Some((lo, hi.max(b))),
+                                Some(r) => Some(r), // a gap: stop extending
+                            };
+                        }
+                        let ok = reach.is_some_and(|(lo, hi)| lo < real && hi >= own);
+                        assert!(ok, "{key:?}: no face down to the real ground at line x={x}, cell {j}: {reach:?} vs {real}..{own}");
                     }
                 }
             }

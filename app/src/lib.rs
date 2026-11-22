@@ -81,6 +81,8 @@ struct DevShot {
     frames: u64,
     path: PathBuf,
     playing_frames: u64,
+    /// The camera instead of the game's: (height above the player's, yaw, pitch in degrees).
+    cam: Option<(f32, f32, f32)>,
 }
 
 impl App {
@@ -378,7 +380,7 @@ impl App {
     fn dev_capture(&mut self) {
         let (Some(d), Some(g), Some(game)) = (self.dev.clone(), self.gfx.as_mut(), self.game.as_mut()) else { return };
         g.set_character(game.player.triangles());
-        let cam = game.render_cam();
+        let cam = dev_cam(&self.dev, game);
         let opts = Self::render_options(game);
         let view = game.view_blocks();
         match g.capture_world(&mut game.client, &cam, view, &opts) {
@@ -436,7 +438,7 @@ impl App {
                     opts.figure = Some((sc, under));
                 }
                 self.showcase_time = seconds;
-                let render_cam = game.render_cam();
+                let render_cam = dev_cam(&self.dev, game);
                 let view_blocks = game.view_blocks();
                 g.render(&mut game.client, &render_cam, view_blocks, &opts, &self.hud)
             }
@@ -626,6 +628,18 @@ fn android_main(app: winit::platform::android::activity::AndroidApp) {
     event_loop.run_app(&mut state).expect("event loop failed");
 }
 
+/// The camera a development run draws from (`DevShot::cam`), else the game's.
+fn dev_cam(dev: &Option<DevShot>, game: &game::Game) -> game::CameraView {
+    let mut cam = game.render_cam();
+    if let Some((dy, yaw, pitch)) = dev.as_ref().and_then(|d| d.cam) {
+        let p = game.player.position();
+        cam.pos = [p[0] as f32, p[1] as f32 + dy, p[2] as f32];
+        cam.yaw = yaw.to_radians();
+        cam.pitch = pitch.to_radians();
+    }
+    cam
+}
+
 fn save_png(path: &std::path::Path, rgba: &[u8], w: u32, h: u32) -> Result<(), String> {
     let file = std::fs::File::create(path).map_err(|e| e.to_string())?;
     let mut enc = png::Encoder::new(std::io::BufWriter::new(file), w, h);
@@ -638,7 +652,8 @@ fn save_png(path: &std::path::Path, rgba: &[u8], w: u32, h: u32) -> Result<(), S
 /// Desktop development run of the real game: opens an in-memory world, plays `frames` frames
 /// at a fixed time of day and takes a picture with the game's own renderer. Settings come
 /// from the environment: BLOCKFORGE_SEED, BLOCKFORGE_HOURS, BLOCKFORGE_SHADERS (0..2),
-/// BLOCKFORGE_FRAMES, BLOCKFORGE_SHOT (the picture's path). See `examples/devshot.rs`.
+/// BLOCKFORGE_FRAMES, BLOCKFORGE_SHOT (the picture's path), BLOCKFORGE_CAM ("height above
+/// the player, yaw, pitch" in blocks and degrees). See `examples/devshot.rs`.
 #[cfg(not(target_os = "android"))]
 pub fn run_desktop() {
     use winit::event_loop::{ControlFlow, EventLoop};
@@ -653,6 +668,10 @@ pub fn run_desktop() {
         frames: var("BLOCKFORGE_FRAMES", "120").parse().unwrap_or(120),
         path: PathBuf::from(var("BLOCKFORGE_SHOT", "devshot.png")),
         playing_frames: 0,
+        cam: std::env::var("BLOCKFORGE_CAM").ok().and_then(|v| {
+            let n: Vec<f32> = v.split(',').filter_map(|t| t.trim().parse().ok()).collect();
+            (n.len() == 3).then(|| (n[0], n[1], n[2]))
+        }),
     });
     event_loop.run_app(&mut state).expect("event loop failed");
 }

@@ -282,55 +282,49 @@ fn lod_terrain_streams_in_and_stops_exactly_where_real_chunks_are_drawn() {
     let draw = 3.0 * 32.0 + 16.0;
     let cov = c.lod_coverage(draw);
     let cam = BlockPos::from_f32(c.camera).chunk();
-    assert!(cov.covered(cam.x, cam.z), "the camera's own column shows real terrain");
+    assert!(cov.covered(cam.x, cam.y, cam.z), "the camera's own chunk shows real terrain");
     assert!(cov.count() >= 9);
-    assert!(!cov.covered(cam.x + 10, cam.z), "beyond the loaded chunks LODs must show");
-    // Every covered column really has its surface meshed in the client.
-    for dz in -5..=5 {
-        for dx in -5..=5 {
-            let (cx, cz) = (cam.x + dx, cam.z + dz);
-            if !cov.covered(cx, cz) {
-                continue;
+    assert!(!cov.covered(cam.x + 10, cam.y, cam.z), "beyond the loaded chunks LODs must show");
+    // A chunk is covered exactly when the client holds it with its geometry meshed (an empty
+    // mesh where there is nothing to draw) and it is within the draw distance: the renderer
+    // draws all of it, so the LOD there is hidden, and the LOD shows in every other chunk.
+    for dy in -3..=4 {
+        for dz in -5..=5 {
+            for dx in -5..=5 {
+                let p = ChunkPos::new(cam.x + dx, cam.y + dy, cam.z + dz);
+                let o = p.origin();
+                let d = [o.x as f32 + 16.0 - c.camera[0], o.y as f32 + 16.0 - c.camera[1], o.z as f32 + 16.0 - c.camera[2]];
+                let near = d[0] * d[0] + d[1] * d[1] + d[2] * d[2] <= draw * draw;
+                let drawn = c.store.get(p).is_some() && {
+                    let fresh = mesh_chunk_with(Mesher::Simple, &_reg, &PaddedChunk::capture(&c.store, p));
+                    c.meshes.contains_key(&p) == !fresh.is_empty()
+                };
+                assert_eq!(cov.covered(p.x, p.y, p.z), near && drawn, "chunk {dx},{dy},{dz} from the camera");
             }
-            let surface = (-8..8)
-                .rev()
-                .map(|cy| ChunkPos::new(cx, cy, cz))
-                .find(|p| c.store.get(*p).map_or(false, |ch| ch.uniform_state() != Some(blockforge::block::AIR)))
-                .expect("a covered column has ground loaded");
-            let has_mesh = c.meshes.contains_key(&surface);
-            let fresh = mesh_chunk_with(Mesher::Simple, &_reg, &PaddedChunk::capture(&c.store, surface));
-            assert_eq!(has_mesh, !fresh.is_empty(), "column {cx},{cz}: surface chunk not drawn");
-            // ...and so is the ground everywhere in it, wherever it dips into lower chunks:
-            // the chunk holding each block column's top block is meshed and within the draw
-            // distance (the renderer leaves out chunks further than that).
-            let top = (cam.y + 4) * CHUNK_SIZE;
-            for lz in (0..CHUNK_SIZE).step_by(3) {
-                for lx in (0..CHUNK_SIZE).step_by(3) {
-                    let (x, z) = (cx * CHUNK_SIZE + lx, cz * CHUNK_SIZE + lz);
-                    let y = (top - 260..top)
-                        .rev()
-                        .find(|&y| c.store.block(BlockPos::new(x, y, z)).map_or(false, |s| !s.is_air()))
-                        .expect("ground in a covered column");
-                    let p = BlockPos::new(x, y, z).chunk();
-                    let o = p.origin();
-                    let d = [o.x as f32 + 16.0 - c.camera[0], o.y as f32 + 16.0 - c.camera[1], o.z as f32 + 16.0 - c.camera[2]];
-                    let near = d[0] * d[0] + d[1] * d[1] + d[2] * d[2] <= draw * draw;
-                    assert!(near && c.meshes.contains_key(&p), "column {cx},{cz}: ground at {x},{y},{z} is not drawn (hole)");
+        }
+    }
+    // Not uploaded yet means not covered: the hole would show for a frame otherwise. (Chunks
+    // with nothing to draw have nothing to upload: they stay covered.)
+    c.requeue_all_meshes();
+    let cov = c.lod_coverage(draw);
+    assert!(cov.count() > 0);
+    for dy in -3..=4 {
+        for dz in -5..=5 {
+            for dx in -5..=5 {
+                let p = ChunkPos::new(cam.x + dx, cam.y + dy, cam.z + dz);
+                if cov.covered(p.x, p.y, p.z) {
+                    assert!(!c.meshes.contains_key(&p), "chunk {dx},{dy},{dz}: covered before its mesh is uploaded");
                 }
             }
         }
     }
-    // Not uploaded yet means not covered: the hole would show for a frame otherwise.
-    c.requeue_all_meshes();
-    assert_eq!(c.lod_coverage(draw).count(), 0);
 }
 
 #[test]
 fn real_terrain_near_the_camera_always_replaces_lod_terrain() {
-    // LOD terrain is hidden only in "covered" columns. A column near the camera that never
+    // LOD terrain is hidden only in "covered" chunks. A chunk near the camera that never
     // becomes covered is drawn twice, real and LOD on top of each other (flickering, LOD
-    // blocks inside real ones). That happened wherever a cave crossed the bottom layer of
-    // the chunks under the ground. The game's own seed and settings, near its spawn.
+    // blocks inside real ones). The game's own seed and settings, near its spawn.
     let reg = Arc::new(BlockRegistry::builtin());
     let handle = server::spawn(ServerConfig { seed: 1337, worker_threads: 2, ..ServerConfig::default() }, reg.clone());
     let mut c = Client::connect(handle.connect(), 2);
@@ -342,16 +336,20 @@ fn real_terrain_near_the_camera_always_replaces_lod_terrain() {
         // alone can end before the new area streams in: wait (bounded) for it to be covered.
         settle(&mut c);
         let at = BlockPos::from_f32(c.camera).chunk();
-        // Columns 4 chunks off diagonally can hold ground (a mountainside 200 blocks up)
-        // past the draw distance, rightly left to the LOD; within 3 everything is in reach.
+        // Every chunk the client holds there (the band the server streams, 2 chunks up and
+        // down) is drawn, and so covered: the LOD never shows inside real terrain.
         let uncovered = |c: &mut Client| {
             let _ = c.take_mesh_changes(usize::MAX);
             let cov = c.lod_coverage(6.5 * 32.0);
-            (-3..=3).flat_map(|dz| (-3..=3).map(move |dx| (dx, dz))).find(|&(dx, dz)| !cov.covered(at.x + dx, at.z + dz))
+            let held: Vec<ChunkPos> = (-2..=2)
+                .flat_map(|dy| (-3..=3).flat_map(move |dz| (-3..=3).map(move |dx| ChunkPos::new(at.x + dx, at.y + dy, at.z + dz))))
+                .filter(|p| c.store.get(*p).is_some())
+                .collect();
+            held.into_iter().find(|p| !cov.covered(p.x, p.y, p.z))
         };
         pump_until(&mut c, Duration::from_secs(30), |c| uncovered(c).is_none());
-        if let Some((dx, dz)) = uncovered(&mut c) {
-            panic!("column {dx},{dz} from the camera is not covered");
+        if let Some(p) = uncovered(&mut c) {
+            panic!("chunk {:?} near the camera ({at:?}) is held but not covered", p);
         }
     }
 }

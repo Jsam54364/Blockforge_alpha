@@ -73,7 +73,7 @@ struct Globals {
     /// x, y: chunk column at bit 0 of `lod_mask` (see `LodCoverage`).
     lod_window: [f32; 4],
     /// One bit per chunk column: set where LOD terrain must not be drawn.
-    lod_mask: [[u32; 4]; 32],
+    lod_mask: [[u32; 4]; 64],
     /// The tint map's level centres in blocks: x0, z0, x1, z1 (see `tint`).
     tint_window: [f32; 4],
     /// View rays for the sky pass (`math::sky_basis`).
@@ -1216,7 +1216,7 @@ impl Gfx {
             flags: [0.0, 0.0, self.water_layer as f32, 0.0],
             palette: self.palette,
             lod_window: [0.0; 4],
-            lod_mask: [[0; 4]; 32],
+            lod_mask: [[0; 4]; 64],
             tint_window: [0.0; 4],
             sky_basis: math::sky_basis(fwd, aspect),
             sky: self.sky.uniforms(16.0),
@@ -1348,20 +1348,23 @@ impl Gfx {
             {
                 continue;
             }
-            // Sections that can meet real chunks are masked per chunk column; skip those
-            // whose every column is drawn by real terrain (nothing of them would show).
+            // Sections that can meet real chunks are masked per chunk; skip those whose every
+            // chunk (over the section's height) is drawn by real terrain: nothing would show.
             let (c0x, c0z) = (ox.div_euclid(chunk), oz.div_euclid(chunk));
             let n = (w / chunk).max(1);
+            let (cy0, cy1) = ((g.min_y.floor() as i32).div_euclid(chunk), (g.max_y.ceil() as i32 - 1).div_euclid(chunk));
             let in_window = c0x + n > cov.origin.0
-                && c0z + n > cov.origin.1
+                && c0z + n > cov.origin.2
                 && c0x < cov.origin.0 + LodCoverage::SIZE
-                && c0z < cov.origin.1 + LodCoverage::SIZE;
+                && c0z < cov.origin.2 + LodCoverage::SIZE;
             let masked = key.level <= MASKED_MAX_LEVEL && in_window;
-            if masked && (0..n).all(|a| (0..n).all(|b| cov.covered(c0x + a, c0z + b))) {
+            if masked && (cy0..=cy1).all(|cy| (0..n).all(|a| (0..n).all(|b| cov.covered(c0x + a, cy, c0z + b)))) {
                 continue;
             }
             let d = key.distance_to(cam[0], cam[2]);
-            out.push((d, [ox as f32, oz as f32, key.cell() as f32, if masked { 1.0 } else { 0.0 }], key));
+            // w: 1 if masked, plus twice the voxel height (for the texture scale).
+            let w_bits = masked as i32 + 2 * blockforge::lod::voxel_height(key.cell());
+            out.push((d, [ox as f32, oz as f32, key.cell() as f32, w_bits as f32], key));
         }
         out.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
         out.truncate(MAX_LOD_INSTANCES);
@@ -1438,13 +1441,13 @@ impl Gfx {
 
         // LOD sections, after this frame's uploads so coverage matches what is on the GPU.
         let lod_on = client.lod.settings().enabled();
-        let cov = if lod_on { client.lod_coverage(view_blocks) } else { LodCoverage::empty((0, 0)) };
+        let cov = if lod_on { client.lod_coverage(view_blocks) } else { LodCoverage::empty((0, 0, 0)) };
         let lod_vis = if lod_on { self.visible_lods(client, cam.pos, &frustum, &cov, opts.frustum_cull) } else { Vec::new() };
         let lod_instances: Vec<[f32; 4]> = lod_vis.iter().map(|(i, _)| *i).collect();
         if !lod_instances.is_empty() {
             self.queue.write_buffer(&self.lod_instance_buf, 0, as_bytes(&lod_instances));
         }
-        let mut lod_mask = [[0u32; 4]; 32];
+        let mut lod_mask = [[0u32; 4]; 64];
         for (i, w) in cov.bits.iter().enumerate() {
             lod_mask[i / 4][i % 4] = *w;
         }
@@ -1509,7 +1512,7 @@ impl Gfx {
             // w: which tint map levels are ready (bits).
             flags: [if opts.fog { 1.0 } else { 0.0 }, time, self.water_layer as f32, tint_ready as f32],
             palette: self.palette,
-            lod_window: [cov.origin.0 as f32, cov.origin.1 as f32, 0.0, 0.0],
+            lod_window: [cov.origin.0 as f32, cov.origin.2 as f32, cov.origin.1 as f32, 0.0],
             lod_mask,
             tint_window,
             sky_basis: math::sky_basis(fwd, aspect),
@@ -2387,7 +2390,7 @@ mod tests {
         // + 2 * 64 (shadow matrices) + 4 * 16 (shadow, light, light colour, look) + 32 * 16 (foliage)
         assert_eq!(
             std::mem::size_of::<Globals>(),
-            64 + 64 + 512 + 16 + 512 + 16 + 48 + 64 + 64 + 96 + 48 + 48 + 32 + 128 + 64 + 512
+            64 + 64 + 512 + 16 + 1024 + 16 + 48 + 64 + 64 + 96 + 48 + 48 + 32 + 128 + 64 + 512
         );
     }
 

@@ -12,8 +12,8 @@ struct Globals {
     screen: vec4<f32>,       // x = width px, y = height px
     flags: vec4<f32>,        // x = fog enabled, y = seconds, z = water texture layer, w = tint levels ready (bits)
     palette: array<vec4<f32>, 32>,
-    lod_window: vec4<f32>,   // xy = chunk column at bit 0 of lod_mask
-    lod_mask: array<vec4<u32>, 32>, // 64 x 64 bits: chunk columns drawn by real terrain
+    lod_window: vec4<f32>,   // xyz = chunk (x, z, y) at bit 0 of lod_mask
+    lod_mask: array<vec4<u32>, 64>, // 32 x 32 x 8 bits (x, z, then y): chunks drawn by real terrain
     tint_window: vec4<f32>,  // tint map level centres in blocks: x0, z0, x1, z1
     // ---- The sky (see app/src/sky.rs) ----
     sky_basis: array<vec4<f32>, 3>, // view rays: right, up (scaled to the field of view), forward
@@ -204,8 +204,9 @@ fn vs_main(v: VsIn) -> VsOut {
 
 // ---- Level-of-detail terrain (see blockforge::lod) ----
 // Vertex: a = x(6) | z(6)<<6 | face(3)<<12 | in_x(2)<<15 | in_z(2)<<17 | top(1)<<19 | tex(8)<<20
-//         b = y in quarter blocks (i32)
-// Instance: x = section origin x, y = origin z, z = cell size in blocks, w = 1 if masked.
+//             | tex high bits(3)<<29;  b = y in quarter blocks (an i16)
+// Instance: x = section origin x, y = origin z, z = cell size in blocks,
+//           w = (1 if masked) + 2 * voxel height in blocks (lod::voxel_height).
 @vertex
 fn vs_lod(v: VsIn) -> VsOut {
     let a = v.packed.x;
@@ -223,12 +224,18 @@ fn vs_lod(v: VsIn) -> VsOut {
 
     var o: VsOut;
     // Where the real terrain is drawn, drop the quad: every corner looks half a cell into
-    // the quad, lands in the same chunk column, and is sent outside the clip volume.
-    if (v.origin.w > 0.5) {
-        let p = vec2<f32>(base.x + inx * 0.5 * cell, base.z + inz * 0.5 * cell);
-        let col = vec2<i32>(floor(p / 32.0)) - vec2<i32>(g.lod_window.xy);
-        if (col.x >= 0 && col.y >= 0 && col.x < 64 && col.y < 64) {
-            let bit = u32(col.y * 64 + col.x);
+    // the quad and a little into its voxel vertically, lands in the same chunk, and is sent
+    // outside the clip volume.
+    let w_bits = u32(v.origin.w + 0.5);
+    if ((w_bits & 1u) == 1u) {
+        var dy = -0.25; // tops, and the upper corners of sides: look down into the voxel
+        if (face == 3u || (face != 2u && top < 0.5)) {
+            dy = 0.25; // bottoms, and the lower corners of sides: look up
+        }
+        let p = vec3<f32>(base.x + inx * 0.5 * cell, base.y + dy, base.z + inz * 0.5 * cell);
+        let ch = vec3<i32>(floor(p / 32.0)) - vec3<i32>(i32(g.lod_window.x), i32(g.lod_window.z), i32(g.lod_window.y));
+        if (ch.x >= 0 && ch.z >= 0 && ch.y >= 0 && ch.x < 32 && ch.z < 32 && ch.y < 8) {
+            let bit = u32((ch.y * 32 + ch.z) * 32 + ch.x);
             let word = g.lod_mask[bit / 128u][(bit / 32u) % 4u];
             if (((word >> (bit % 32u)) & 1u) == 1u) {
                 o.clip = vec4<f32>(2.0, 2.0, 2.0, 1.0);
@@ -259,21 +266,13 @@ fn vs_lod(v: VsIn) -> VsOut {
 
     o.clip = g.view_proj * vec4<f32>(world, 1.0);
     o.color = g.face_light[min(face, 5u)].rgb;
-    if (((a >> 28u) & 1u) == 1u && tex != u32(g.flags.z + 0.5)) {
-        // Distant land: lit as the smooth slope the vertex stands on (lod::SMOOTH_FROM_CELL),
-        // each axis's face light by how much the slope's normal points along it, as the
-        // character is lit. Tops and steps of one hillside then shade as one surface.
-        let nx = f32((v.packed.y >> 16u) & 255u) / 127.0 - 1.0;
-        let nz = f32(v.packed.y >> 24u) / 127.0 - 1.0;
-        let n = vec3<f32>(nx, sqrt(max(1.0 - nx * nx - nz * nz, 0.0)), nz);
-        let n2 = n * n;
-        o.color = g.face_light[select(1, 0, n.x > 0.0)].rgb * n2.x + g.face_light[2].rgb * n2.y
-            + g.face_light[select(5, 4, n.z > 0.0)].rgb * n2.z;
-    }
     o.world = world;
     o.direct = vec3<f32>(0.0);
     o.open = 1.0;
-    o.uv = face_uv(face, world - vec3<f32>(v.origin.x, 0.0, v.origin.y));
+    // One texture per voxel (Voxy-style: the world in bigger blocks). Voxels are `cell` wide
+    // and `lod::voxel_height` tall.
+    let vscale = vec3<f32>(cell, f32(w_bits >> 1u), cell);
+    o.uv = face_uv(face, (base - vec3<f32>(v.origin.x, 0.0, v.origin.y)) / vscale);
     o.layer = tex;
     o.face = face;
     return o;
