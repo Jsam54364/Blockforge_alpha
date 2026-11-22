@@ -18,7 +18,9 @@
 //!     camera moves;
 //!   * the fragment shader skips the lookup for faces turned away from the light (they get no
 //!     sunlight to take away) and in caves (no sky light);
-//!   * soft edges come from the hardware's 2x2 comparison filter, plus 4 rotated taps on Fancy.
+//!   * soft edges come from 4 rotated taps, plus the hardware's 2x2 comparison filter where
+//!     the GPU can filter this depth format (many phone GPUs can't: sampling it filtered
+//!     there gives garbage, so they look up single texels).
 
 use crate::math::{self, Mat4};
 
@@ -176,10 +178,13 @@ pub struct Shadows {
     /// Terrain changed since the far map was drawn.
     far_stale: bool,
     pub max_instances: usize,
+    /// The GPU filters comparisons on this depth format (free 2x2 soft edges).
+    pub filtered: bool,
 }
 
 impl Shadows {
-    pub fn new(device: &wgpu::Device, max_instances: usize, char_stride: u64) -> Shadows {
+    /// `filtered`: whether the adapter can filter `FORMAT` (see `filterable`).
+    pub fn new(device: &wgpu::Device, max_instances: usize, char_stride: u64, filtered: bool) -> Shadows {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("shadow shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shadow.wgsl").into()),
@@ -290,8 +295,8 @@ impl Shadows {
             label: Some("shadow compare"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
             address_mode_v: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
+            mag_filter: if filtered { wgpu::FilterMode::Linear } else { wgpu::FilterMode::Nearest },
+            min_filter: if filtered { wgpu::FilterMode::Linear } else { wgpu::FilterMode::Nearest },
             compare: Some(wgpu::CompareFunction::LessEqual),
             ..Default::default()
         });
@@ -303,7 +308,13 @@ impl Shadows {
             frame: 0,
             far_stale: true,
             max_instances,
+            filtered,
         }
+    }
+
+    /// Whether `adapter` can filter comparisons on the shadow maps' depth format.
+    pub fn filterable(adapter: &wgpu::Adapter) -> bool {
+        adapter.get_texture_format_features(FORMAT).flags.contains(wgpu::TextureFormatFeatureFlags::FILTERABLE)
     }
 
     /// The main shader's entries for the maps and their sampler (group 0).
@@ -358,9 +369,7 @@ impl Shadows {
         let flat = math::normalize([fwd[0], 0.0, fwd[2]]);
         let mut jobs = Vec::new();
         let turned = |c: &Cascade, deg: f32| math::dot(c.light, l) < (deg.to_radians()).cos();
-        let frame = self.frame;
-        let mut far_drawn = false;
-        for (i, c) in self.cascades.iter_mut().enumerate() {
+        for (i, c) in self.cascades.iter().enumerate() {
             let ahead = c.half * 0.3;
             let center = [cam[0] + flat[0] * ahead, cam[1], cam[2] + flat[2] * ahead];
             let age = self.frame - c.drawn_frame;
@@ -380,18 +389,8 @@ impl Shadows {
                         || age >= 240
                 };
             if redraw {
-                // Recorded now (it is drawn this frame), so this frame's uniforms carry it.
-                let matrix = projection(center, l, c.half);
-                c.matrix = Some(matrix);
-                c.center = center;
-                c.light = l;
-                c.drawn_frame = frame;
-                far_drawn |= i == 1;
-                jobs.push(Job { cascade: i, center, light: l, matrix });
+                jobs.push(Job { cascade: i, center, light: l, matrix: projection(center, l, c.half) });
             }
-        }
-        if far_drawn {
-            self.far_stale = false;
         }
         jobs
     }
@@ -399,7 +398,7 @@ impl Shadows {
     /// Draws one map: `chunks` are the instance origins and vertex ranges (quads) of the solid
     /// terrain inside it (see `Job::holds`), `character` the character's triangles if any.
     pub fn draw(
-        &self,
+        &mut self,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         index_buf: &wgpu::Buffer,
@@ -408,7 +407,18 @@ impl Shadows {
         character: Option<(wgpu::BufferSlice<'_>, u32)>,
     ) {
         let n = chunks.len().min(self.max_instances);
-        let c = &self.cascades[job.cascade];
+        let frame = self.frame;
+        if job.cascade == 1 {
+            self.far_stale = false;
+        }
+        let c = &mut self.cascades[job.cascade];
+        // The map now holds what this matrix sees. Recorded only here, when it is drawn: a
+        // frame that ends before drawing (no screen image to draw into) must not leave a
+        // matrix that disagrees with the map.
+        c.matrix = Some(job.matrix);
+        c.center = job.center;
+        c.light = job.light;
+        c.drawn_frame = frame;
         queue.write_buffer(&c.uniform, 0, as_bytes(&job.matrix));
         if n > 0 {
             let origins: Vec<[f32; 4]> = chunks[..n].iter().map(|c| c.0).collect();
@@ -444,11 +454,14 @@ impl Shadows {
         }
     }
 
-    /// For the main shader: each map's matrix, and (half widths, strength, map size). With no
-    /// map drawn yet (or shaders off) the strength is 0 and nothing is looked up.
-    pub fn uniforms(&self, strength: f32) -> ([Mat4; 2], [f32; 4]) {
-        let ready = self.cascades.iter().all(|c| c.matrix.is_some());
-        let mats = [self.cascades[0].matrix.unwrap_or([0.0; 16]), self.cascades[1].matrix.unwrap_or([0.0; 16])];
+    /// For the main shader: each map's matrix (this frame's `jobs` take the place of what
+    /// the maps held, as they are drawn before the main pass), and (half widths, strength,
+    /// map size). With a map never drawn (or shaders off) the strength is 0: nothing is
+    /// looked up.
+    pub fn uniforms(&self, jobs: &[Job], strength: f32) -> ([Mat4; 2], [f32; 4]) {
+        let m = |i: usize| jobs.iter().find(|j| j.cascade == i).map(|j| j.matrix).or(self.cascades[i].matrix);
+        let ready = m(0).is_some() && m(1).is_some();
+        let mats = [m(0).unwrap_or([0.0; 16]), m(1).unwrap_or([0.0; 16])];
         (mats, [NEAR_HALF, FAR_HALF, if ready { strength } else { 0.0 }, SIZE as f32])
     }
 }

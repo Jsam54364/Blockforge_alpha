@@ -655,6 +655,9 @@ pub fn stats_lines(perf: &Perf) -> Vec<String> {
         v.push(format!("LOD BUILDING {}", perf.lod_pending));
     }
     v.push(format!("PRESENT {}", perf.present_mode));
+    if !perf.gpu.is_empty() {
+        v.push(perf.gpu.clone());
+    }
     v.extend(perf.place.iter().cloned());
     v
 }

@@ -122,6 +122,16 @@ pub struct RenderOptions {
     pub figure: Option<(crate::ui::Showcase, usize)>,
 }
 
+/// `Globals::light.w`: the radius of the 4 soft-edge taps, in texels. 0 = one lookup (Lite
+/// on a GPU that filters the maps: its 2x2 filter is enough).
+fn shadow_softness(q: shadows::Quality, filtered: bool) -> f32 {
+    match (q, filtered) {
+        (shadows::Quality::Fancy, _) => 1.6,
+        (_, true) => 0.0,
+        (_, false) => 0.9,
+    }
+}
+
 fn as_bytes<T>(s: &[T]) -> &[u8] {
     // Only used with plain-old-data (f32 arrays, #[repr(C)] vertex/uniform structs).
     unsafe { std::slice::from_raw_parts(s.as_ptr() as *const u8, std::mem::size_of_val(s)) }
@@ -704,6 +714,8 @@ pub struct Gfx {
     /// Shadow maps (see `shadows`), and which texture layers are foliage.
     shadows: Shadows,
     foliage: [[u32; 4]; 32],
+    /// The GPU, its API and shadow sampling, for the performance overlay.
+    gpu_line: String,
 }
 
 impl Gfx {
@@ -721,6 +733,14 @@ impl Gfx {
             })
             .await
             .ok_or("no suitable GPU adapter found")?;
+        let info = adapter.get_info();
+        let gpu_line = format!(
+            "GPU {} {:?} SHADOWS {}",
+            info.name.to_uppercase(),
+            info.backend,
+            if Shadows::filterable(&adapter) { "FILTERED" } else { "POINT" }
+        )
+        .to_uppercase();
         // GPU timing is optional: not every device supports timestamp queries.
         let want_ts = adapter.features().contains(wgpu::Features::TIMESTAMP_QUERY);
         let (device, queue) = adapter
@@ -770,7 +790,7 @@ impl Gfx {
         });
 
         let shadow_entries = Shadows::layout_entries();
-        let shadows = Shadows::new(&device, MAX_INSTANCES, std::mem::size_of::<rig::Vertex>() as u64);
+        let shadows = Shadows::new(&device, MAX_INSTANCES, std::mem::size_of::<rig::Vertex>() as u64, Shadows::filterable(&adapter));
         let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("globals layout"),
             entries: &[
@@ -1061,6 +1081,7 @@ impl Gfx {
             sky,
             foliage: shadows::foliage_mask(reg.texture_names(), texture_remap_ref.as_deref()),
             shadows,
+            gpu_line,
         })
     }
 
@@ -1108,6 +1129,10 @@ impl Gfx {
     /// Whether the surface offers any mode that isn't locked to the display's refresh.
     pub fn vsync_supported(&self) -> bool {
         self.uncapped_mode.is_some()
+    }
+
+    pub fn gpu_line(&self) -> &str {
+        &self.gpu_line
     }
 
     pub fn present_mode_name(&self) -> &'static str {
@@ -1473,7 +1498,7 @@ impl Gfx {
         let (light_dir, light_col, light_strength) = shadows::light(&sky::params(opts.time_of_day));
         let look_on = opts.shaders != shadows::Quality::Off;
         let shadow_jobs = self.shadows.plan(opts.shaders, cam.pos, fwd, light_dir);
-        let (shadow_mat, shadow_u) = self.shadows.uniforms(light_strength);
+        let (shadow_mat, shadow_u) = self.shadows.uniforms(&shadow_jobs, light_strength);
 
         let mut globals = Globals {
             view_proj: vp,
@@ -1493,7 +1518,9 @@ impl Gfx {
             rays: rays.unwrap_or([0.0; 4]),
             shadow_mat,
             shadow: shadow_u,
-            light: [light_dir[0], light_dir[1], light_dir[2], if opts.shaders == shadows::Quality::Fancy { 4.0 } else { 1.0 }],
+            // w: soft-edge radius in texels (Fancy wider), negative where the GPU filters the
+            // maps itself (its 2x2 filter then does Lite's softening alone).
+            light: [light_dir[0], light_dir[1], light_dir[2], shadow_softness(opts.shaders, self.shadows.filtered)],
             light_color: [light_col[0], light_col[1], light_col[2], if look_on { 1.0 } else { 0.0 }],
             look: if look_on { [1.0, 1.0, 1.0, 1.0] } else { [0.0; 4] },
             foliage: self.foliage,

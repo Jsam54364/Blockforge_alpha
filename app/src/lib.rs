@@ -67,6 +67,20 @@ pub struct App {
     started: Instant,
     #[cfg(target_os = "android")]
     android_app: Option<winit::platform::android::activity::AndroidApp>,
+    /// Desktop development runs (`run_desktop`): open a world, take a picture, quit.
+    dev: Option<DevShot>,
+}
+
+/// A development run (desktop only, see `run_desktop`): the world's seed, the time of day,
+/// the Shaders setting, how many frames to play before the picture, and where to save it.
+#[derive(Clone, Debug)]
+struct DevShot {
+    seed: u64,
+    hours: f64,
+    shaders: u8,
+    frames: u64,
+    path: PathBuf,
+    playing_frames: u64,
 }
 
 impl App {
@@ -108,6 +122,7 @@ impl App {
             started: Instant::now(),
             #[cfg(target_os = "android")]
             android_app: None,
+            dev: None,
         };
         app.refresh_worlds();
         app
@@ -350,6 +365,31 @@ impl App {
         }
     }
 
+    /// Development runs: hold the time of day and the Shaders setting, count frames played.
+    fn dev_frame(&mut self) {
+        let (Some(d), Some(game)) = (self.dev.as_mut(), self.game.as_mut()) else { return };
+        game.clock.shift(d.hours - game.clock.hours());
+        game.ui.settings.shaders = d.shaders;
+        if game.ui.screen == ui::Screen::Playing {
+            d.playing_frames += 1;
+        }
+    }
+
+    fn dev_capture(&mut self) {
+        let (Some(d), Some(g), Some(game)) = (self.dev.clone(), self.gfx.as_mut(), self.game.as_mut()) else { return };
+        g.set_character(game.player.triangles());
+        let cam = game.render_cam();
+        let opts = Self::render_options(game);
+        let view = game.view_blocks();
+        match g.capture_world(&mut game.client, &cam, view, &opts) {
+            Some((px, w, h)) => match save_png(&d.path, &px, w, h) {
+                Ok(()) => eprintln!("blockforge: saved {}", d.path.display()),
+                Err(e) => eprintln!("blockforge: could not save {}: {e}", d.path.display()),
+            },
+            None => eprintln!("blockforge: nothing captured"),
+        }
+    }
+
     fn render(&mut self, event_loop: &ActiveEventLoop, frame_start: Instant) {
         let Some(g) = self.gfx.as_mut() else { return };
         if let Some(ms) = g.take_gpu_ms() {
@@ -361,6 +401,9 @@ impl App {
         self.perf.quads = g.drawn_quads();
         (self.perf.lod_drawn, self.perf.lod_quads) = g.drawn_lod();
         self.perf.present_mode = g.present_mode_name();
+        if self.perf.gpu.is_empty() {
+            self.perf.gpu = g.gpu_line().to_string();
+        }
         let seconds = self.started.elapsed().as_secs_f32();
         let ui = match &mut self.game {
             Some(game) => {
@@ -460,6 +503,9 @@ impl ApplicationHandler for App {
                 crate::icons::reset_icons();
                 self.default_thumbnail();
                 self.refresh_worlds();
+                if let Some(d) = self.dev.clone() {
+                    self.open(game::WorldSpec { dir: None, seed: d.seed, settings_path: None });
+                }
             }
             Err(e) => {
                 eprintln!("blockforge: graphics init failed: {e}");
@@ -544,7 +590,12 @@ impl ApplicationHandler for App {
                 if self.game.as_ref().is_some_and(|g| !matches!(g.ui.screen, ui::Screen::Playing | ui::Screen::Loading | ui::Screen::Pause | ui::Screen::Settings | ui::Screen::Controls | ui::Screen::Inventory)) {
                     self.close_world();
                 }
+                self.dev_frame();
                 self.render(event_loop, frame_start);
+                if self.dev.as_ref().is_some_and(|d| d.playing_frames > d.frames) {
+                    self.dev_capture();
+                    event_loop.exit();
+                }
             }
             _ => {}
         }
@@ -572,5 +623,36 @@ fn android_main(app: winit::platform::android::activity::AndroidApp) {
     event_loop.set_control_flow(ControlFlow::Poll);
     let mut state = App::new(save_dir);
     state.android_app = Some(handle);
+    event_loop.run_app(&mut state).expect("event loop failed");
+}
+
+fn save_png(path: &std::path::Path, rgba: &[u8], w: u32, h: u32) -> Result<(), String> {
+    let file = std::fs::File::create(path).map_err(|e| e.to_string())?;
+    let mut enc = png::Encoder::new(std::io::BufWriter::new(file), w, h);
+    enc.set_color(png::ColorType::Rgba);
+    enc.set_depth(png::BitDepth::Eight);
+    let mut wr = enc.write_header().map_err(|e| e.to_string())?;
+    wr.write_image_data(rgba).map_err(|e| e.to_string())
+}
+
+/// Desktop development run of the real game: opens an in-memory world, plays `frames` frames
+/// at a fixed time of day and takes a picture with the game's own renderer. Settings come
+/// from the environment: BLOCKFORGE_SEED, BLOCKFORGE_HOURS, BLOCKFORGE_SHADERS (0..2),
+/// BLOCKFORGE_FRAMES, BLOCKFORGE_SHOT (the picture's path). See `examples/devshot.rs`.
+#[cfg(not(target_os = "android"))]
+pub fn run_desktop() {
+    use winit::event_loop::{ControlFlow, EventLoop};
+    let var = |k: &str, d: &str| std::env::var(k).unwrap_or_else(|_| d.to_string());
+    let event_loop = EventLoop::new().expect("could not create the event loop");
+    event_loop.set_control_flow(ControlFlow::Poll);
+    let mut state = App::new(None);
+    state.dev = Some(DevShot {
+        seed: var("BLOCKFORGE_SEED", "1337").parse().unwrap_or(1337),
+        hours: var("BLOCKFORGE_HOURS", "10").parse().unwrap_or(10.0),
+        shaders: var("BLOCKFORGE_SHADERS", "1").parse().unwrap_or(1),
+        frames: var("BLOCKFORGE_FRAMES", "120").parse().unwrap_or(120),
+        path: PathBuf::from(var("BLOCKFORGE_SHOT", "devshot.png")),
+        playing_frames: 0,
+    });
     event_loop.run_app(&mut state).expect("event loop failed");
 }

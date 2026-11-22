@@ -461,99 +461,12 @@ cover decided separately.
   a pole, and the bands repeat beyond) and drops 1.5 C per 10 blocks of altitude, so peaks
   are snowy. Rainfall has Earth-like belts (wet equator, dry subtropics, wet mid-latitudes)
   plus its own map, and coasts are wetter.
-* **Fast creative flight** (`player::FLY_SPEED`): 18 m/s cruising, 72 m/s with the stick
-  pushed all the way, 18 m/s up and down (the kit's 6 / 11 / 4.5 are kept for its parity
-  test); moves in steps of at most 0.4 m so it can't pass through a wall in one frame.
-* **The 15 biomes** (`biome.rs`): chosen from the climate, the altitude, the distance to
-  the coast and large region noises for the places to discover. Frostpeak Highlands (cold
-  peaks, green below and snowbound up high) and Stonefang Mountains on the high ground;
-  Crystal Glacier, Whitewind Tundra and Winterpine Taiga in the cold; Ancient Wildwood,
-  Amberwood and Giants' Grasslands in the temperate lands by rainfall; Sunscorched Expanse
-  with Emerald Oasis pockets in the hot dry lands, Emerald Oasis also where it is hot and
-  wet; Murkwater Swamp in warm wet lowlands; Stormbreak Coast along temperate shores; the
-  Blightlands and the Petrified Kingdom where their region noises are high. Each names
-  its ground (a surface, a block showing through it in patches, a subsurface) and its two
-  stones (under the ground, on cliffs, in boulders and spires: ground three blocks steeper
-  than a neighbour shows stone). **To add a biome, add an entry and a rule in `choose`.**
-* **Each biome shapes its own land** (`WorldGen::style`), at real-world scale and
-  amplified in the manner of JJThunder's terrain, after a set of reference pictures:
-  * Ancient Wildwood: a rolling forest floor with ravines, 60-85 m redwoods, ferns.
-  * Amberwood: soft hills carpeted in fallen leaves under red and gold maples.
-  * Frostpeak Highlands: alpine massifs with sharp ridges and peaks up to ~400 blocks
-    over snowy spruce valleys.
-  * Stonefang Mountains: jagged crags and ridges, and well inside the biome massive rock
-    pillars 28-60 blocks across and 50-140 tall with green tops (`WorldGen::pillar`, like
-    Zhangjiajie's) in green valleys. Pillars rise only where the place is mostly
-    Stonefang, so none stand half-height in neighbouring biomes.
-  * Sunscorched Expanse: a sea of sharp-crested dunes up to ~20 blocks, bare jagged
-    mountains rising from it.
-  * Emerald Oasis: red-rock tablelands ~45 blocks up, cut by canyons with stepped walls,
-    pools of water and lush ledges at their feet.
-  * Murkwater Swamp: just above the water, hummocks among open pools with lily pads.
-  * Whitewind Tundra: wide open swelling land with frozen lakes.
-  * Crystal Glacier: an ice sheet in domes, cut by deep canyons with blue ice walls.
-  * Winterpine Taiga: rolling snowy hills and spruce forest, snow on the branches.
-  * Blightlands: craters and cracks glowing purple from below, twisted dead trees.
-  * Petrified Kingdom: badlands of layered tablelands and hoodoos, stone trees.
-  * Stormbreak Coast: green headlands ending in 40-70 block sea cliffs, sea stacks.
-  * Giants' Grasslands: wide rolling hills with flower meadows and tablelands ending in
-    escarpments.
-
-  High ground is snowbound above ~150 blocks (bare rock on its cliffs), snow settles on
-  leaves in the cold biomes, and frozen biomes' lakes are iced over. **Biomes blend:**
-  how much a place belongs to each biome (`biome::weights`) comes from the same rules as
-  choosing it, each a soft step over a margin, and the land is the weighted mix of the
-  styles. Rivers are cut afterwards.
-* **Trees at real sizes** (a block is a metre): redwoods 60-85 m, grown oaks to ~22 m,
-  ancient ones ~40 m, spruces and firs 14-28 m (giants half again), palms 11-18 m, swamp
-  cypresses 18-28 m.
-* **Rivers** (`Terrain::river`): along the zero lines of a large, domain-warped noise, so
-  they meander for kilometres. They start as streams a few blocks wide in the hills (none
-  on the mountains) and widen to ~25 blocks towards the coast, where they meet the sea.
-  Their surface follows the land seen from 600 blocks up, so it falls gently towards the
-  sea a block at a time, with a bed of gravel and sand (mud in the swamp), a lip of bank
-  above the water and valley sides easing down to it. Each column knows how high water
-  fills it (`Column::water`, the sea's or a river's); nothing grows in rivers.
-* **Groves** (`WorldGen::grove`): trees grow thick where a 150-block noise is high and thin
-  out into glades where it is low; forest biomes stay mostly wooded, open lands gather
-  their few trees into copses. Distant terrain draws the same groves as canopy.
-* **Realistic tree sizes**, per species (`Wood::size`, a percent of an oak's): a young tree
-  4-6 m, a grown oak's crown ~15 m, old giants ~25-30 m, redwoods 34-50 m, conifers
-  8-18 m (giant spruces up to ~29 m); birches, pines, figs and ironwoods smaller, elms a
-  little bigger.
-* **The Hollow Earth** (`WorldGen::is_cavern`): under kilometre-wide regions, huge caverns
-  from y -50 to -120, flooded below -104 (underground lakes), with glowing cave moss on
-  their floors, glow crystals on their ceilings, giant glowcaps and fungalwood mushrooms,
-  glowwood trees and crystal clusters. Caves reach down to them there, and sinkholes open
-  from the surface.
-* **Natural features** (`features.rs`): every feature is a pure function of its anchor, so
-  each chunk draws its own part of it and the parts meet. Big ones sit on a 24-block grid
-  (ancient trees, redwoods, spires, arches, big boulders and fallen logs, skeletons, ice
-  spikes), ordinary ones on a 6-block grid, kept out of the big ones' way. Trees grow like
-  Vintage Story's (limbs lose width as they go, bend and fork, leaf clusters at their
-  ends) with the procedural-tree mods' forked trunks, buttress roots and layered crowns:
-  broadleaf trees in three sizes (ancient giants up to ~40 blocks with roots spreading
-  ~10 blocks and sometimes a hollow trunk you can walk into), 45-70 block redwoods,
-  layered or open conifers (giant spruces in the taiga), palms, flat-topped acacias,
-  weeping willows, buttressed swamp cypresses with knees, bamboo clumps, twisted dead trees,
-  petrified trees, giant mushrooms. Small details: bushes, stumps, fallen logs with moss,
-  mossy boulders, cacti, crystal clusters, fossil boulders.
-* **Ore veins** in the rock of every chunk, by depth and biome: coal, iron, copper, gold
-  deep down, silver and rubies or sapphires in the mountains, rock salt in the drylands,
-  amber in Amberwood, fossils in the Petrified Kingdom and the grasslands, blightshard in
-  the Blightlands, frost crystals in the glacier, glow crystals near the Hollow Earth.
-* **Features in distant (LOD) terrain** (`WorldGen::lod_cell`, `Feature::lod_top`): each
-  feature has an outline (crowns as domes and cones, spires as tapering columns, arches,
-  boulders, giant logs) from the same sizes it is drawn with, and a cell shows the highest
-  outline averaged over four points across the cell (and only where it covers at least
-  two, so a tree narrower than a cell never becomes a cell-wide tower). Cells up to 8
-  blocks show every feature; past that trees are left to a smooth canopy over the groves
-  as high as the biome's trees, and only rock features (spires, arches, boulders) show
-  individually up to 32-block cells (dense in the Wildwood and the taiga, scattered on the grasslands). Features are
-  bucketed per section (`FeatureGrid`), so sections cost a few milliseconds.
-* `cargo run --release --example chunk_bench` times chunk generation in a few biomes
-  (well under a millisecond a chunk on a desktop).
-* New players start on the nearest open, gentle ground in the Giants' Grasslands, clear of trees (`find_spawn`). The stats
+* **Biomes emerge from the climate** (`biome::BIOMES`): the first entry whose temperature,
+  rainfall and altitude ranges match wins. Each names its surface and subsurface blocks.
+  **To add a biome, add an entry** (more specific ones first). Today: snowy peaks, glacier,
+  bare rock, scree, tundra, boreal forest, cold steppe, temperate forest, grassland, steppe,
+  desert, savanna, rainforest, plus beaches and sea floors.
+* New players start at the nearest temperate lowland to the origin (`find_spawn`). The stats
   overlay shows the biome, temperature, rainfall and landform under the camera.
 * `cargo run --release --example worldmap -- <seed> <blocks per pixel> map.ppm` draws a
   top-down map of the biomes.
@@ -806,6 +719,12 @@ but built in, and cheap enough for a phone.
   cracks open) and let a little light through.
 * **Grading**: slightly richer colour.
 * Off draws exactly the old lighting.
+* On GPUs that can't filter the maps' depth format (many phones), each tap is a single
+  texel instead (filtered sampling there returns garbage). The performance overlay's GPU
+  line shows the GPU, its API and which way shadows are sampled.
+* `cargo run --example devshot` (in `app/`) runs the real game on a desktop, plays a number
+  of frames and saves a picture: `BLOCKFORGE_SEED`, `BLOCKFORGE_HOURS`, `BLOCKFORGE_SHADERS`,
+  `BLOCKFORGE_FRAMES`, `BLOCKFORGE_SHOT` (under `xvfb-run` with no display).
 
 ## Greedy meshing (`greedy.rs`)
 

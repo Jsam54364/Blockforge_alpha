@@ -32,7 +32,7 @@ struct Globals {
     // ---- Shadows and the shader-pack look (see app/src/shadows.rs) ----
     shadow_mat: array<mat4x4<f32>, 2>, // world -> near / far shadow map
     shadow: vec4<f32>,       // x, y: half widths of the maps (blocks), z: strength (0 = off), w: map size
-    light: vec4<f32>,        // xyz: towards the light that casts the shadows (sun or moon); w: soft taps (1 or 4)
+    light: vec4<f32>,        // xyz: towards the light that casts the shadows (sun or moon); w: soft-edge radius in texels (0: one lookup)
     light_color: vec4<f32>,  // rgb: its direct light; w: foliage sways (0 / 1)
     look: vec4<f32>,         // x: bounce light, y: colour grading, z: warm block light, w: shader look on (0 / 1)
     foliage: array<vec4<u32>, 32>, // one bit per texture layer: leaves and ferns
@@ -547,13 +547,13 @@ fn shadow_at(world: vec3<f32>, n: vec3<f32>, px: vec2<f32>) -> f32 {
     }
     let uv = p.xy * vec2<f32>(0.5, -0.5) + 0.5;
     var s = 0.0;
-    if (g.light.w < 1.5) {
+    if (g.light.w <= 0.0) {
         s = shadow_tap(far, uv, p.z);
     } else {
         // Four taps on a circle turned a different way at every pixel: soft, grainy edges
         // instead of a blocky staircase, for four lookups.
         let a = noise * 6.2831853;
-        let r = 1.6 / size;
+        let r = g.light.w / size;
         let d0 = vec2<f32>(cos(a), sin(a)) * r;
         let d1 = vec2<f32>(-d0.y, d0.x) * 0.6;
         s = (shadow_tap(far, uv + d0, p.z) + shadow_tap(far, uv - d0, p.z)

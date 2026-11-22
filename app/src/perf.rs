@@ -47,6 +47,8 @@ pub struct Perf {
     pub lod_pending: usize,
     /// Name of the active present mode (FIFO = vsync).
     pub present_mode: &'static str,
+    /// The GPU, its graphics API and how shadows are sampled on it.
+    pub gpu: String,
     /// Fraction of one core the main (render) thread used over the last second.
     pub main_thread: Option<f32>,
     /// Where the camera is: biome, climate and landform lines (see `Game::place_lines`).
@@ -88,6 +90,7 @@ impl Perf {
             lod_quads: 0,
             lod_pending: 0,
             present_mode: "FIFO",
+            gpu: String::new(),
             main_thread: None,
             place: Vec::new(),
         }
