@@ -15,7 +15,6 @@ pub mod chunk;
 pub mod client;
 pub mod climate;
 pub mod coords;
-pub mod features;
 pub mod cull;
 pub mod governor;
 pub mod greedy;

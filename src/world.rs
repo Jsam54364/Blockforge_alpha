@@ -291,8 +291,7 @@ impl World {
     fn column_top_below(&mut self, x: i32, z: i32, top_edit: Option<i32>) -> ColumnTop {
         let col = self.column(x.div_euclid(CHUNK_SIZE), z.div_euclid(CHUNK_SIZE));
         let hq = col.height_q_at(x.rem_euclid(CHUNK_SIZE) as usize, z.rem_euclid(CHUNK_SIZE) as usize);
-        // The terrain's top block or the sea, or an edit above them (trees and other
-        // features are left out: distant terrain doesn't draw them).
+        // Nothing generated is above the terrain's top block or the sea; edits may be.
         let mut y = (hq.div_euclid(4) + 1).max(SEA_LEVEL);
         if let Some(e) = top_edit {
             y = y.max(e);
@@ -368,28 +367,8 @@ mod tests {
     fn column_tops_follow_edits_whether_or_not_chunks_are_loaded() {
         let mut w = world();
         let stone = w.registry.state("stone").unwrap();
+        let (x, z) = (7, 9);
         // The real top of the column, read from generated chunks.
-        let real_top_at = |w: &mut World, x: i32, z: i32| -> (i32, u16) {
-            for y in (-128..400).rev() {
-                let p = BlockPos::new(x, y, z);
-                if !w.has_chunk(p.chunk()) {
-                    load(w, p.chunk());
-                }
-                let s = w.get_block(p).unwrap();
-                if !s.is_air() {
-                    return (4 * y + s.shape().y_range_q().1, s.id());
-                }
-            }
-            unreachable!()
-        };
-        // A column with no tree over it (column tops leave trees out).
-        let (x, z) = (0..64)
-            .map(|i| (7 + i % 8, 9 + i / 8))
-            .find(|&(x, z)| {
-                let t = w.column_top(x, z);
-                (t.top_q, t.block) == real_top_at(&mut w, x, z)
-            })
-            .expect("open ground");
         let real_top = |w: &mut World| -> (i32, u16) {
             for y in (-128..400).rev() {
                 let p = BlockPos::new(x, y, z);
@@ -414,10 +393,8 @@ mod tests {
         let t = w.column_top(x, z);
         assert_eq!((t.top_q, t.block), (4 * (ground_y + 7), stone.id()));
         assert_eq!((t.top_q, t.block), real_top(&mut w));
-        // A pit in the neighbour, dug from its own top block down.
-        let n_top = (w.column_top(x + 1, z).top_q - 1).div_euclid(4);
         for dy in 0..3 {
-            w.set_block(BlockPos::new(x + 1, n_top - dy, z), crate::block::AIR, true);
+            w.set_block(BlockPos::new(x + 1, ground_y - dy, z), crate::block::AIR, true);
         }
         let pit = w.column_top(x + 1, z);
         // Unloaded now: the journal still knows.
@@ -426,10 +403,10 @@ mod tests {
             w.unload(p);
         }
         assert_eq!(w.column_top(x + 1, z), pit);
-        assert!(pit.top_q <= 4 * (n_top - 2), "{pit:?} vs its ground {n_top}");
+        assert!(pit.top_q <= 4 * (ground_y - 2), "{pit:?} vs ground {ground_y}");
         let cols = w.journal().edited_columns();
         assert_eq!(cols.get(&(x, z)), Some(&(ground_y + 6)));
-        assert!(cols.get(&(x + 1, z)).is_some_and(|&y| y <= n_top));
+        assert!(cols.get(&(x + 1, z)).is_some_and(|&y| y <= ground_y), "(the neighbour's ground may be lower)");
         assert_eq!(cols.len(), 2);
         assert_eq!(w.edited_column_tops(), vec![w.column_top(x, z), pit]);
     }

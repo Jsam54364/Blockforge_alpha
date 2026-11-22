@@ -114,31 +114,14 @@ pub struct Client {
 /// columns holds an opaque block somewhere (every block shape covers its whole footprint).
 /// Not "its bottom layer is solid": a cave crossing the bottom layer far under the ground
 /// would then leave the column uncovered for good, and LOD terrain drawn over the real one.
-///
-/// Water closes a column too: under a river or the sea it is what shows from above, and the
-/// bed under it may lie in a chunk below the streamed window.
 fn bottom_is_closed(reg: &BlockRegistry, chunk: &Chunk) -> bool {
-    let water = reg.id("water");
-    let closes = |s: BlockState| reg.get(s).opaque || Some(s.id()) == water;
+    let closes = |s: BlockState| reg.get(s).opaque;
     if let Some(s) = chunk.uniform_state() {
         return closes(s);
     }
     let n = CHUNK_SIZE as u8;
-    // Bottom-up: in ground chunks the first block already settles most columns. A few open
-    // columns still count as closed: a cave shaft running right through a chunk is a hole a
-    // block or two wide, dark from above either way.
-    let mut open = 0;
-    for z in 0..n {
-        for x in 0..n {
-            if !(0..n).any(|y| closes(chunk.get(LocalPos { x, y, z }.index()))) {
-                open += 1;
-                if open > 24 {
-                    return false;
-                }
-            }
-        }
-    }
-    true
+    // Bottom-up: in ground chunks the first block already settles most columns.
+    (0..n).all(|z| (0..n).all(|x| (0..n).any(|y| closes(chunk.get(LocalPos { x, y, z }.index())))))
 }
 
 /// Which chunk columns around the camera show their real surface (meshed and within the
@@ -334,17 +317,10 @@ impl Client {
                     let o = p.origin();
                     let h = CHUNK_SIZE as f32 * 0.5;
                     let c = [o.x as f32 + h - self.camera[0], o.y as f32 + h - self.camera[1], o.z as f32 + h - self.camera[2]];
-                    let closed = self.closed_bottom.contains(&p);
                     if c[0] * c[0] + c[1] * c[1] + c[2] * c[2] > d2_max {
-                        // Too far to be drawn. Above the ground that is only a treetop
-                        // missing (tall trees reach into chunks high above it); the chunk
-                        // that closes the column off must be drawn.
-                        if closed {
-                            break;
-                        }
-                        continue;
+                        break;
                     }
-                    if closed {
+                    if self.closed_bottom.contains(&p) {
                         cov.set(cx, cz);
                         break;
                     }

@@ -515,27 +515,20 @@ fn quantize(surf_q: i32, block: u16, water: u16, cell: i32) -> i32 {
 
 /// The surface of cell `(i, j)` of a section as it is drawn (quantized), in quarter blocks.
 pub fn cell_surface(gen: &WorldGen, key: SectionKey, i: i32, j: i32) -> (i32, u16) {
-    cell_surface_edited(gen, key, i, j, None, &section_features(gen, key))
-}
-
-/// The features distant terrain draws in a section and the ring of cells around it.
-fn section_features(gen: &WorldGen, key: SectionKey) -> crate::worldgen::FeatureGrid {
-    let (ox, oz) = key.origin();
-    let (cell, w) = (key.cell(), key.width());
-    gen.lod_features(ox - cell, oz - cell, ox + w + cell, oz + w + cell, cell)
+    cell_surface_edited(gen, key, i, j, None)
 }
 
 /// `cell_surface`, with the edits in the cell (see `SurfaceEdits`).
-fn cell_surface_edited(gen: &WorldGen, key: SectionKey, i: i32, j: i32, edits: Option<&CellEdits>, feats: &crate::worldgen::FeatureGrid) -> (i32, u16) {
-    let (q, b, _) = cell_surface_raw(gen, key, i, j, edits, feats);
+fn cell_surface_edited(gen: &WorldGen, key: SectionKey, i: i32, j: i32, edits: Option<&CellEdits>) -> (i32, u16) {
+    let (q, b, _) = cell_surface_raw(gen, key, i, j, edits);
     (q, b)
 }
 
 /// `cell_surface_edited`, and the height before rounding.
-fn cell_surface_raw(gen: &WorldGen, key: SectionKey, i: i32, j: i32, edits: Option<&CellEdits>, feats: &crate::worldgen::FeatureGrid) -> (i32, u16, i32) {
+fn cell_surface_raw(gen: &WorldGen, key: SectionKey, i: i32, j: i32, edits: Option<&CellEdits>) -> (i32, u16, i32) {
     let cell = key.cell();
     let (ox, oz) = key.origin();
-    let (mut s, mut b) = gen.lod_cell(sample_at(ox + i * cell, cell), sample_at(oz + j * cell, cell), cell, feats);
+    let (mut s, mut b) = gen.lod_surface(sample_at(ox + i * cell, cell), sample_at(oz + j * cell, cell), cell);
     if let Some(e) = edits {
         if e.highest.top_q > s {
             (s, b) = (e.highest.top_q, e.highest.block);
@@ -649,7 +642,6 @@ pub fn build_section(gen: &WorldGen, reg: &BlockRegistry, key: SectionKey) -> Lo
 /// `build_section` over the terrain as edits left it.
 pub fn build_section_edited(gen: &WorldGen, reg: &BlockRegistry, edits: &SurfaceEdits, key: SectionKey) -> LodMesh {
     let edited = edits.cells(key);
-    let feats = section_features(gen, key);
     let n = (GRID * GRID) as usize;
     let mut grid = Grid { surf: vec![0; n], block: vec![0; n], raw: vec![0; n] };
     for j in -1..=CELLS {
@@ -658,7 +650,7 @@ pub fn build_section_edited(gen: &WorldGen, reg: &BlockRegistry, edits: &Surface
             if corner {
                 continue; // never a neighbour of a face
             }
-            let (s, b, raw) = cell_surface_raw(gen, key, i, j, edited.get(&(i, j)), &feats);
+            let (s, b, raw) = cell_surface_raw(gen, key, i, j, edited.get(&(i, j)));
             let k = Grid::idx(i, j);
             grid.surf[k] = s;
             grid.block[k] = b;
@@ -677,7 +669,7 @@ pub fn build_section_edited(gen: &WorldGen, reg: &BlockRegistry, edits: &Surface
             let mut m = border_min(gen, key, i, j);
             if let Some(e) = edited.get(&(i, j)) {
                 // An edit may have lowered the neighbour (a pit at the border).
-                m = m.min(cell_surface_edited(gen, key, i, j, Some(e), &feats).0 - height_step(key.cell() * 2) / 2 - 4);
+                m = m.min(cell_surface_edited(gen, key, i, j, Some(e)).0 - height_step(key.cell() * 2) / 2 - 4);
             }
             grid.surf[Grid::idx(i, j)] = m;
         }
@@ -1317,8 +1309,7 @@ mod tests {
         let (no, _) = near.origin();
         let (pi, pj) = ((px - no) as u32, (pz - near.origin().1) as u32);
         assert_eq!(top_at(&m, pi, pj), ground - 40);
-        // Unedited: the ground, or a tree standing on it.
-        assert_eq!(top_at(&build_section(&g, &reg, near), pi, pj), cell_surface(&g, near, pi as i32, pj as i32).0);
+        assert_eq!(top_at(&build_section(&g, &reg, near), pi, pj), ground);
     }
 
     #[test]
@@ -1408,8 +1399,7 @@ mod tests {
         assert!(far.vertices.iter().all(|v| v.normal().is_some_and(|n| n[1] > 0.2)));
         let cell = key.cell();
         let (ox, oz) = key.origin();
-        let feats = section_features(&gen, key);
-        let h = |i: i32, j: i32| gen.lod_cell(ox + i * cell + cell / 2, oz + j * cell + cell / 2, cell, &feats).0 as f32 / 4.0;
+        let h = |i: i32, j: i32| gen.lod_surface(ox + i * cell + cell / 2, oz + j * cell + cell / 2, cell).0 as f32 / 4.0;
         let mut checked = 0;
         for v in far.vertices.iter().filter(|v| v.x() > 0 && v.z() > 0 && v.x() < 32 && v.z() < 32) {
             let (x, z) = (v.x() as i32, v.z() as i32);

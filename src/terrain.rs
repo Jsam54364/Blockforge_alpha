@@ -67,15 +67,7 @@ pub struct TerrainSample {
     pub smooth: f32,
     /// 0 at the coast (and at sea), 1 well inland.
     pub inland: f32,
-    /// The surface of a river flowing here, in blocks (`NO_RIVER` where there is none).
-    /// Set by `WorldGen`, which carves rivers after shaping the land per biome.
-    pub water: f32,
-    /// How much of the point is land: 0 at sea, 1 inland, a narrow band between at the coast.
-    pub land: f32,
 }
-
-/// `TerrainSample::water` where no river flows.
-pub const NO_RIVER: f32 = -1.0e9;
 
 pub struct Terrain {
     seed: u64,
@@ -90,10 +82,6 @@ pub struct Terrain {
     sea_floor: Fbm,
     /// Long mountain chains follow the zero lines of this noise, across landform regions.
     chains: Fbm,
-    /// Rivers follow the zero lines of this noise, warped so they meander.
-    rivers: Fbm,
-    river_warp_x: Fbm,
-    river_warp_z: Fbm,
     /// Running total of the landform weights, for weighted picks.
     cumulative: Vec<f32>,
 }
@@ -121,9 +109,6 @@ impl Terrain {
             ridges: Fbm::new(s(8), 900.0, 6, 0.5),
             sea_floor: Fbm::new(s(9), 400.0, 3, 0.5),
             chains: Fbm::new(s(10), 5200.0, 2, 0.45),
-            rivers: Fbm::new(s(11), 2600.0, 3, 0.45),
-            river_warp_x: Fbm::new(s(12), 600.0, 2, 0.5),
-            river_warp_z: Fbm::new(s(13), 600.0, 2, 0.5),
             cumulative,
         }
     }
@@ -219,7 +204,7 @@ impl Terrain {
         let deep = smoothstep(COAST, COAST - 0.4, c);
         let sea = -3.0 - 48.0 * deep + 4.0 * self.sea_floor.at(x, z, cell);
         if land <= 0.0 {
-            return TerrainSample { height: sea, smooth: sea, inland: 0.0, water: NO_RIVER, land: 0.0 };
+            return TerrainSample { height: sea, smooth: sea, inland: 0.0 };
         }
 
         let mut s = self.shape(x, z, cell);
@@ -253,60 +238,7 @@ impl Terrain {
         // Land stays at least a little above the sea, except in wetlands' ponds and at the coast.
         let height = sea + (h.max(-4.0) - sea) * land;
         let smooth = sea + (smooth_h.max(-4.0) - sea) * land;
-        TerrainSample { height, smooth, inland, water: NO_RIVER, land }
-    }
-
-    /// The river at `(x, z)`, if one flows here or its valley reaches here: the ground
-    /// carved into its bed and banks, and the river's surface (or `NO_RIVER` on the banks).
-    ///
-    /// Rivers follow the zero lines of a large, domain-warped noise (so they meander and run
-    /// for kilometres, as the mountain chains do), born as streams in the hills and widening
-    /// towards the coast, where they meet the sea. Their surface follows the lie of the land
-    /// heavily smoothed (the terrain seen from 600 blocks up), so it falls gently towards the
-    /// sea, a step at a time, and the valley sides slope down to it.
-    pub(crate) fn river(&self, x: f32, z: f32, cell: f32, h: f32, smooth_h: f32, inland: f32) -> Option<(f32, f32)> {
-        // Sources in the hills: no rivers on the mountains.
-        let fade = 1.0 - smoothstep(48.0, 85.0, smooth_h);
-        if fade <= 0.0 {
-            return None;
-        }
-        let (wx, wz) = (x + 180.0 * self.river_warp_x.at(x, z, cell), z + 180.0 * self.river_warp_z.at(x, z, cell));
-        let v = self.rivers.at(wx, wz, cell);
-        if v.abs() > 0.1 {
-            return None;
-        }
-        // Distance to the zero line in blocks: the noise over its gradient.
-        let e = 4.0f32.max(cell);
-        let gx = (self.rivers.at(wx + e, wz, cell) - self.rivers.at(wx - e, wz, cell)) / (2.0 * e);
-        let gz = (self.rivers.at(wx, wz + e, cell) - self.rivers.at(wx, wz - e, cell)) / (2.0 * e);
-        let dist = v.abs() / (gx * gx + gz * gz).sqrt().max(1e-5);
-        let width = (3.0 + 20.0 * (1.0 - inland).powf(1.3)) * (0.35 + 0.65 * fade);
-        let valley = 8.0 + width * 1.5;
-        if dist > width + valley || cell > width * 2.0 {
-            return None;
-        }
-        // The river's surface: the land seen from far above, a little below it, never under
-        // the sea.
-        let far = self.sample_far(x, z);
-        let level = (far * 0.85 - 1.5).min(smooth_h - 1.5).max(0.0).floor();
-        let depth = (1.5 + width * 0.12) * (0.5 + 0.5 * fade);
-        let t = dist / width;
-        if t < 1.0 {
-            let bed = level - depth * (1.0 - t * t);
-            return Some((h.min(bed), level));
-        }
-        // The banks: a lip just above the water, the valley sides easing up to the land.
-        let k = smoothstep(width, width + valley, dist);
-        let bank = if h > level + 1.0 { level + 1.0 + (h - level - 1.0) * k } else { level + 1.0 };
-        Some((if dist < width + 3.0 { bank.max(level + 1.0) } else { bank.min(h.max(level + 1.0)) }, NO_RIVER))
-    }
-
-    /// The land's height seen from 600 blocks up: landforms and coasts only, no hills.
-    fn sample_far(&self, x: f32, z: f32) -> f32 {
-        let c = self.continent(x, z, 600.0);
-        let inland = smoothstep(COAST, COAST + 0.45, c);
-        let s = self.shape(x, z, 600.0);
-        s.base * inland.sqrt()
+        TerrainSample { height, smooth, inland }
     }
 }
 
