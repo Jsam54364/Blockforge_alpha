@@ -126,14 +126,21 @@ impl Fbm {
     /// Ridged multifractal, 0..1: sharp crests where the noise crosses zero, each octave
     /// weighted by the one before so detail gathers on the ridges (mountain ranges).
     pub fn ridged(&self, x: f32, z: f32, cell: f32) -> f32 {
+        self.ridged_soft(x, z, cell, 0.0)
+    }
+
+    /// `ridged` with crests rounded over `soft` of the noise's range (0: knife edges). A
+    /// rounded crest has no slope at its top, which slope-driven filters (erosion) need.
+    pub fn ridged_soft(&self, x: f32, z: f32, cell: f32, soft: f32) -> f32 {
         let (mut amp, mut wl) = (1.0f32, self.wavelength);
         let (mut sum, mut norm, mut weight) = (0.0f32, 0.0f32, 1.0f32);
         for o in 0..self.octaves {
             let k = keep(wl, cell);
-            // A faded octave contributes its average instead (about a third of its weight).
-            let mut n = 0.33 * weight;
+            // A faded octave contributes its average instead: (1 - |noise|)^2 averages 0.6.
+            let mut n = 0.6 * weight;
             if k > 0.0 {
-                let r = (1.0 - self.octave(o, x, z, wl).abs()).max(0.0);
+                let v = self.octave(o, x, z, wl);
+                let r = (1.0 - (v * v + soft * soft).sqrt() + soft).clamp(0.0, 1.0);
                 n = lerp(n, r * r * weight, k);
             }
             sum += amp * n;

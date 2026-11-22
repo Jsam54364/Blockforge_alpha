@@ -83,6 +83,8 @@ struct DevShot {
     playing_frames: u64,
     /// The camera instead of the game's: (height above the player's, yaw, pitch in degrees).
     cam: Option<(f32, f32, f32)>,
+    /// Where to put the player instead of the spawn (x, z).
+    at: Option<(f32, f32)>,
 }
 
 impl App {
@@ -507,6 +509,11 @@ impl ApplicationHandler for App {
                 self.refresh_worlds();
                 if let Some(d) = self.dev.clone() {
                     self.open(game::WorldSpec { dir: None, seed: d.seed, settings_path: None });
+                    if let (Some((x, z)), Some(game)) = (d.at, self.game.as_mut()) {
+                        let y = game.generator().land().height(x, z, 1.0).max(1.0);
+                        game.player.place([x as f64 + 0.5, y as f64 + 2.0, z as f64 + 0.5]);
+                        game.player.set_fly(true);
+                    }
                 }
             }
             Err(e) => {
@@ -653,7 +660,8 @@ fn save_png(path: &std::path::Path, rgba: &[u8], w: u32, h: u32) -> Result<(), S
 /// at a fixed time of day and takes a picture with the game's own renderer. Settings come
 /// from the environment: BLOCKFORGE_SEED, BLOCKFORGE_HOURS, BLOCKFORGE_SHADERS (0..2),
 /// BLOCKFORGE_FRAMES, BLOCKFORGE_SHOT (the picture's path), BLOCKFORGE_CAM ("height above
-/// the player, yaw, pitch" in blocks and degrees). See `examples/devshot.rs`.
+/// the player, yaw, pitch" in blocks and degrees), BLOCKFORGE_AT ("x,z": where the player
+/// starts instead of the spawn). See `examples/devshot.rs`.
 #[cfg(not(target_os = "android"))]
 pub fn run_desktop() {
     use winit::event_loop::{ControlFlow, EventLoop};
@@ -671,6 +679,10 @@ pub fn run_desktop() {
         cam: std::env::var("BLOCKFORGE_CAM").ok().and_then(|v| {
             let n: Vec<f32> = v.split(',').filter_map(|t| t.trim().parse().ok()).collect();
             (n.len() == 3).then(|| (n[0], n[1], n[2]))
+        }),
+        at: std::env::var("BLOCKFORGE_AT").ok().and_then(|v| {
+            let n: Vec<f32> = v.split(',').filter_map(|t| t.trim().parse().ok()).collect();
+            (n.len() == 2).then(|| (n[0], n[1]))
         }),
     });
     event_loop.run_app(&mut state).expect("event loop failed");

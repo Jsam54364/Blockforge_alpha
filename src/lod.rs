@@ -464,6 +464,8 @@ struct Col {
     surface: u16,
     sub: u16,
     rock: u16,
+    /// A forest canopy over it: bottom and top (blocks) and the leaves.
+    canopy: Option<(i32, i32, u16)>,
 }
 
 impl Col {
@@ -491,11 +493,18 @@ fn lowest_land(vh: i32) -> i32 {
 /// Column `(i, j)` of a section as drawn, with the edits in its cell.
 fn column(gen: &WorldGen, key: SectionKey, i: i32, j: i32, edits: Option<&CellEdits>) -> Col {
     let cell = key.cell();
-    let vh = voxel_height(cell);
     let (ox, oz) = key.origin();
     let c = gen.lod_column(sample_at(ox + i * cell, cell), sample_at(oz + j * cell, cell), cell);
-    let (mut top_q, mut surface, mut water) = (c.top_q, c.surface, c.water);
+    column_from(gen, key, c, edits)
+}
+
+/// `column`, from the generator's column there.
+fn column_from(gen: &WorldGen, key: SectionKey, c: crate::worldgen::LodColumn, edits: Option<&CellEdits>) -> Col {
+    let vh = voxel_height(key.cell());
+    let (mut top_q, mut surface, mut water) = (if c.water { c.top_q } else { c.ground_q }, c.surface, c.water);
+    let mut canopy = c.canopy;
     if let Some(e) = edits {
+        canopy = None;
         if e.highest.top_q > top_q {
             (top_q, surface, water) = (e.highest.top_q, e.highest.block, false);
         } else if let Some(t) = e.at_sample {
@@ -503,12 +512,13 @@ fn column(gen: &WorldGen, key: SectionKey, i: i32, j: i32, edits: Option<&CellEd
         }
     }
     if water {
-        // The sea floor is never seen under LOD water: solid up to a layer below the surface.
-        let floor = (crate::worldgen::SEA_LEVEL).div_euclid(vh) * vh;
-        Col { top: floor.min(div_round(top_q, 4 * vh) * vh), water_q: Some(top_q), surface: c.sub, sub: c.sub, rock: c.rock }
+        // The bed under LOD water (seas and rivers): solid up to a layer below the surface.
+        let below = (top_q.div_euclid(4) - 1).div_euclid(vh) * vh;
+        let bed = div_round(c.ground_q, 4 * vh) * vh;
+        Col { top: bed.min(below), water_q: Some(top_q), surface: c.sub, sub: c.sub, rock: c.rock, canopy: None }
     } else {
         let top = (div_round(top_q, 4 * vh) * vh).max(lowest_land(vh));
-        Col { top, water_q: None, surface, sub: c.sub, rock: c.rock }
+        Col { top, water_q: None, surface, sub: c.sub, rock: c.rock, canopy }
     }
 }
 
@@ -668,7 +678,8 @@ pub fn build_section_edited(gen: &WorldGen, reg: &BlockRegistry, edits: &Surface
     // Columns, a one-cell ring included (the ring only decides which border faces show; it
     // is lowered to what any neighbouring section can show there).
     let gi = |i: i32, j: i32| ((j + 1) * GRID + (i + 1)) as usize;
-    let mut cols = vec![Col { top: 0, water_q: None, surface: 0, sub: 0, rock: 0 }; (GRID * GRID) as usize];
+    let mut cols = vec![Col { top: 0, water_q: None, surface: 0, sub: 0, rock: 0, canopy: None }; (GRID * GRID) as usize];
+    let generated = gen.lod_grid(sample_at(ox - cell, cell), sample_at(oz - cell, cell), cell, GRID as usize);
     for j in -1..=CELLS {
         for i in -1..=CELLS {
             let ring = i == -1 || i == CELLS || j == -1 || j == CELLS;
@@ -676,7 +687,7 @@ pub fn build_section_edited(gen: &WorldGen, reg: &BlockRegistry, edits: &Surface
             if corner {
                 continue; // never a neighbour of a face
             }
-            let mut c = column(gen, key, i, j, edited.get(&(i, j)));
+            let mut c = column_from(gen, key, generated[((j + 1) * GRID + i + 1) as usize], edited.get(&(i, j)));
             if ring {
                 let mut m = border_min(gen, key, i, j);
                 if edited.contains_key(&(i, j)) {
@@ -684,6 +695,7 @@ pub fn build_section_edited(gen: &WorldGen, reg: &BlockRegistry, edits: &Surface
                 }
                 c.top = m.div_euclid(vh) * vh;
                 c.water_q = None;
+                c.canopy = None;
             }
             cols[gi(i, j)] = c;
         }
@@ -699,26 +711,49 @@ pub fn build_section_edited(gen: &WorldGen, reg: &BlockRegistry, edits: &Surface
     // Where this section can meet real chunks, sides on chunk-column lines may reach down to
     // the real ground beside them (see `real_min` below): the voxels must go that deep.
     let masked = key.level <= MASKED_MAX_LEVEL;
-    let lines_low = if masked {
-        let mut m = i32::MAX;
+    // The real ground on both sides of every chunk-column line through the section, at
+    // full detail (fetched in one batch: one at a time costs a lot more).
+    let mut line_ground: HashMap<(i32, i32), i32> = HashMap::new();
+    if masked {
+        let mut pts = Vec::new();
         for a in 0..=CELLS {
             if (ox + a * cell).rem_euclid(CHUNK_SIZE) == 0 {
                 for t in 0..CELLS * cell {
-                    m = m.min(gen.ground_q(ox + a * cell, oz + t)).min(gen.ground_q(ox + a * cell - 1, oz + t));
+                    pts.push((ox + a * cell, oz + t));
+                    pts.push((ox + a * cell - 1, oz + t));
                 }
             }
             if (oz + a * cell).rem_euclid(CHUNK_SIZE) == 0 {
                 for t in 0..CELLS * cell {
-                    m = m.min(gen.ground_q(ox + t, oz + a * cell)).min(gen.ground_q(ox + t, oz + a * cell - 1));
+                    pts.push((ox + t, oz + a * cell));
+                    pts.push((ox + t, oz + a * cell - 1));
                 }
             }
         }
-        m.div_euclid(4) - 1
-    } else {
-        i32::MAX
-    };
+        pts.sort_unstable();
+        pts.dedup();
+        let qs = gen.ground_q_many(&pts);
+        line_ground = pts.into_iter().zip(qs).collect();
+    }
+    let lines_low = if masked { line_ground.values().copied().min().unwrap_or(i32::MAX).div_euclid(4) - 1 } else { i32::MAX };
     let y0 = (lowest.min(lines_low.div_euclid(vh) * vh)) - vh;
-    let highest = (0..CELLS).flat_map(|j| (0..CELLS).map(move |i| (i, j))).map(|(i, j)| cols[gi(i, j)].top).max().unwrap_or(0);
+    // Trees near the real chunks are drawn one by one (each crown in voxels); farther out
+    // forests are a canopy over each column (`LodColumn::canopy`).
+    let trees = if key.level <= MASKED_MAX_LEVEL {
+        let m = 8;
+        gen.lod_trees(ox - m, oz - m, ox + key.width() + m, oz + key.width() + m, cell)
+    } else {
+        Vec::new()
+    };
+    let highest = (0..CELLS)
+        .flat_map(|j| (0..CELLS).map(move |i| (i, j)))
+        .map(|(i, j)| {
+            let c = &cols[gi(i, j)];
+            c.top.max(c.canopy.map_or(i32::MIN, |k| k.1 + 1))
+        })
+        .max()
+        .unwrap_or(0)
+        .max(trees.iter().filter_map(|t| t.0.crown()).map(|c| c.2 + 1).max().unwrap_or(i32::MIN));
     let y1 = highest.max(y0 + vh);
     let layers = (y1 - y0) / vh;
     let vi = |i: i32, k: i32, j: i32| ((k * GRID + j + 1) * GRID + i + 1) as usize;
@@ -731,6 +766,60 @@ pub fn build_section_edited(gen: &WorldGen, reg: &BlockRegistry, edits: &Surface
                 if top <= c.top {
                     // Ring voxels only need to be solid (any non-zero block).
                     vox[vi(i, k, j)] = if c.surface == 0 { 1 } else { c.material(top) };
+                }
+            }
+        }
+    }
+    // Canopies: leaves in the layers between their bottom and top, over the ground.
+    for j in 0..CELLS {
+        for i in 0..CELLS {
+            let c = cols[gi(i, j)];
+            if let Some((bottom, top, leaves)) = c.canopy {
+                for k in 0..layers {
+                    let mid = y0 + k * vh + vh / 2;
+                    if mid >= bottom && mid <= top && y0 + k * vh >= c.top {
+                        vox[vi(i, k, j)] = leaves;
+                    }
+                }
+            }
+        }
+    }
+    // Single trees: their crowns as voxels (rounded to the voxels' size), and at the finest
+    // level their trunks.
+    for (f, log, leaves) in &trees {
+        let Some((r, bottom, top)) = f.crown() else { continue };
+        let (cx, cz) = (f.x as f32 + 0.5, f.z as f32 + 0.5);
+        let rr = r as f32 + cell as f32 * 0.35;
+        let half = (top - bottom) as f32 * 0.5 + vh as f32 * 0.5;
+        let mid_y = (top + bottom) as f32 * 0.5;
+        let (i0, i1) = (((cx - rr - ox as f32) / cell as f32).floor() as i32, ((cx + rr - ox as f32) / cell as f32).floor() as i32);
+        let (j0, j1) = (((cz - rr - oz as f32) / cell as f32).floor() as i32, ((cz + rr - oz as f32) / cell as f32).floor() as i32);
+        for j in j0.max(0)..=j1.min(CELLS - 1) {
+            for i in i0.max(0)..=i1.min(CELLS - 1) {
+                let (px, pz) = (ox as f32 + (i as f32 + 0.5) * cell as f32, oz as f32 + (j as f32 + 0.5) * cell as f32);
+                let d = ((px - cx).powi(2) + (pz - cz).powi(2)).sqrt() / rr;
+                if d > 1.0 {
+                    continue;
+                }
+                // A flat-topped crown, a little narrower toward the top and bottom layers: the
+                // tops of neighbouring trees merge into large faces, as a canopy reads afar.
+                for k in 0..layers {
+                    let y = (y0 + k * vh) as f32 + vh as f32 * 0.5;
+                    let e = ((y - mid_y) / half).abs();
+                    if e <= 1.0 && d <= 1.0 - 0.35 * (e - 0.6).max(0.0) / 0.4 && vox[vi(i, k, j)] == 0 {
+                        vox[vi(i, k, j)] = *leaves;
+                    }
+                }
+            }
+        }
+        if cell <= 2 {
+            let (i, j) = ((f.x - ox).div_euclid(cell), (f.z - oz).div_euclid(cell));
+            if (0..CELLS).contains(&i) && (0..CELLS).contains(&j) {
+                for k in 0..layers {
+                    let y = y0 + k * vh;
+                    if y >= f.y && y < bottom && vox[vi(i, k, j)] == 0 {
+                        vox[vi(i, k, j)] = *log;
+                    }
                 }
             }
         }
@@ -762,7 +851,7 @@ pub fn build_section_edited(gen: &WorldGen, reg: &BlockRegistry, edits: &Surface
                 Face::PosZ => (x0 + k, z0 + cell),
                 _ => (x0 + k, z0 - 1),
             };
-            m = m.min(gen.ground_q(x, z));
+            m = m.min(line_ground.get(&(x, z)).copied().unwrap_or_else(|| gen.ground_q(x, z)));
         }
         m.div_euclid(4) - 1
     };
@@ -838,7 +927,9 @@ pub fn build_section_edited(gen: &WorldGen, reg: &BlockRegistry, edits: &Surface
                     }
                     let top = y0 + (k + 1) * vh;
                     let open = !solid(ni, k, nj) || top > real;
-                    let drowned = across.water_q.is_some_and(|w| 4 * top <= w);
+                    // Under LOD water a face can't be seen; under real water (see-through, across
+                    // a chunk line) it closes the slit down to the real bed.
+                    let drowned = across.water_q.is_some_and(|w| 4 * top <= w) && top <= real;
                     if open && !drowned {
                         mask[(k * CELLS + u) as usize] = tex(reg, vox[vi(i, k, j)], face) + 1;
                         any = true;
@@ -1436,7 +1527,8 @@ mod tests {
             let m = build_section(&gen, &reg, key);
             assert!(m.quads() > 0);
             check_winding(&m);
-            // Every cell's top is covered by exactly one top quad.
+            // Every cell's top is covered by a top quad (the ground's, and a tree crown's or
+            // a canopy's over it).
             let mut cover = vec![0u8; (CELLS * CELLS) as usize];
             for q in m.vertices.chunks(4).filter(|q| q[0].face() == Face::PosY.index() as u32) {
                 let xs: Vec<u32> = q.iter().map(|v| v.x()).collect();
@@ -1447,7 +1539,7 @@ mod tests {
                     }
                 }
             }
-            assert!(cover.iter().all(|&c| c == 1), "{key:?}");
+            assert!(cover.iter().all(|&c| c >= 1), "{key:?}");
             assert!(m.min_y <= m.max_y);
         }
     }
@@ -1474,23 +1566,44 @@ mod tests {
         let key = SectionKey::new(1, 3, -2);
         let m = build_section(&gen, &reg, key);
         let surf = |i: i32, j: i32| cell_surface(&gen, key, i, j).0;
+        // (Where a tree stands beside a step its leaves may cover the step instead.)
+        let (ox, oz) = key.origin();
+        let trees = gen.lod_trees(ox - 8, oz - 8, ox + key.width() + 8, oz + key.width() + 8, key.cell());
+        let near_tree = |i: i32, j: i32| {
+            let (x, z) = (ox + i * key.cell(), oz + j * key.cell());
+            trees.iter().any(|(f, ..)| (f.x - x).abs() <= f.radius + 4 && (f.z - z).abs() <= f.radius + 4)
+        };
         for j in 0..CELLS {
             for i in 0..CELLS - 1 {
                 let (a, b) = (surf(i, j), surf(i + 1, j));
-                if a == b {
+                if a == b || near_tree(i, j) || near_tree(i + 1, j) {
                     continue;
                 }
                 let (face, x) = if a > b { (Face::PosX, i + 1) } else { (Face::NegX, i + 1) };
                 let (lo, hi) = (a.min(b), a.max(b));
-                let ok = m.vertices.chunks(4).any(|q| {
-                    q[0].face() == face.index() as u32
-                        && q[0].x() as i32 == x
-                        && q.iter().map(|v| v.z() as i32).min().unwrap() <= j
-                        && q.iter().map(|v| v.z() as i32).max().unwrap() > j
-                        && q.iter().map(|v| v.y_q()).min().unwrap() <= lo
-                        && q.iter().map(|v| v.y_q()).max().unwrap() >= hi
-                });
-                assert!(ok, "no side between cells {i} and {} in row {j}", i + 1);
+                // The side faces there, together (bands of surface, subsurface and rock).
+                let mut spans: Vec<(i32, i32)> = m
+                    .vertices
+                    .chunks(4)
+                    .filter(|q| {
+                        q[0].face() == face.index() as u32
+                            && q[0].x() as i32 == x
+                            && q.iter().map(|v| v.z() as i32).min().unwrap() <= j
+                            && q.iter().map(|v| v.z() as i32).max().unwrap() > j
+                    })
+                    .map(|q| (q.iter().map(|v| v.y_q()).min().unwrap(), q.iter().map(|v| v.y_q()).max().unwrap()))
+                    .collect();
+                spans.sort_unstable();
+                let mut reach: Option<(i32, i32)> = None;
+                for (a, b) in spans {
+                    reach = match reach {
+                        None => Some((a, b)),
+                        Some((l, h)) if a <= h => Some((l, h.max(b))),
+                        r => r,
+                    };
+                }
+                let ok = reach.is_some_and(|(l, h)| l <= lo && h >= hi);
+                assert!(ok, "no side between cells {i} and {} in row {j}: {reach:?} vs {lo}..{hi}", i + 1);
             }
         }
     }

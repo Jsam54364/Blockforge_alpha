@@ -442,39 +442,33 @@ Limits and next steps:
   large-scale fields can be sampled on a coarse grid and interpolated per section.
 * Not yet measured on a phone: GPU time with LODs on at each quality.
 
-## World generation (`terrain.rs`, `climate.rs`, `biome.rs`)
+## World generation (`land.rs`, `erosion.rs`, `flora.rs`, `worldgen.rs`)
 
-Modelled on Vintage Story's: about one block per metre, the shape of the land and its ground
-cover decided separately.
+About one block per metre. `land.rs` decides the shape of the land and the biome for any
+point, `worldgen.rs` turns that into blocks, `flora.rs` grows trees and rocks on top.
 
-* **Whole-block terrain, smoothed with half slabs**: heights are rounded to whole blocks, and a
-  half slab is added only at the foot of a step, where the ground rises toward a higher
-  neighbour. Slopes get smoothed; flat ground stays flat.
-* **Continents**: a large, domain-warped noise decides land and sea (about 60% land; the
-  spawn area is always land). Coasts are low, the land rises inland, the sea floor shelves
-  down to about -50.
-* **Landforms** (`terrain::LANDFORMS`): plains, rolling hills, high hills, plateaus (terraced),
-  mountains, wetlands (ponds). Each ~900-block region picks one by weight; neighbouring
-  regions blend smoothly. **Mountain chains** run for kilometres along the zero lines of
-  another large noise, through whatever landforms they cross; peaks reach about 175 blocks.
-* **Climate** (`climate.rs`): temperature follows latitude along z (`POLE_DISTANCE` = 25,000
-  blocks from equator to pole; the spawn is temperate, -z is towards the equator, +z towards
-  a pole, and the bands repeat beyond) and drops 1.5 C per 10 blocks of altitude, so peaks
-  are snowy. Rainfall has Earth-like belts (wet equator, dry subtropics, wet mid-latitudes)
-  plus its own map, and coasts are wetter.
-* **Biomes emerge from the climate** (`biome::BIOMES`): the first entry whose temperature,
-  rainfall and altitude ranges match wins. Each names its surface and subsurface blocks.
-  **To add a biome, add an entry** (more specific ones first). Today: snowy peaks, glacier,
-  bare rock, scree, tundra, boreal forest, cold steppe, temperate forest, grassland, steppe,
-  desert, savanna, rainforest, plus beaches and sea floors.
-* New players start at the nearest temperate lowland to the origin (`find_spawn`). The stats
-  overlay shows the biome, temperature, rainfall and landform under the camera.
-* `cargo run --release --example worldmap -- <seed> <blocks per pixel> map.ppm` draws a
-  top-down map of the biomes.
-* Worlds are versioned (`WORLDGEN_VERSION`): the app keeps a world from an older generator in
-  its own save file and starts the new one fresh at the spawn.
-
-Next: trees and plants per biome, rivers, rain shadows behind mountains.
+* **Big shapes, Minecraft 1.18 style**: a *continentalness* noise sets ocean, coast and
+  inland; a *roughness* noise sets plains vs hills vs mountains. Wide areas come out as
+  near-flat grassland on purpose; mountains are ridged noise, domain-warped.
+* **Erosion**: Rune Skovbo Johansen's erosion filter (`erosion.rs`, ported under MPL-2.0)
+  carves gullies and ridges into the slopes, fed a broad slope from a coarse lattice so it
+  doesn't flip across small crests. It only acts where the land is rough.
+* **Cliffs**: terraced escarpments in their own regions, flat-topped mesas with banded red
+  rock in dry land, and steep rock wherever the slope is high.
+* **Rivers**: two networks of domain-warped noise channels (as in AlcatrazEscapee's article
+  on context-free rivers). They wind through lowlands, widen downhill, cut their banks to
+  hold the water, and fade out in high mountains.
+* **Biomes** from temperature and humidity maps plus height and slope: ocean, beach, plains,
+  steppe, forest, old forest, swamp, taiga, tundra, peaks, desert (with dunes), mesa,
+  savanna, jungle. Grass colour blends with the climate; snow line drops in the cold.
+* **Flora** (`flora.rs`): 16 kinds (oak, big oak, birch, maple, spruce, fir, pine, redwood,
+  acacia, willow, palm, jungle, cactus, bush, boulder, fallen log) on jittered grids, so
+  each chunk can place trees from its neighbours without seams. Density follows the biome.
+* Distant terrain (`lod.rs`) samples the same functions in batches, so it matches.
+* `cargo run --release --example worldmap -- <seed> <blocks per pixel> map.ppm` draws a map;
+  `gen_bench` and `lodtime` time the generator.
+* Worlds are versioned (`WORLDGEN_VERSION` = 11): an older world is kept in its own save and
+  the new one starts fresh.
 
 ## Block textures (`assets/textures`, `tools/paint_textures.py`)
 

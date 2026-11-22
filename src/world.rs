@@ -11,7 +11,7 @@ use crate::chunk::Chunk;
 use crate::coords::{BlockPos, ChunkPos, LocalPos, CHUNK_SIZE};
 use crate::lod::ColumnTop;
 use crate::registry::BlockRegistry;
-use crate::worldgen::{Column, WorldGen, BEDROCK_Y, SEA_LEVEL};
+use crate::worldgen::{Column, WorldGen, BEDROCK_Y};
 
 const HISTORY_LIMIT: usize = 4096;
 
@@ -291,8 +291,9 @@ impl World {
     fn column_top_below(&mut self, x: i32, z: i32, top_edit: Option<i32>) -> ColumnTop {
         let col = self.column(x.div_euclid(CHUNK_SIZE), z.div_euclid(CHUNK_SIZE));
         let hq = col.height_q_at(x.rem_euclid(CHUNK_SIZE) as usize, z.rem_euclid(CHUNK_SIZE) as usize);
-        // Nothing generated is above the terrain's top block or the sea; edits may be.
-        let mut y = (hq.div_euclid(4) + 1).max(SEA_LEVEL);
+        // Nothing generated is above the ground, the water and the features; edits may be.
+        let _ = hq;
+        let mut y = self.generator.top_hint(&col, x, z);
         if let Some(e) = top_edit {
             y = y.max(e);
         }
@@ -367,7 +368,19 @@ mod tests {
     fn column_tops_follow_edits_whether_or_not_chunks_are_loaded() {
         let mut w = world();
         let stone = w.registry.state("stone").unwrap();
-        let (x, z) = (7, 9);
+        // A column (and its neighbour) of bare ground: no tree standing on either, and the
+        // neighbour no lower (the test digs a pit there).
+        let g = w.generator.clone();
+        let (x, z) = (0..400)
+            .map(|i: i32| (7 + i, 9i32))
+            .find(|&(x, z)| {
+                let bare = |x: i32| {
+                    let col = g.column(x.div_euclid(CHUNK_SIZE), z.div_euclid(CHUNK_SIZE));
+                    g.top_hint(&col, x, z) == g.height_q(x, z).div_euclid(4) + 1 && g.height_q(x, z).rem_euclid(4) == 0
+                };
+                bare(x) && bare(x + 1) && g.height_q(x + 1, z) >= g.height_q(x, z) && g.height_q(x, z) > 4 * 3
+            })
+            .expect("bare ground nearby");
         // The real top of the column, read from generated chunks.
         let real_top = |w: &mut World| -> (i32, u16) {
             for y in (-128..400).rev() {

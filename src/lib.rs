@@ -9,16 +9,17 @@
 //!   tick / governor                     fixed timestep, adaptive quality for phones
 
 pub mod behavior;
-pub mod biome;
 pub mod block;
 pub mod chunk;
 pub mod client;
-pub mod climate;
 pub mod coords;
 pub mod cull;
+pub mod erosion;
+pub mod flora;
 pub mod governor;
 pub mod greedy;
 pub mod jobs;
+pub mod land;
 pub mod lod;
 pub mod mesh;
 pub mod noise;
@@ -28,7 +29,6 @@ pub mod registry;
 pub mod rng;
 pub mod save;
 pub mod server;
-pub mod terrain;
 pub mod tick;
 pub mod world;
 pub mod worldgen;

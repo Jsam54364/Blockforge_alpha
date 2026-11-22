@@ -111,7 +111,7 @@ impl CameraView {
 /// Biome, climate and landform under the camera, for the stats overlay.
 pub fn place_lines(g: &GroundInfo) -> Vec<String> {
     vec![
-        format!("{}  {:.0}C  RAIN {:.0}%", g.biome.to_uppercase(), g.climate.temperature, g.climate.rainfall * 100.0),
+        format!("{}  {:.0}C  RAIN {:.0}%", g.biome.to_uppercase(), g.temperature, g.rainfall * 100.0),
         format!("{}  GROUND Y {:.0}", g.landform.to_uppercase(), g.height),
     ]
 }
@@ -1046,8 +1046,8 @@ mod tests {
             }
         };
         // Hover a little above the ground and look down at it.
-        let [x, _, z] = g.gen.find_spawn();
-        hover(&mut g, x.floor() as i32 + 6, z.floor() as i32);
+        let (x, z) = bare_spot(&g);
+        hover(&mut g, x, z);
         wait(&mut g, "the ground below", &|g| g.target().is_some());
         let hit = g.target().unwrap();
         let cell = hit.pos.neighbor(hit.face);
@@ -1103,6 +1103,27 @@ mod tests {
         (g.cam.yaw, g.cam.pitch) = (0.0, WALK_PITCH.0);
     }
 
+    /// A spot near the spawn with nothing growing within a few blocks (and flat ground), so
+    /// a block placed there has open sky above it.
+    fn bare_spot(g: &Game) -> (i32, i32) {
+        let [x, _, z] = g.gen.find_spawn();
+        let (x, z) = (x.floor() as i32, z.floor() as i32);
+        for (dx, dz) in (6..120).flat_map(|r| [(r, 0), (0, r), (-r, 0), (0, -r), (r, r), (-r, -r)]) {
+            let (px, pz) = (x + dx, z + dz);
+            let h = g.gen.describe(px, pz).height.round();
+            let flat = [(1, 0), (-1, 0), (0, 1), (0, -1)].iter().all(|&(a, b)| g.gen.describe(px + a, pz + b).height.round() == h);
+            let col = g.gen.column(px.div_euclid(blockforge::coords::CHUNK_SIZE), pz.div_euclid(blockforge::coords::CHUNK_SIZE));
+            let clear = col.features.iter().all(|f| {
+                let (lo, hi) = f.bounds();
+                px < lo[0] - 1 || px > hi[0] + 1 || pz < lo[2] - 1 || pz > hi[2] + 1
+            });
+            if flat && clear {
+                return (px, pz);
+            }
+        }
+        panic!("no bare spot near the spawn");
+    }
+
     /// A world in memory around seed 1337's spawn, loaded, with the HUD laid out.
     fn loaded_game(walk: bool) -> Game {
         let reg = Arc::new(BlockRegistry::builtin());
@@ -1137,8 +1158,8 @@ mod tests {
     fn building_by_touch_taps_to_place_and_holds_to_dig() {
         let mut g = loaded_game(false);
         g.ui.settings.touch_build = true;
-        let [x, _, z] = g.gen.find_spawn();
-        hover(&mut g, x.floor() as i32 + 6, z.floor() as i32);
+        let (x, z) = bare_spot(&g);
+        hover(&mut g, x, z);
         run_until(&mut g, "the ground below", 20.0, &|g| g.target().is_some());
         let hit = g.target().unwrap();
         let cell = hit.pos.neighbor(hit.face);
