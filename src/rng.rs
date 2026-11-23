@@ -38,7 +38,10 @@ pub fn hash3(seed: u64, x: i32, y: i32, z: i32) -> u64 {
     h = (h ^ (x as u32 as u64)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
     h = (h ^ (h >> 29) ^ (y as u32 as u64)).wrapping_mul(0x94D0_49BB_1331_11EB);
     h = (h ^ (h >> 32) ^ (z as u32 as u64)).wrapping_mul(0xD6E8_FEB8_6659_FD93);
-    h ^ (h >> 32)
+    // A full final mix: without it neighbouring z gave nearly linear results (trees in rows).
+    h = (h ^ (h >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    h = (h ^ (h >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    h ^ (h >> 31)
 }
 
 #[cfg(test)]

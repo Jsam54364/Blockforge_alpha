@@ -26,7 +26,7 @@ use crate::rng::hash3;
 pub const SEA_LEVEL: i32 = 0;
 /// Bumped whenever the same seed would generate different terrain: worlds saved by an
 /// older generator are kept apart (their edits would land on different ground).
-pub const WORLDGEN_VERSION: u32 = 11;
+pub const WORLDGEN_VERSION: u32 = 12;
 pub const BEDROCK_Y: i32 = -128;
 /// No caves below this; deep chunks collapse to a single uniform entry.
 const CAVE_FLOOR: i32 = -48;

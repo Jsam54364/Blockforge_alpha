@@ -534,12 +534,23 @@ fn shadow_tap(far: bool, uv: vec2<f32>, z: f32) -> f32 {
 fn shadow_at(world: vec3<f32>, n: vec3<f32>, px: vec2<f32>) -> f32 {
     let size = g.shadow.w;
     let noise = fract(52.9829189 * fract(dot(px, vec2<f32>(0.06711056, 0.00583715))));
+    // All the bias is here, none from the hardware (GPUs disagree on depth bias, which on
+    // some phones made flat ground shadow itself in big patches). The point looked up moves
+    // off the surface along its normal, more where the light grazes it (a shadow texel then
+    // spans more depth), and the depth compared is pulled a little toward the light.
+    let ndl = clamp(dot(n, g.light.xyz), 0.08, 1.0);
+    let lean = min(sqrt(1.0 - ndl * ndl) / ndl, 4.0);
+    let push = 1.5 + 1.5 * lean; // texels
     var far = false;
-    var p = g.shadow_mat[0] * vec4<f32>(world + n * (3.0 * g.shadow.x / size), 1.0);
+    var texel = 2.0 * g.shadow.x / size;
+    var p = g.shadow_mat[0] * vec4<f32>(world + n * (push * texel), 1.0);
     if (max(abs(p.x), abs(p.y)) > 0.94 - 0.1 * noise) {
         far = true;
-        p = g.shadow_mat[1] * vec4<f32>(world + n * (3.0 * g.shadow.y / size), 1.0);
+        texel = 2.0 * g.shadow.y / size;
+        p = g.shadow_mat[1] * vec4<f32>(world + n * (push * texel), 1.0);
     }
+    // (The maps' depth: 0.5 / SHADOW_DEPTH_RANGE per block.)
+    p.z -= texel * (0.5 / 320.0);
     let edge = max(abs(p.x), abs(p.y));
     if (edge >= 1.0 || p.z <= 0.0 || p.z >= 1.0) {
         return 1.0;

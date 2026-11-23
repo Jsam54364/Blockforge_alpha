@@ -34,6 +34,11 @@ pub trait World {
     fn ground_height(&self, x: f64, z: f64, y: f64) -> f64;
     /// A circle of radius `r` at (x, z), feet at y, pushed out of anything too tall to step onto.
     fn collide(&self, x: f64, z: f64, y: f64, r: f64) -> (f64, f64);
+    /// Rising from feet at `y0` to `y1` at (x, z), radius `r`: the highest the feet may get
+    /// before the head meets a block above (`None`: nothing in the way).
+    fn head_room(&self, _x: f64, _z: f64, _y0: f64, _y1: f64, _r: f64) -> Option<f64> {
+        None
+    }
     /// A climbable edge ahead (direction dx, dz) whose top is `min_height..max_height` above
     /// `base_y` (the ground last stood on).
     #[allow(clippy::too_many_arguments)]
@@ -269,6 +274,25 @@ impl<B: Blocks> World for BlockWorld<'_, B> {
         -1.0e6
     }
 
+    fn head_room(&self, x: f64, z: f64, y0: f64, y1: f64, r: f64) -> Option<f64> {
+        let (h0, h1) = (y0 + self.height, y1 + self.height);
+        // A little inside the radius: a wall he brushes against is not a ceiling.
+        let r = r * 0.7;
+        let mut best: Option<f64> = None;
+        for bz in (z - r).floor() as i32..=(z + r).floor() as i32 {
+            for bx in (x - r).floor() as i32..=(x + r).floor() as i32 {
+                for by in h0.floor() as i32..=h1.floor() as i32 {
+                    if let Some((a, _)) = self.span(bx, by, bz) {
+                        if a >= h0 - 1e-6 && a < h1 {
+                            best = Some(best.map_or(a, |b: f64| b.min(a)));
+                        }
+                    }
+                }
+            }
+        }
+        best.map(|b| b - self.height)
+    }
+
     fn collide(&self, mut x: f64, mut z: f64, y: f64, r: f64) -> (f64, f64) {
         let (lo, hi) = (y + self.step_height, y + self.height);
         // Twice: being pushed out of one block can push into its neighbour.
@@ -307,6 +331,12 @@ impl<B: Blocks> World for BlockWorld<'_, B> {
                     let Some((d, l)) = box_ledge(&b, px, pz, py, base_y, dx, dz, q) else { continue };
                     // The way up has to be open too: above the head, and in front of the edge.
                     if !self.clear(cx, cz, py + self.height, top + self.height) {
+                        continue;
+                    }
+                    // And where he hangs on the way up (beside the edge, maybe in another
+                    // column than the one he starts in): no overhang to climb through.
+                    let (hx, hz) = (l.hang_x.floor() as i32, l.hang_z.floor() as i32);
+                    if (hx, hz) != (bx, bz) && !self.clear(hx, hz, py + 0.01, top + self.height) {
                         continue;
                     }
                     if best.map_or(true, |(bd, _)| d < bd) {
@@ -438,6 +468,17 @@ mod tests {
         let low = grid(&[((2, 11, 0), (0.0, 1.0))]);
         let (x, _) = BlockWorld::new(&low).collide(1.9, 0.5, 10.0, 0.3);
         assert!((x - 1.7).abs() < 1e-9, "{x}");
+    }
+
+    #[test]
+    fn the_head_bumps_into_a_block_above_but_not_a_wall_beside() {
+        // A block over (0, 0) with its bottom at y = 12; ground top at 10; he is 1.8 tall.
+        let g = grid(&[((0, 12, 0), (0.0, 1.0)), ((2, 11, 0), (0.0, 1.0))]);
+        let w = BlockWorld::new(&g);
+        assert_eq!(w.head_room(0.5, 0.5, 10.0, 10.5, 0.3), Some(10.2));
+        assert_eq!(w.head_room(0.5, 0.5, 10.0, 10.1, 0.3), None, "not reached yet");
+        // Brushing the wall block at x = 2 (radius 0.3 at x = 1.75) is no ceiling.
+        assert_eq!(w.head_room(1.75, 0.5, 10.0, 10.5, 0.3), None);
     }
 
     #[test]

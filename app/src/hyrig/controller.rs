@@ -1920,8 +1920,16 @@ impl Controller {
                         self.vy += (-sink - self.vy) * (dt * 3.0).min(1.0);
                         self.pos[1] += self.vy * dt;
                     } else {
+                        let y0 = self.pos[1];
                         self.pos[1] += self.vy * dt - 0.5 * self.grav * dt * dt;
                         self.vy -= self.grav * dt;
+                        // The head bumps into what is above instead of going into it.
+                        if self.pos[1] > y0 {
+                            if let Some(top) = world.head_room(self.pos[0], self.pos[2], y0, self.pos[1], self.cfg.radius) {
+                                self.pos[1] = top.max(y0);
+                                self.vy = self.vy.min(0.0);
+                            }
+                        }
                     }
                     gh = world.ground_height(self.pos[0], self.pos[2], self.pos[1]);
                     if self.vy <= 0.0 && self.pos[1] <= gh {

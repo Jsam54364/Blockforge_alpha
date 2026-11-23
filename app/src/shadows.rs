@@ -32,6 +32,7 @@ pub const NEAR_HALF: f32 = 56.0;
 pub const FAR_HALF: f32 = 224.0;
 /// How far along the light each map reaches either side of its centre, in blocks (casters
 /// up to this far above the camera, toward the sun, still cast).
+/// Depth the maps cover either side of their centre (shader.wgsl `shadow_at` assumes 320).
 const DEPTH_RANGE: f32 = 320.0;
 /// Bindings in the main shader's group 0.
 pub const BIND_NEAR: u32 = 8;
@@ -231,7 +232,7 @@ impl Shadows {
                     stencil: Default::default(),
                     // Pushed away from the light a little: no "acne" of surfaces shadowing
                     // themselves (the shader also looks up a little off the surface).
-                    bias: wgpu::DepthBiasState { constant: 2, slope_scale: 2.0, clamp: 0.0 },
+                    bias: wgpu::DepthBiasState::default(), // all bias is in the main shader (shadow_at)
                 }),
                 multisample: Default::default(),
                 multiview: None,
@@ -314,7 +315,9 @@ impl Shadows {
 
     /// Whether `adapter` can filter comparisons on the shadow maps' depth format.
     pub fn filterable(adapter: &wgpu::Adapter) -> bool {
-        adapter.get_texture_format_features(FORMAT).flags.contains(wgpu::TextureFormatFeatureFlags::FILTERABLE)
+        // (BLOCKFORGE_SHADOW_POINT=1 tests the unfiltered path on a GPU that could filter.)
+        std::env::var("BLOCKFORGE_SHADOW_POINT").map_or(true, |v| v != "1")
+            && adapter.get_texture_format_features(FORMAT).flags.contains(wgpu::TextureFormatFeatureFlags::FILTERABLE)
     }
 
     /// The main shader's entries for the maps and their sampler (group 0).

@@ -148,6 +148,10 @@ struct Relief {
     h_raw: f32,
     #[allow(dead_code)]
     dry: f32,
+    /// How much cliff terraces raise the land here (faded out in river valleys).
+    terrace: f32,
+    /// The rolling ground without small detail or cliffs: river water never stands above it.
+    low: f32,
 }
 
 pub struct Land {
@@ -226,7 +230,8 @@ impl Land {
         let ocean = -5.0 - 55.0 * smoothstep(0.0, -0.45, c) + 3.0 * hills;
         // Land: rises gently inland; plains stay low and flat.
         let base = 3.0 + 26.0 * inland * (1.0 - 0.65 * flat);
-        let rolling = hills * lerp(17.0, 2.0, flat) * (1.0 - 0.4 * mountains) + self.detail.at(x, z, cell) * lerp(2.8, 0.5, flat);
+        let swell = hills * lerp(17.0, 2.0, flat) * (1.0 - 0.4 * mountains);
+        let rolling = swell + self.detail.at(x, z, cell) * lerp(2.8, 0.5, flat);
         let r = self.ridges.ridged_soft(wx, wz, cell, 0.08);
         let peaks = (r.powf(1.8) * 330.0 + 30.0 * hills.abs()) * mountains;
 
@@ -262,7 +267,8 @@ impl Land {
         let k = smoothstep(-0.03, 0.03, c);
         let height = lerp(ocean, land + sea_cliff, k);
         let smooth = lerp(ocean, base + 0.25 * peaks, k);
-        Relief { height, smooth, continent: c, inland, mountains, flat, cliffs, floor: lerp(ocean, base, k), t_sea, h_raw, dry }
+        let low = lerp(ocean, base + swell + 0.25 * peaks, k);
+        Relief { height, smooth, continent: c, inland, mountains, flat, cliffs, floor: lerp(ocean, base, k), t_sea, h_raw, dry, terrace: steps * cliffs * k, low }
     }
 
     /// The land at `(x, z)`, band-limited for terrain drawn in cells `cell` blocks wide
@@ -416,16 +422,20 @@ impl Land {
             let rz = z + 280.0 * self.river_warp_z.at(x, z, cell);
             // Wider toward the sea, narrower upland.
             let lowland = 1.0 - smoothstep(8.0, 140.0, r.smooth);
-            let w_big = lerp(0.0045, 0.012, lowland) * on_land;
+            let w_big = lerp(0.0035, 0.0065, lowland) * on_land;
             let w_small = w_big * 0.55 * smoothstep(0.08, 0.2, r.continent);
             let n_big = self.rivers.at(rx, rz, cell).abs();
             let n_small = self.streams.at(rx * 1.1, rz * 1.1, cell).abs();
             let ratio = (n_big / w_big.max(1e-6)).min(if w_small > 1e-5 { n_small / w_small } else { f32::MAX });
-            // Upland valleys are wider (relative to their stream) than lowland ones.
-            let reach = 7.0 + 8.0 * (1.0 - lowland);
+            // Upland valleys are wider (relative to their stream) than lowland ones, and the
+            // higher the land stands over the water the wider its valley, so its sides slope
+            // instead of standing as walls.
+            let level = (r.smooth * 0.8 - 2.0).max(SEA + 1.0).round();
+            let rise = (height - r.terrace - level).abs();
+            let reach = (7.0 + 8.0 * (1.0 - lowland)) * (1.0 + rise / 18.0).min(3.5);
             if ratio < reach {
-                // The water's level: smooth, falling toward the sea, below the land around.
-                let level = (r.smooth * 0.8 - 2.0).max(SEA + 1.0).round();
+                // The water's level (above): smooth, falling toward the sea. Land around it
+                // eases down to it, or (in a hollow) up to it, never as a wall.
                 // Rivers carve the lowlands and hills; toward the mountains they fade to dry
                 // gullies instead of cutting slots. (Decided by broad, smooth things only, so
                 // every column across a river agrees on whether it holds water.)
@@ -442,9 +452,11 @@ impl Land {
                         }
                     } else {
                         // The valley: the land eases down to just above the water.
-                        let bank = level + 1.0 + (ratio - 1.0) * 1.4;
+                        let bank = level + 1.0 + (ratio - 1.0) * 0.6;
                         let k = smoothstep(1.0, reach, ratio);
-                        let valley = height.min(lerp(bank, height, k * k));
+                        // Cliff terraces give way to the valley's slope near the river.
+                        let ground = height - r.terrace * (1.0 - k);
+                        let valley = lerp(bank, ground, k * k);
                         // Beside water the banks come down all the way (or the water would
                         // stand against a wall); farther out, as much as the river carves.
                         let strength = if carve > 0.6 { lerp(1.0, carve, smoothstep(1.0, 3.0, ratio)) } else { carve };
