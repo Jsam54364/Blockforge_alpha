@@ -1,17 +1,29 @@
-//! GPU frame time via timestamp queries around the main render pass.
+//! GPU time via timestamp queries around the frame's passes: each shadow map, the world and
+//! the upscale (see `Slot`), so the stats can show where the GPU's time goes.
 //!
 //! Not every device supports `TIMESTAMP_QUERY`; when it is missing the caller simply
 //! has no timer and the overlay shows "GPU N/A". Results arrive a few frames late:
-//! a resolved pair of timestamps is copied into a mappable buffer, mapped
-//! asynchronously, and read back when ready. While a map is outstanding no new copy
-//! is issued, so at most one readback is in flight.
+//! resolved timestamps are copied into a mappable buffer, mapped asynchronously, and read
+//! back when ready. While a map is outstanding no new copy is issued, so at most one
+//! readback is in flight. Passes not drawn in a frame (a shadow map not redrawn) count 0.
 
+use std::cell::Cell;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 
 const PENDING: u8 = 0;
 const OK: u8 = 1;
 const FAILED: u8 = 2;
+
+/// The passes timed.
+pub const SHADOW_NEAR: usize = 0;
+pub const SHADOW_FAR: usize = 1;
+pub const WORLD: usize = 2;
+pub const UPSCALE: usize = 3;
+pub const SLOTS: usize = 4;
+
+/// One frame's GPU times (ms) per pass (`SHADOW_NEAR` ..), 0 for passes not drawn.
+pub type Parts = [f32; SLOTS];
 
 pub struct GpuTimer {
     query_set: wgpu::QuerySet,
@@ -21,25 +33,30 @@ pub struct GpuTimer {
     state: Arc<AtomicU8>,
     mapping: bool,
     copied: bool,
-    latest_ms: Option<f32>,
+    /// Passes given timestamps this frame (bits), and in the copy being read back.
+    used: Cell<u8>,
+    in_flight: u8,
+    latest: Option<Parts>,
 }
+
+const BYTES: u64 = (SLOTS * 2 * 8) as u64;
 
 impl GpuTimer {
     pub fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> GpuTimer {
         let query_set = device.create_query_set(&wgpu::QuerySetDescriptor {
             label: Some("gpu timer"),
             ty: wgpu::QueryType::Timestamp,
-            count: 2,
+            count: (SLOTS * 2) as u32,
         });
         let resolve_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("gpu timer resolve"),
-            size: 16,
+            size: BYTES,
             usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
         let read_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("gpu timer read"),
-            size: 16,
+            size: BYTES,
             usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -51,26 +68,34 @@ impl GpuTimer {
             state: Arc::new(AtomicU8::new(PENDING)),
             mapping: false,
             copied: false,
-            latest_ms: None,
+            used: Cell::new(0),
+            in_flight: 0,
+            latest: None,
         }
     }
 
-    /// Plug into `RenderPassDescriptor::timestamp_writes`.
-    pub fn pass_writes(&self) -> wgpu::RenderPassTimestampWrites<'_> {
+    /// Plug into `RenderPassDescriptor::timestamp_writes` of the pass `slot` (`WORLD` ..).
+    pub fn pass_writes(&self, slot: usize) -> wgpu::RenderPassTimestampWrites<'_> {
+        self.used.set(self.used.get() | 1 << slot);
         wgpu::RenderPassTimestampWrites {
             query_set: &self.query_set,
-            beginning_of_pass_write_index: Some(0),
-            end_of_pass_write_index: Some(1),
+            beginning_of_pass_write_index: Some(slot as u32 * 2),
+            end_of_pass_write_index: Some(slot as u32 * 2 + 1),
         }
     }
 
-    /// Call after the pass has ended, before `encoder.finish()`.
+    /// Call after the passes have ended, before `encoder.finish()`.
     pub fn encode(&mut self, encoder: &mut wgpu::CommandEncoder) {
-        encoder.resolve_query_set(&self.query_set, 0..2, &self.resolve_buf, 0);
+        let used = self.used.replace(0);
         self.copied = false;
+        if used == 0 {
+            return;
+        }
+        encoder.resolve_query_set(&self.query_set, 0..(SLOTS * 2) as u32, &self.resolve_buf, 0);
         if !self.mapping {
-            encoder.copy_buffer_to_buffer(&self.resolve_buf, 0, &self.read_buf, 0, 16);
+            encoder.copy_buffer_to_buffer(&self.resolve_buf, 0, &self.read_buf, 0, BYTES);
             self.copied = true;
+            self.in_flight = used;
         }
     }
 
@@ -89,18 +114,24 @@ impl GpuTimer {
         if self.mapping {
             match self.state.load(Ordering::SeqCst) {
                 OK => {
-                    let (a, b) = {
+                    let mut parts = [0.0; SLOTS];
+                    {
                         let view = self.read_buf.slice(..).get_mapped_range();
-                        let a = u64::from_le_bytes(view[0..8].try_into().unwrap());
-                        let b = u64::from_le_bytes(view[8..16].try_into().unwrap());
-                        (a, b)
-                    };
+                        for (i, p) in parts.iter_mut().enumerate() {
+                            if self.in_flight & (1 << i) == 0 {
+                                continue;
+                            }
+                            let at = |k: usize| u64::from_le_bytes(view[k * 8..k * 8 + 8].try_into().unwrap());
+                            let (a, b) = (at(i * 2), at(i * 2 + 1));
+                            if b > a {
+                                *p = ((b - a) as f64 * self.period_ns as f64 / 1_000_000.0) as f32;
+                            }
+                        }
+                    }
                     self.read_buf.unmap();
                     self.state.store(PENDING, Ordering::SeqCst);
                     self.mapping = false;
-                    if b > a {
-                        self.latest_ms = Some(((b - a) as f64 * self.period_ns as f64 / 1_000_000.0) as f32);
-                    }
+                    self.latest = Some(parts);
                 }
                 FAILED => {
                     self.state.store(PENDING, Ordering::SeqCst);
@@ -111,8 +142,8 @@ impl GpuTimer {
         }
     }
 
-    /// The newest unread GPU time in milliseconds, if a new one arrived.
-    pub fn take(&mut self) -> Option<f32> {
-        self.latest_ms.take()
+    /// The newest unread per-pass GPU times, if new ones arrived.
+    pub fn take(&mut self) -> Option<Parts> {
+        self.latest.take()
     }
 }

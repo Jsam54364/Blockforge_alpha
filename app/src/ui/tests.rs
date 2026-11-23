@@ -312,7 +312,7 @@ fn settings_take_effect_at_once_and_lead_back() {
         // Every group lays out, with its settings on screen.
         let expect: [&[Action]; 4] = [
             &[Action::ToggleWalk, Action::ToggleView, Action::ToggleStats],
-            &[Action::RenderDist(1), Action::RenderDist(-1), Action::LodDist(1), Action::CycleLodQuality, Action::ToggleFog, Action::ToggleClouds, Action::ToggleRays, Action::CycleShaders, Action::ToggleVsync],
+            &[Action::RenderDist(1), Action::RenderDist(-1), Action::LodDist(1), Action::CycleLodQuality, Action::ToggleFog, Action::ToggleClouds, Action::ToggleRays, Action::CycleShaders, Action::CycleResolution, Action::ToggleVsync],
             &[Action::CycleCull, Action::ToggleMesher],
             &[Action::OpenControls, Action::HudOpacity(1), Action::LookSpeed(-1), Action::JoySize(1), Action::ToggleTouchBuild, Action::ToggleOneStance],
         ];
@@ -910,6 +910,7 @@ fn settings_survive_a_round_trip_through_text() {
         clouds: false,
         god_rays: false,
         shaders: 2,
+        resolution: 3,
         walk: false,
         view: CamView::Front,
         hud_opacity: 50,

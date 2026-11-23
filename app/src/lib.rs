@@ -78,6 +78,8 @@ struct DevShot {
     seed: u64,
     hours: f64,
     shaders: u8,
+    /// The Resolution setting (index into `ui::RESOLUTIONS`).
+    resolution: u8,
     frames: u64,
     path: PathBuf,
     playing_frames: u64,
@@ -282,6 +284,7 @@ impl App {
             god_rays: settings.god_rays,
             shaders: shadows::Quality::from_index(settings.shaders),
             shadow_debug: settings.show_stats,
+            render_scale: ui::RESOLUTIONS.get(settings.resolution as usize).copied().flatten(),
             figure: None,
         }
     }
@@ -375,6 +378,7 @@ impl App {
         let (Some(d), Some(game)) = (self.dev.as_mut(), self.game.as_mut()) else { return };
         game.clock.shift(d.hours - game.clock.hours());
         game.ui.settings.shaders = d.shaders;
+        game.ui.settings.resolution = d.resolution;
         if game.ui.screen == ui::Screen::Playing {
             d.playing_frames += 1;
         }
@@ -397,8 +401,8 @@ impl App {
 
     fn render(&mut self, event_loop: &ActiveEventLoop, frame_start: Instant) {
         let Some(g) = self.gfx.as_mut() else { return };
-        if let Some(ms) = g.take_gpu_ms() {
-            self.perf.add_gpu_sample(ms);
+        if let Some(parts) = g.take_gpu_parts() {
+            self.perf.add_gpu_parts(parts);
         }
         self.perf.drawn = g.drawn_chunks();
         self.perf.hidden = g.hidden_chunks();
@@ -406,6 +410,7 @@ impl App {
         self.perf.quads = g.drawn_quads();
         (self.perf.lod_drawn, self.perf.lod_quads) = g.drawn_lod();
         self.perf.present_mode = g.present_mode_name();
+        self.perf.res = g.resolution_line(self.game.as_ref().is_some_and(|game| game.ui.settings.resolution == 0));
         if self.perf.gpu.is_empty() {
             self.perf.gpu = g.gpu_line().to_string();
         }
@@ -674,6 +679,7 @@ pub fn run_desktop() {
         seed: var("BLOCKFORGE_SEED", "1337").parse().unwrap_or(1337),
         hours: var("BLOCKFORGE_HOURS", "10").parse().unwrap_or(10.0),
         shaders: var("BLOCKFORGE_SHADERS", "1").parse().unwrap_or(1),
+        resolution: var("BLOCKFORGE_RES", "1").parse().unwrap_or(1),
         frames: var("BLOCKFORGE_FRAMES", "120").parse().unwrap_or(120),
         path: PathBuf::from(var("BLOCKFORGE_SHOT", "devshot.png")),
         playing_frames: 0,

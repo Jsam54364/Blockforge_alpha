@@ -27,6 +27,9 @@ pub struct Perf {
     pub frame_ms: f32,
     pub cpu_frame_ms: f32,
     pub gpu_ms: Option<f32>,
+    /// The average GPU time of each pass (see `gpu_timer::Parts`) over the same window.
+    pub gpu_parts: Option<crate::gpu_timer::Parts>,
+    gpu_parts_acc: crate::gpu_timer::Parts,
     /// Cores' worth of CPU time this process used over the last second (e.g. 1.8).
     pub cpu_cores: Option<f32>,
     pub mem_mb: Option<f32>,
@@ -49,6 +52,8 @@ pub struct Perf {
     pub present_mode: &'static str,
     /// The GPU, its graphics API and how shadows are sampled on it.
     pub gpu: String,
+    /// The world's resolution ("RES 80% AUTO 1872x864").
+    pub res: String,
     /// Fraction of one core the main (render) thread used over the last second.
     pub main_thread: Option<f32>,
     /// Where the camera is: biome, climate and landform lines (see `Game::place_lines`).
@@ -77,6 +82,8 @@ impl Perf {
             frame_ms: 0.0,
             cpu_frame_ms: 0.0,
             gpu_ms: None,
+            gpu_parts: None,
+            gpu_parts_acc: [0.0; crate::gpu_timer::SLOTS],
             cpu_cores: None,
             mem_mb: None,
             n_cores: std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1),
@@ -91,6 +98,7 @@ impl Perf {
             lod_pending: 0,
             present_mode: "FIFO",
             gpu: String::new(),
+            res: String::new(),
             main_thread: None,
             place: Vec::new(),
         }
@@ -99,6 +107,14 @@ impl Perf {
     pub fn add_gpu_sample(&mut self, ms: f32) {
         self.gpu_acc_ms += ms;
         self.gpu_samples += 1;
+    }
+
+    /// One frame's GPU time per pass: their sum counts as the frame's GPU time.
+    pub fn add_gpu_parts(&mut self, parts: crate::gpu_timer::Parts) {
+        for (a, p) in self.gpu_parts_acc.iter_mut().zip(parts) {
+            *a += p;
+        }
+        self.add_gpu_sample(parts.iter().sum());
     }
 
     /// `cpu` = time this frame spent on the CPU (excluding waiting for the display).
@@ -117,7 +133,11 @@ impl Perf {
             self.cpu_frame_ms = self.cpu_acc_ms / self.frames as f32;
             if self.gpu_samples > 0 {
                 self.gpu_ms = Some(self.gpu_acc_ms / self.gpu_samples as f32);
+                if self.gpu_parts_acc.iter().any(|&p| p > 0.0) {
+                    self.gpu_parts = Some(self.gpu_parts_acc.map(|p| p / self.gpu_samples as f32));
+                }
             }
+            self.gpu_parts_acc = [0.0; crate::gpu_timer::SLOTS];
             self.frames = 0;
             self.cpu_acc_ms = 0.0;
             self.gpu_acc_ms = 0.0;

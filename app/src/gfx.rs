@@ -119,12 +119,14 @@ pub struct RenderOptions {
     pub shaders: shadows::Quality,
     /// Show the shadow maps (with the stats overlay), to see what the GPU drew.
     pub shadow_debug: bool,
+    /// The share of the screen's resolution to draw the world at (`None`: automatic).
+    pub render_scale: Option<f32>,
     /// A character to draw over the HUD's first `.1` vertices (the inventory's equipment
     /// tab): where he stands; his triangles as given to `set_portrait`.
     pub figure: Option<(crate::ui::Showcase, usize)>,
 }
 
-/// `Globals::light.w`: the radius of the 4 soft-edge taps, in texels.
+/// `Globals::light.w`: over 1 for the wider (3x3 tent) shadow filter, else the 2x2 one.
 fn shadow_softness(q: shadows::Quality) -> f32 {
     match q {
         shadows::Quality::Fancy => 1.6,
@@ -606,6 +608,178 @@ fn cloud_pipeline(
     })
 }
 
+/// The world drawn below the screen's resolution (see the Resolution setting): an image of its
+/// own, scaled up onto the screen (sharpened a little) under the HUD, which stays sharp.
+struct SceneTarget {
+    view: wgpu::TextureView,
+    bind: wgpu::BindGroup,
+    w: u32,
+    h: u32,
+}
+
+/// The pass that scales `SceneTarget` up onto the screen.
+struct Upscale {
+    pipe: wgpu::RenderPipeline,
+    layout: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
+}
+
+const UPSCALE_WGSL: &str = r#"
+@group(0) @binding(0) var scene: texture_2d<f32>;
+@group(0) @binding(1) var samp: sampler;
+@group(0) @binding(2) var<uniform> u: vec4<f32>; // x: sharpening, zw: one texel of the scene
+
+struct V { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
+
+@vertex fn vs(@builtin(vertex_index) i: u32) -> V {
+    let p = vec2<f32>(f32((i << 1u) & 2u), f32(i & 2u));
+    var o: V;
+    o.pos = vec4<f32>(p * 2.0 - 1.0, 0.0, 1.0);
+    o.uv = vec2<f32>(p.x, 1.0 - p.y);
+    return o;
+}
+
+// Bilinear, then a light sharpening that can't overshoot what is around (clamped to the
+// neighbours, as AMD's contrast-adaptive sharpening does): the upscale's softness goes, no halos.
+@fragment fn fs(v: V) -> @location(0) vec4<f32> {
+    let c = textureSampleLevel(scene, samp, v.uv, 0.0).rgb;
+    let a = textureSampleLevel(scene, samp, v.uv + vec2<f32>(u.z, 0.0), 0.0).rgb;
+    let b = textureSampleLevel(scene, samp, v.uv - vec2<f32>(u.z, 0.0), 0.0).rgb;
+    let d = textureSampleLevel(scene, samp, v.uv + vec2<f32>(0.0, u.w), 0.0).rgb;
+    let e = textureSampleLevel(scene, samp, v.uv - vec2<f32>(0.0, u.w), 0.0).rgb;
+    let lo = min(c, min(min(a, b), min(d, e)));
+    let hi = max(c, max(max(a, b), max(d, e)));
+    let sharp = c + (c * 4.0 - (a + b + d + e)) * (u.x * 0.25);
+    return vec4<f32>(clamp(sharp, lo, hi), 1.0);
+}
+"#;
+
+impl Upscale {
+    fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Upscale {
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("upscale"), source: wgpu::ShaderSource::Wgsl(UPSCALE_WGSL.into()) });
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("upscale"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry { binding: 1, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering), count: None },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
+                    count: None,
+                },
+            ],
+        });
+        let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("upscale"), bind_group_layouts: &[&layout], push_constant_ranges: &[] });
+        let pipe = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("upscale"),
+            layout: Some(&pl),
+            vertex: wgpu::VertexState { module: &shader, entry_point: "vs", compilation_options: Default::default(), buffers: &[] },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: "fs",
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState { format, blend: None, write_mask: wgpu::ColorWrites::ALL })],
+            }),
+            primitive: Default::default(),
+            // The HUD drawn after it in the same pass is depth-tested against nothing.
+            depth_stencil: None,
+            multisample: Default::default(),
+            multiview: None,
+            cache: None,
+        });
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("upscale"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        Upscale { pipe, layout, sampler }
+    }
+
+    fn target(&self, device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::TextureFormat, w: u32, h: u32, scale: f32) -> SceneTarget {
+        let tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("scene"),
+            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+        // More sharpening the further below full resolution.
+        let sharpen = (0.35 + (1.0 - scale) * 1.2).min(0.8);
+        let uniform = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("upscale"),
+            size: 16,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(&uniform, 0, as_bytes(&[sharpen, 0.0, 1.0 / w as f32, 1.0 / h as f32]));
+        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("upscale"),
+            layout: &self.layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                wgpu::BindGroupEntry { binding: 2, resource: uniform.as_entire_binding() },
+            ],
+        });
+        SceneTarget { view, bind, w, h }
+    }
+}
+
+/// Automatic resolution: from the GPU's time for the world pass, lowers the scale while it
+/// takes too long for 60 frames a second, and raises it again once there is room.
+struct AutoScale {
+    scale: f32,
+    /// The world pass's GPU time, smoothed (ms).
+    avg: f32,
+    changed: Instant,
+}
+
+impl AutoScale {
+    const MIN: f32 = 0.6;
+    /// Over this (ms) the world pass leaves too little of a 60 Hz frame for the rest.
+    const HIGH: f32 = 12.5;
+    /// Raised only if the time at the higher scale would stay under this.
+    const ROOM: f32 = 10.5;
+
+    fn new() -> AutoScale {
+        AutoScale { scale: 1.0, avg: 0.0, changed: Instant::now() }
+    }
+
+    fn sample(&mut self, ms: f32) {
+        self.avg = if self.avg == 0.0 { ms } else { self.avg + (ms - self.avg) * 0.08 };
+        if self.changed.elapsed().as_secs_f32() < 0.8 {
+            return;
+        }
+        let next = if self.avg > Self::HIGH {
+            (self.scale - if self.avg > Self::HIGH * 1.3 { 0.1 } else { 0.05 }).max(Self::MIN)
+        } else {
+            let up = (self.scale + 0.05).min(1.0);
+            // The time grows with the pixels drawn: the square of the scale.
+            if self.avg * (up / self.scale).powi(2) < Self::ROOM { up } else { self.scale }
+        };
+        if (next - self.scale).abs() > 0.001 {
+            self.avg *= (next / self.scale).powi(2);
+            self.scale = next;
+            self.changed = Instant::now();
+        }
+    }
+}
+
 fn make_depth(device: &wgpu::Device, w: u32, h: u32) -> wgpu::TextureView {
     let tex = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("depth"),
@@ -651,6 +825,15 @@ pub struct Gfx {
     /// Immediate or Mailbox if the surface offers one: used when VSYNC is turned off.
     uncapped_mode: Option<wgpu::PresentMode>,
     post: PostTargets,
+    /// For passes drawn at the screen's full size over the world (the inventory's figure,
+    /// the title screen): `post` follows the world's resolution.
+    screen_depth: wgpu::TextureView,
+    upscale: Upscale,
+    /// Where the world is drawn while below full resolution (None: straight to the screen).
+    scene: Option<SceneTarget>,
+    /// The scale the world is drawn at now, and the automatic one.
+    scale_now: f32,
+    scale_auto: AutoScale,
     post_layouts: (wgpu::BindGroupLayout, wgpu::BindGroupLayout),
     pipe_cloud: wgpu::RenderPipeline,
     pipe_mask: wgpu::RenderPipeline,
@@ -783,6 +966,8 @@ impl Gfx {
         surface.configure(&device, &config);
         let post_layouts = post_layouts(&device);
         let post = post_targets(&device, &post_layouts, config.width, config.height);
+        let screen_depth = make_depth(&device, config.width, config.height);
+        let upscale = Upscale::new(&device, config.format);
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("blockforge shader"),
@@ -1030,6 +1215,11 @@ impl Gfx {
             config,
             uncapped_mode,
             post,
+            screen_depth,
+            upscale,
+            scene: None,
+            scale_now: 1.0,
+            scale_auto: AutoScale::new(),
             post_layouts,
             pipe_cloud,
             pipe_mask,
@@ -1177,8 +1367,39 @@ impl Gfx {
     }
 
     /// Newest GPU frame time in ms, if the device supports timing and a result arrived.
-    pub fn take_gpu_ms(&mut self) -> Option<f32> {
-        self.timer.as_mut().and_then(|t| t.take())
+    /// The newest GPU times per pass (see `gpu_timer::Parts`), if new ones arrived.
+    pub fn take_gpu_parts(&mut self) -> Option<crate::gpu_timer::Parts> {
+        let parts = self.timer.as_mut().and_then(|t| t.take());
+        if let Some(p) = parts {
+            // The world pass is what the resolution scales.
+            if p[crate::gpu_timer::WORLD] > 0.0 {
+                self.scale_auto.sample(p[crate::gpu_timer::WORLD]);
+            }
+        }
+        parts
+    }
+
+    /// The world's resolution for the stats: "RES 80% AUTO".
+    pub fn resolution_line(&self, auto: bool) -> String {
+        format!("RES {:.0}%{} {}x{}", self.scale_now * 100.0, if auto { " AUTO" } else { "" }, self.scene.as_ref().map_or(self.config.width, |s| s.w), self.scene.as_ref().map_or(self.config.height, |s| s.h))
+    }
+
+    /// Draws the world at `scale` of the screen's resolution from now on (to the nearest 5%).
+    fn apply_scale(&mut self, scale: f32) {
+        let s = ((scale.clamp(0.5, 1.0) * 20.0).round() / 20.0).min(1.0);
+        if (s - self.scale_now).abs() < 0.01 && (s >= 0.999) == self.scene.is_none() {
+            return;
+        }
+        self.scale_now = s;
+        let (cw, ch) = (self.config.width, self.config.height);
+        if s >= 0.999 {
+            self.scene = None;
+            self.post = post_targets(&self.device, &self.post_layouts, cw, ch);
+        } else {
+            let (w, h) = (((cw as f32 * s).round() as u32).max(1), ((ch as f32 * s).round() as u32).max(1));
+            self.scene = Some(self.upscale.target(&self.device, &self.queue, self.config.format, w, h, s));
+            self.post = post_targets(&self.device, &self.post_layouts, w, h);
+        }
     }
 
     fn write_ui_screen(&self) {
@@ -1269,6 +1490,10 @@ impl Gfx {
         self.config.height = h;
         self.surface.configure(&self.device, &self.config);
         self.post = post_targets(&self.device, &self.post_layouts, w, h);
+        self.screen_depth = make_depth(&self.device, w, h);
+        // Made again at the new size on the next frame.
+        self.scene = None;
+        self.scale_now = 1.0;
     }
 
     /// `parts` back to back in the vertex pool (8-byte vertices, 4 per quad).
@@ -1383,6 +1608,8 @@ impl Gfx {
     ) -> Result<Duration, wgpu::SurfaceError> {
         self.apply_vsync(opts.vsync);
         self.sync_meshes(client);
+        self.apply_scale(opts.render_scale.unwrap_or(self.scale_auto.scale));
+        let (scene_w, scene_h) = self.scene.as_ref().map_or((self.config.width, self.config.height), |s| (s.w, s.h));
 
         let aspect = self.config.width as f32 / self.config.height as f32;
         let fwd = cam.forward();
@@ -1507,7 +1734,7 @@ impl Gfx {
             view_proj: vp,
             cam_pos: [cam.pos[0], cam.pos[1], cam.pos[2], 1.0],
             fog_params: [opts.fog_start, opts.fog_end.max(opts.fog_start + 1.0), 1.0, aspect],
-            screen: [self.config.width as f32, self.config.height as f32, 0.0, 0.0],
+            screen: [scene_w as f32, scene_h as f32, 0.0, 0.0],
             // x: fog on, y: seconds (animated water), z: the water texture's layer,
             // w: which tint map levels are ready (bits).
             flags: [if opts.fog { 1.0 } else { 0.0 }, time, self.water_layer as f32, tint_ready as f32],
@@ -1521,8 +1748,7 @@ impl Gfx {
             rays: rays.unwrap_or([0.0; 4]),
             shadow_mat,
             shadow: shadow_u,
-            // w: soft-edge radius in texels (Fancy wider), negative where the GPU filters the
-            // maps itself (its 2x2 filter then does Lite's softening alone).
+            // w: which shadow filter (see `shadow_softness`).
             light: [light_dir[0], light_dir[1], light_dir[2], shadow_softness(opts.shaders)],
             light_color: [light_col[0], light_col[1], light_col[2], if look_on { 1.0 } else { 0.0 }],
             look: if look_on { [1.0, 1.0, 1.0, 1.0] } else { [0.0; 4] },
@@ -1586,14 +1812,15 @@ impl Gfx {
                 }
             }
             let character = (self.char_verts > 0).then(|| (self.char_buf.slice(..), self.char_verts));
-            self.shadows.draw(&self.queue, &mut encoder, &self.index_buf, job, &casters, character);
+            let ts = self.timer.as_ref().map(|t| t.pass_writes(if job.cascade == 0 { crate::gpu_timer::SHADOW_NEAR } else { crate::gpu_timer::SHADOW_FAR }));
+            self.shadows.draw(&self.queue, &mut encoder, &self.index_buf, job, &casters, character, ts);
         }
         let mut quads = 0u64;
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("main pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
+                    view: self.scene.as_ref().map_or(&view, |s| &s.view),
                     resolve_target: None,
                     ops: wgpu::Operations {
                         // Every pixel gets terrain or sky; clearing is just the cheapest start.
@@ -1610,7 +1837,7 @@ impl Gfx {
                     }),
                     stencil_ops: None,
                 }),
-                timestamp_writes: self.timer.as_ref().map(|t| t.pass_writes()),
+                timestamp_writes: self.timer.as_ref().map(|t| t.pass_writes(crate::gpu_timer::WORLD)),
                 occlusion_query_set: None,
             });
 
@@ -1683,8 +1910,9 @@ impl Gfx {
                 pass.draw(0..3, 0..1);
             }
 
-            // HUD (crosshair, stats, menu)
-            if hud_under > 0 {
+            // HUD (crosshair, stats, menu), here when the world is drawn at full resolution
+            // (else over the scaled-up world, below).
+            if hud_under > 0 && self.scene.is_none() {
                 pass.set_pipeline(&self.ui.pipe);
                 pass.set_bind_group(0, &self.ui.bind, &[]);
                 pass.set_vertex_buffer(0, self.hud_buf.slice(0..(hud_verts * std::mem::size_of::<HudVertex>()) as u64));
@@ -1710,6 +1938,30 @@ impl Gfx {
             pass.set_bind_group(1, &self.post.bind_mask, &[]);
             pass.draw(0..3, 0..1);
         }
+        // The world scaled up onto the screen, the HUD over it at full resolution.
+        if let Some(sc) = &self.scene {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("upscale"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    // Every pixel is drawn over: clearing is just the cheapest start.
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: self.timer.as_ref().map(|t| t.pass_writes(crate::gpu_timer::UPSCALE)),
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&self.upscale.pipe);
+            pass.set_bind_group(0, &sc.bind, &[]);
+            pass.draw(0..3, 0..1);
+            if hud_under > 0 {
+                pass.set_pipeline(&self.ui.pipe_flat);
+                pass.set_bind_group(0, &self.ui.bind, &[]);
+                pass.set_vertex_buffer(0, self.hud_buf.slice(0..(hud_verts * std::mem::size_of::<HudVertex>()) as u64));
+                pass.draw(0..hud_under as u32, 0..1);
+            }
+        }
         // (after the ray mask, which reads this frame's depth)
         if figure.is_some() {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -1720,7 +1972,7 @@ impl Gfx {
                     ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
                 })],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.post.depth_view,
+                    view: &self.screen_depth,
                     depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(math::DEPTH_CLEAR), store: wgpu::StoreOp::Discard }),
                     stencil_ops: None,
                 }),
@@ -1801,7 +2053,7 @@ impl Gfx {
                     ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
                 })],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.post.depth_view,
+                    view: &self.screen_depth,
                     depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(math::DEPTH_CLEAR), store: wgpu::StoreOp::Discard }),
                     stencil_ops: None,
                 }),
@@ -2144,6 +2396,7 @@ pub fn thumb_uv(slot: usize) -> [f32; 4] {
 
 struct UiGpu {
     pipe: wgpu::RenderPipeline,
+    pipe_flat: wgpu::RenderPipeline,
     bind: wgpu::BindGroup,
     uniform: wgpu::Buffer,
     thumbs: wgpu::Texture,
@@ -2282,7 +2535,9 @@ fn ui_pipeline(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::Texture
         label: Some("ui shader"),
         source: wgpu::ShaderSource::Wgsl(include_str!("ui.wgsl").into()),
     });
-    let pipe = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+    // With depth state for passes that have a depth buffer; `flat` for the upscale pass, which
+    // has none.
+    let make = |with_depth: bool| device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("ui"),
         layout: Some(&layout),
         vertex: wgpu::VertexState {
@@ -2303,7 +2558,7 @@ fn ui_pipeline(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::Texture
         }),
         primitive: wgpu::PrimitiveState::default(),
         // The passes have a depth attachment, so every pipeline in them declares depth state.
-        depth_stencil: Some(wgpu::DepthStencilState {
+        depth_stencil: with_depth.then(|| wgpu::DepthStencilState {
             format: DEPTH_FORMAT,
             depth_write_enabled: false,
             depth_compare: wgpu::CompareFunction::Always,
@@ -2314,12 +2569,47 @@ fn ui_pipeline(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::Texture
         multiview: None,
         cache: None,
     });
-    UiGpu { pipe, bind, uniform, thumbs }
+    let (pipe, pipe_flat) = (make(true), make(false));
+    UiGpu { pipe, pipe_flat, bind, uniform, thumbs }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auto_resolution_drops_while_the_gpu_is_slow_and_comes_back_with_room() {
+        let mut a = AutoScale::new();
+        let ago = || Instant::now() - Duration::from_secs(2);
+        // 20 ms at full resolution: down to where it fits (75%: 11.25 ms).
+        for _ in 0..20 {
+            a.changed = ago();
+            a.sample(20.0 * a.scale * a.scale);
+        }
+        assert!((a.scale - 0.75).abs() < 1e-4, "{}", a.scale);
+        // 40 ms: down to the floor.
+        for _ in 0..20 {
+            a.changed = ago();
+            a.sample(40.0 * a.scale * a.scale);
+        }
+        assert!((a.scale - AutoScale::MIN).abs() < 1e-4, "{}", a.scale);
+        // Light work: back up to full resolution.
+        for _ in 0..40 {
+            a.changed = ago();
+            a.sample(6.0 * a.scale * a.scale);
+        }
+        assert!((a.scale - 1.0).abs() < 1e-4, "{}", a.scale);
+        // In between (14 ms at full): settles where the time fits, without flapping.
+        let mut seen = Vec::new();
+        for _ in 0..150 {
+            a.changed = ago();
+            a.sample(14.0 * a.scale * a.scale);
+            seen.push(a.scale);
+        }
+        let last = &seen[100..];
+        assert!(last.iter().all(|&s| (s - last[0]).abs() < 1e-4), "{last:?}");
+        assert!(14.0 * last[0] * last[0] <= AutoScale::HIGH, "{}", last[0]);
+    }
 
     #[test]
     fn the_title_character_lands_where_the_menu_puts_him() {

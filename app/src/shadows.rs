@@ -396,6 +396,7 @@ impl Shadows {
         job: &Job,
         chunks: &[([f32; 4], wgpu::BufferSlice<'_>, u32)],
         character: Option<(wgpu::BufferSlice<'_>, u32)>,
+        timestamps: Option<wgpu::RenderPassTimestampWrites<'_>>,
     ) {
         let n = chunks.len().min(self.max_instances);
         let frame = self.frame;
@@ -429,7 +430,7 @@ impl Shadows {
                     depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Discard }),
                     stencil_ops: None,
                 }),
-                timestamp_writes: None,
+                timestamp_writes: timestamps,
                 occlusion_query_set: None,
             });
             pass.set_bind_group(0, &c.bind, &[]);

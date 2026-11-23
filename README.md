@@ -693,6 +693,21 @@ point, `worldgen.rs` turns that into blocks, `flora.rs` grows trees and rocks on
 * The block texture array never has a multiple of six layers (`gfx::array_layers`): on OpenGL
   ES, wgpu would make it a cube map and every block would show the wrong texture.
 
+## Resolution and GPU timing (`app/src/gfx.rs`, `app/src/gpu_timer.rs`)
+
+Phone screens have far more pixels than a phone GPU likes to shade (2340x1080 on many),
+and filling them is the usual bottleneck. Settings > Video > Resolution draws the world at
+a share of the screen's resolution: Auto (the default), 100% or 90% down to 50%. Below 100%
+the world goes to an image of its own, which a last pass scales up onto the screen with a
+light sharpening clamped to the neighbouring pixels (no halos); the HUD is drawn over it at
+full resolution, so text stays sharp. Auto watches the GPU's time for the world: over 12.5 ms
+(too much of a 60 Hz frame) it steps down 5% (10% when far over), never below 60%; it steps
+back up once the time at the higher resolution would stay under 10.5 ms, at most every 0.8 s.
+
+With the stats overlay on, the GPU line is split by pass (shadow maps, world, upscale) and a
+RES line shows the resolution in use. The timestamps come from `TIMESTAMP_QUERY`, where the
+GPU has it.
+
 ## Shadows and the shader look (`app/src/shadows.rs`, the shader)
 
 Settings > Video > Shaders: Off, Lite (the default) or Fancy, like a Minecraft shader pack
@@ -704,8 +719,9 @@ but built in, and cheap enough for a phone.
   has changed. Each keeps the matrix it was drawn with, so a stale map is still right where it
   covers. The squares snap to whole texels (no crawling edges), only solid terrain with some
   sky-lit face casts (underground chunks can't shadow anything the sun reaches), faces turned
-  from the sun and caves skip the lookup, and edges are softened by 4 rotated taps. The maps
-  are plain float images read texel by texel (no depth textures, comparison samplers or
+  from the sun and caves skip the lookup, and edges are smoothed by filtering done in the
+  shader (Lite: bilinear over 2x2 texels; Fancy: a 3x3 tent over 4x4), with no noise, so they
+  hold still as the camera moves. The maps are plain float images read texel by texel (no depth textures, comparison samplers or
   hardware depth bias, which some phone GPUs get wrong); with the stats overlay on they are
   shown in the corner. The moon casts them at night. The character casts and receives them.
 * **Fake global illumination**: sunlit ground bounces light, coloured like the biome's ground,

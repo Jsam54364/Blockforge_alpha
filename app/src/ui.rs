@@ -102,6 +102,18 @@ impl CullMode {
     }
 }
 
+/// The Resolution setting's choices: the share of the screen's pixels the world is drawn at
+/// (`None`: Auto). The HUD is always sharp.
+pub const RESOLUTIONS: [Option<f32>; 7] = [None, Some(1.0), Some(0.9), Some(0.8), Some(0.7), Some(0.6), Some(0.5)];
+
+/// The Resolution setting's name for choice `i`.
+pub fn resolution_label(i: u8) -> String {
+    match RESOLUTIONS.get(i as usize).copied().flatten() {
+        None => "Auto".into(),
+        Some(f) => format!("{:.0}%", f * 100.0),
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Settings {
     /// Chunks streamed and drawn around the player.
@@ -121,6 +133,9 @@ pub struct Settings {
     pub god_rays: bool,
     /// Shadows and the shader-pack look: 0 off, 1 Lite, 2 Fancy (`shadows::Quality`).
     pub shaders: u8,
+    /// How much of the screen's resolution the world is drawn at: an index into
+    /// `RESOLUTIONS` (0: Auto, which lowers it only while the GPU can't keep up).
+    pub resolution: u8,
     /// Walking as the character (true) or the free-flying camera.
     pub walk: bool,
     /// Where the camera is while walking.
@@ -193,6 +208,7 @@ impl Default for Settings {
             clouds: true,
             god_rays: true,
             shaders: 1,
+            resolution: 0,
             walk: true,
             view: CamView::Back,
             hud_opacity: 85,
@@ -208,7 +224,7 @@ impl Settings {
     /// `key=value` lines, one per setting, for the settings file kept between launches.
     pub fn to_text(&self) -> String {
         format!(
-            "render_chunks={}\nlod_level={}\nlod_quality={}\nfog={}\ncull={}\nvsync={}\ngreedy={}\nshow_stats={}\nclouds={}\ngod_rays={}\nshaders={}\nwalk={}\nview={}\nhud_opacity={}\nlook_speed={}\njoy_size={}\ntouch_build={}\none_stance={}\n",
+            "render_chunks={}\nlod_level={}\nlod_quality={}\nfog={}\ncull={}\nvsync={}\ngreedy={}\nshow_stats={}\nclouds={}\ngod_rays={}\nshaders={}\nresolution={}\nwalk={}\nview={}\nhud_opacity={}\nlook_speed={}\njoy_size={}\ntouch_build={}\none_stance={}\n",
             self.render_chunks,
             self.lod_level,
             self.lod_quality,
@@ -220,6 +236,7 @@ impl Settings {
             self.clouds,
             self.god_rays,
             self.shaders,
+            self.resolution,
             self.walk,
             self.view.key(),
             self.hud_opacity,
@@ -271,6 +288,11 @@ impl Settings {
                 "shaders" => {
                     if let Ok(v) = value.parse::<u8>() {
                         self.shaders = v.min(2);
+                    }
+                }
+                "resolution" => {
+                    if let Ok(v) = value.parse::<u8>() {
+                        self.resolution = v.min(RESOLUTIONS.len() as u8 - 1);
                     }
                 }
                 "lod_quality" => {
@@ -352,6 +374,7 @@ pub enum Action {
     ToggleClouds,
     ToggleRays,
     CycleShaders,
+    CycleResolution,
     /// Walk as the character, or fly the camera.
     ToggleWalk,
     /// Third person or first person.
@@ -643,6 +666,10 @@ pub fn stats_lines(perf: &Perf) -> Vec<String> {
         Some(g) => v.push(format!("GPU {:.1}MS  ({:.0}%)", g, (g * perf.fps / 10.0).min(999.0))),
         None => v.push("GPU N/A".to_string()),
     }
+    if let Some(p) = perf.gpu_parts {
+        use crate::gpu_timer::{SHADOW_FAR, SHADOW_NEAR, UPSCALE, WORLD};
+        v.push(format!("  SHADOW {:.1} WORLD {:.1} UPSCALE {:.1}", p[SHADOW_NEAR] + p[SHADOW_FAR], p[WORLD], p[UPSCALE]));
+    }
     if let Some(m) = perf.mem_mb {
         v.push(format!("MEM {:.0}MB", m));
     }
@@ -655,6 +682,9 @@ pub fn stats_lines(perf: &Perf) -> Vec<String> {
         v.push(format!("LOD BUILDING {}", perf.lod_pending));
     }
     v.push(format!("PRESENT {}", perf.present_mode));
+    if !perf.res.is_empty() {
+        v.push(perf.res.clone());
+    }
     if !perf.gpu.is_empty() {
         v.push(perf.gpu.clone());
     }
@@ -1153,6 +1183,11 @@ impl Ui {
             Action::CycleShaders => {
                 let s = self.edited();
                 s.shaders = (s.shaders + 1) % 3;
+                false
+            }
+            Action::CycleResolution => {
+                let s = self.edited();
+                s.resolution = (s.resolution + 1) % RESOLUTIONS.len() as u8;
                 false
             }
             Action::ToggleWalk => {

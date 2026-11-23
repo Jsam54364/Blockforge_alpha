@@ -518,17 +518,51 @@ fn water_shade(world: vec3<f32>, face: u32, light: vec3<f32>, shore: f32) -> vec
 }
 
 // ---- Shadows ----
-fn shadow_tap(far: bool, uv: vec2<f32>, z: f32) -> f32 {
-    // The exact texel (no sampler, no hardware comparison): lit if nothing nearer the light.
-    let size = i32(g.shadow.w);
-    let t = clamp(vec2<i32>(floor(uv * g.shadow.w)), vec2<i32>(0), vec2<i32>(size - 1));
+// One texel of a map (clamped to its edge): 1 if `z` is no deeper than what it holds (lit).
+fn shadow_texel(far: bool, t: vec2<i32>, z: f32) -> f32 {
+    let n = i32(g.shadow.w) - 1;
+    let c = clamp(t, vec2<i32>(0), vec2<i32>(n));
     var d = 0.0;
     if (far) {
-        d = textureLoad(shadow_far, t, 0).r;
+        d = textureLoad(shadow_far, c, 0).r;
     } else {
-        d = textureLoad(shadow_near, t, 0).r;
+        d = textureLoad(shadow_near, c, 0).r;
     }
     return select(0.0, 1.0, z <= d);
+}
+
+// Percentage-closer filtering done by hand (the maps are plain float images, read exactly):
+// the comparisons of nearby texels blended by where the point falls between them. No noise,
+// so edges are smooth and hold still as the camera moves.
+//   * Lite: the 2x2 texels around the point, bilinear (4 reads);
+//   * Fancy: a 3x3 tent of bilinear lookups, from the 4x4 texels around it (16 reads).
+fn shadow_pcf(far: bool, uv: vec2<f32>, z: f32, soft: bool) -> f32 {
+    let pos = uv * g.shadow.w - 0.5;
+    let base = vec2<i32>(floor(pos));
+    let f = pos - floor(pos);
+    if (!soft) {
+        let a = shadow_texel(far, base, z);
+        let b = shadow_texel(far, base + vec2<i32>(1, 0), z);
+        let c = shadow_texel(far, base + vec2<i32>(0, 1), z);
+        let d = shadow_texel(far, base + vec2<i32>(1, 1), z);
+        return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+    }
+    // A tent 1.5 texels wide on each axis over texels -1..2 around `base` (their centres sit
+    // at -1-f .. 2-f from the point), normalised.
+    let k = vec4<f32>(-1.0, 0.0, 1.0, 2.0);
+    let tx = max(vec4<f32>(0.0), vec4<f32>(1.5) - abs(k - f.x));
+    let ty = max(vec4<f32>(0.0), vec4<f32>(1.5) - abs(k - f.y));
+    let mx = tx / dot(tx, vec4<f32>(1.0));
+    let my = ty / dot(ty, vec4<f32>(1.0));
+    var s = 0.0;
+    for (var j = 0; j < 4; j++) {
+        var row = 0.0;
+        for (var i = 0; i < 4; i++) {
+            row += mx[i] * shadow_texel(far, base + vec2<i32>(i - 1, j - 1), z);
+        }
+        s += my[j] * row;
+    }
+    return s;
 }
 
 // How much of the light reaches a point (1 lit .. 0 in shadow). `px` is the pixel, for noise.
@@ -561,17 +595,7 @@ fn shadow_at(world: vec3<f32>, n: vec3<f32>, px: vec2<f32>) -> f32 {
         return 1.0;
     }
     let uv = p.xy * vec2<f32>(0.5, -0.5) + 0.5;
-    var s = 0.0;
-    {
-        // Four taps on a circle turned a different way at every pixel: soft, grainy edges
-        // instead of a blocky staircase, for four lookups.
-        let a = noise * 6.2831853;
-        let r = g.light.w / size;
-        let d0 = vec2<f32>(cos(a), sin(a)) * r;
-        let d1 = vec2<f32>(-d0.y, d0.x) * 0.6;
-        s = (shadow_tap(far, uv + d0, p.z) + shadow_tap(far, uv - d0, p.z)
-            + shadow_tap(far, uv + d1, p.z) + shadow_tap(far, uv - d1, p.z)) * 0.25;
-    }
+    var s = shadow_pcf(far, uv, p.z, g.light.w > 1.0);
     if (far) {
         s = mix(s, 1.0, smoothstep(0.85, 1.0, edge));
     }
