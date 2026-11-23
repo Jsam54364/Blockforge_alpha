@@ -150,8 +150,6 @@ struct Relief {
     dry: f32,
     /// How much cliff terraces raise the land here (faded out in river valleys).
     terrace: f32,
-    /// The rolling ground without small detail or cliffs: river water never stands above it.
-    low: f32,
 }
 
 pub struct Land {
@@ -267,8 +265,7 @@ impl Land {
         let k = smoothstep(-0.03, 0.03, c);
         let height = lerp(ocean, land + sea_cliff, k);
         let smooth = lerp(ocean, base + 0.25 * peaks, k);
-        let low = lerp(ocean, base + swell + 0.25 * peaks, k);
-        Relief { height, smooth, continent: c, inland, mountains, flat, cliffs, floor: lerp(ocean, base, k), t_sea, h_raw, dry, terrace: steps * cliffs * k, low }
+        Relief { height, smooth, continent: c, inland, mountains, flat, cliffs, floor: lerp(ocean, base, k), t_sea, h_raw, dry, terrace: steps * cliffs * k }
     }
 
     /// The land at `(x, z)`, band-limited for terrain drawn in cells `cell` blocks wide

@@ -117,18 +117,18 @@ pub struct RenderOptions {
     pub god_rays: bool,
     /// Shadows and the rest of the shader-pack look.
     pub shaders: shadows::Quality,
+    /// Show the shadow maps (with the stats overlay), to see what the GPU drew.
+    pub shadow_debug: bool,
     /// A character to draw over the HUD's first `.1` vertices (the inventory's equipment
     /// tab): where he stands; his triangles as given to `set_portrait`.
     pub figure: Option<(crate::ui::Showcase, usize)>,
 }
 
-/// `Globals::light.w`: the radius of the 4 soft-edge taps, in texels. 0 = one lookup (Lite
-/// on a GPU that filters the maps: its 2x2 filter is enough).
-fn shadow_softness(q: shadows::Quality, filtered: bool) -> f32 {
-    match (q, filtered) {
-        (shadows::Quality::Fancy, _) => 1.6,
-        (_, true) => 0.0,
-        (_, false) => 0.9,
+/// `Globals::light.w`: the radius of the 4 soft-edge taps, in texels.
+fn shadow_softness(q: shadows::Quality) -> f32 {
+    match q {
+        shadows::Quality::Fancy => 1.6,
+        _ => 0.9,
     }
 }
 
@@ -713,6 +713,7 @@ pub struct Gfx {
     sky: Sky,
     /// Shadow maps (see `shadows`), and which texture layers are foliage.
     shadows: Shadows,
+    shadow_debug: shadows::DebugView,
     foliage: [[u32; 4]; 32],
     /// The GPU, its API and shadow sampling, for the performance overlay.
     gpu_line: String,
@@ -735,10 +736,9 @@ impl Gfx {
             .ok_or("no suitable GPU adapter found")?;
         let info = adapter.get_info();
         let gpu_line = format!(
-            "GPU {} {:?} SHADOWS {}",
+            "GPU {} {:?} SHADOWS R32F",
             info.name.to_uppercase(),
             info.backend,
-            if Shadows::filterable(&adapter) { "FILTERED" } else { "POINT" }
         )
         .to_uppercase();
         // GPU timing is optional: not every device supports timestamp queries.
@@ -790,7 +790,8 @@ impl Gfx {
         });
 
         let shadow_entries = Shadows::layout_entries();
-        let shadows = Shadows::new(&device, MAX_INSTANCES, std::mem::size_of::<rig::Vertex>() as u64, Shadows::filterable(&adapter));
+        let shadows = Shadows::new(&device, MAX_INSTANCES, std::mem::size_of::<rig::Vertex>() as u64);
+        let shadow_debug = shadows::DebugView::new(&device, &shadows, format);
         let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("globals layout"),
             entries: &[
@@ -864,7 +865,6 @@ impl Gfx {
                 },
                 shadow_entries[0],
                 shadow_entries[1],
-                shadow_entries[2],
             ],
         });
         let (tint_tex, tint_view, tint_sampler) = tint_texture(&device);
@@ -907,7 +907,6 @@ impl Gfx {
                     wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&night_view) },
                     sh[0].clone(),
                     sh[1].clone(),
-                    sh[2].clone(),
                 ],
             })
         };
@@ -1081,6 +1080,7 @@ impl Gfx {
             sky,
             foliage: shadows::foliage_mask(reg.texture_names(), texture_remap_ref.as_deref()),
             shadows,
+            shadow_debug,
             gpu_line,
         })
     }
@@ -1523,7 +1523,7 @@ impl Gfx {
             shadow: shadow_u,
             // w: soft-edge radius in texels (Fancy wider), negative where the GPU filters the
             // maps itself (its 2x2 filter then does Lite's softening alone).
-            light: [light_dir[0], light_dir[1], light_dir[2], shadow_softness(opts.shaders, self.shadows.filtered)],
+            light: [light_dir[0], light_dir[1], light_dir[2], shadow_softness(opts.shaders)],
             light_color: [light_col[0], light_col[1], light_col[2], if look_on { 1.0 } else { 0.0 }],
             look: if look_on { [1.0, 1.0, 1.0, 1.0] } else { [0.0; 4] },
             foliage: self.foliage,
@@ -1738,6 +1738,11 @@ impl Gfx {
                 pass.set_vertex_buffer(0, self.hud_buf.slice(0..(hud_verts * std::mem::size_of::<HudVertex>()) as u64));
                 pass.draw(hud_under as u32..hud_verts as u32, 0..1);
             }
+        }
+        if opts.shadow_debug && opts.shaders != shadows::Quality::Off {
+            let (w, h) = (self.config.width as f32, self.config.height as f32);
+            let side = (h * 0.22).round();
+            self.shadow_debug.draw(&mut encoder, &view, (w * 0.012).round(), (h * 0.64).round(), side);
         }
         if let Some(t) = self.timer.as_mut() {
             t.encode(&mut encoder);

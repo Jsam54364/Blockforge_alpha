@@ -18,13 +18,16 @@
 //!     camera moves;
 //!   * the fragment shader skips the lookup for faces turned away from the light (they get no
 //!     sunlight to take away) and in caves (no sky light);
-//!   * soft edges come from 4 rotated taps, plus the hardware's 2x2 comparison filter where
-//!     the GPU can filter this depth format (many phone GPUs can't: sampling it filtered
-//!     there gives garbage, so they look up single texels).
+//!   * soft edges come from 4 rotated taps of single texels;
+//!   * the maps are plain float colour images (the depth nearest the light), read texel by
+//!     texel and compared in the shader: no depth textures, comparison samplers or hardware
+//!     depth bias, which phone GPUs (Adreno) got wrong.
 
 use crate::math::{self, Mat4};
 
-pub const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
+pub const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R32Float;
+/// The depth buffer the maps are drawn with (only for drawing, never read).
+const DEPTH: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 /// Texels on a side of each map.
 pub const SIZE: u32 = 2048;
 /// Half the width of the near and far maps, in blocks.
@@ -37,7 +40,6 @@ const DEPTH_RANGE: f32 = 320.0;
 /// Bindings in the main shader's group 0.
 pub const BIND_NEAR: u32 = 8;
 pub const BIND_FAR: u32 = 9;
-pub const BIND_SAMPLER: u32 = 10;
 
 /// The "Shaders" setting: how much of the shader-pack look is on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -132,6 +134,8 @@ fn projection(center: [f32; 3], l: [f32; 3], half: f32) -> Mat4 {
 struct Cascade {
     half: f32,
     view: wgpu::TextureView,
+    /// The depth buffer it is drawn with.
+    depth: wgpu::TextureView,
     uniform: wgpu::Buffer,
     bind: wgpu::BindGroup,
     instances: wgpu::Buffer,
@@ -174,18 +178,14 @@ pub struct Shadows {
     cascades: [Cascade; 2],
     pipe_chunk: wgpu::RenderPipeline,
     pipe_char: wgpu::RenderPipeline,
-    pub sampler: wgpu::Sampler,
     frame: u64,
     /// Terrain changed since the far map was drawn.
     far_stale: bool,
     pub max_instances: usize,
-    /// The GPU filters comparisons on this depth format (free 2x2 soft edges).
-    pub filtered: bool,
 }
 
 impl Shadows {
-    /// `filtered`: whether the adapter can filter `FORMAT` (see `filterable`).
-    pub fn new(device: &wgpu::Device, max_instances: usize, char_stride: u64, filtered: bool) -> Shadows {
+    pub fn new(device: &wgpu::Device, max_instances: usize, char_stride: u64) -> Shadows {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("shadow shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shadow.wgsl").into()),
@@ -217,7 +217,12 @@ impl Shadows {
                     compilation_options: Default::default(),
                     buffers,
                 },
-                fragment: None,
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: "fs_depth",
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState { format: FORMAT, blend: None, write_mask: wgpu::ColorWrites::RED })],
+                }),
                 primitive: wgpu::PrimitiveState {
                     topology: wgpu::PrimitiveTopology::TriangleList,
                     // Both sides: a wall's back face casts as well as its front, and thin
@@ -226,7 +231,7 @@ impl Shadows {
                     ..Default::default()
                 },
                 depth_stencil: Some(wgpu::DepthStencilState {
-                    format: FORMAT,
+                    format: DEPTH,
                     depth_write_enabled: true,
                     depth_compare: wgpu::CompareFunction::Less,
                     stencil: Default::default(),
@@ -263,6 +268,16 @@ impl Shadows {
                 usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
                 view_formats: &[],
             });
+            let depth = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size: wgpu::Extent3d { width: SIZE, height: SIZE, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: DEPTH,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            });
             let uniform = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some(label),
                 size: 64,
@@ -283,6 +298,7 @@ impl Shadows {
             Cascade {
                 half,
                 view: tex.create_view(&wgpu::TextureViewDescriptor::default()),
+                depth: depth.create_view(&wgpu::TextureViewDescriptor::default()),
                 uniform,
                 bind,
                 instances,
@@ -292,63 +308,35 @@ impl Shadows {
                 drawn_frame: 0,
             }
         };
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("shadow compare"),
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
-            mag_filter: if filtered { wgpu::FilterMode::Linear } else { wgpu::FilterMode::Nearest },
-            min_filter: if filtered { wgpu::FilterMode::Linear } else { wgpu::FilterMode::Nearest },
-            compare: Some(wgpu::CompareFunction::LessEqual),
-            ..Default::default()
-        });
         Shadows {
             cascades: [cascade(NEAR_HALF, "shadow map near"), cascade(FAR_HALF, "shadow map far")],
             pipe_chunk,
             pipe_char,
-            sampler,
             frame: 0,
             far_stale: true,
             max_instances,
-            filtered,
         }
     }
 
-    /// Whether `adapter` can filter comparisons on the shadow maps' depth format.
-    pub fn filterable(adapter: &wgpu::Adapter) -> bool {
-        // (BLOCKFORGE_SHADOW_POINT=1 tests the unfiltered path on a GPU that could filter.)
-        std::env::var("BLOCKFORGE_SHADOW_POINT").map_or(true, |v| v != "1")
-            && adapter.get_texture_format_features(FORMAT).flags.contains(wgpu::TextureFormatFeatureFlags::FILTERABLE)
-    }
-
-    /// The main shader's entries for the maps and their sampler (group 0).
-    pub fn layout_entries() -> [wgpu::BindGroupLayoutEntry; 3] {
+    /// The main shader's entries for the maps (group 0).
+    pub fn layout_entries() -> [wgpu::BindGroupLayoutEntry; 2] {
         let map = |binding| wgpu::BindGroupLayoutEntry {
             binding,
             visibility: wgpu::ShaderStages::FRAGMENT,
             ty: wgpu::BindingType::Texture {
-                sample_type: wgpu::TextureSampleType::Depth,
+                sample_type: wgpu::TextureSampleType::Float { filterable: false },
                 view_dimension: wgpu::TextureViewDimension::D2,
                 multisampled: false,
             },
             count: None,
         };
-        [
-            map(BIND_NEAR),
-            map(BIND_FAR),
-            wgpu::BindGroupLayoutEntry {
-                binding: BIND_SAMPLER,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
-                count: None,
-            },
-        ]
+        [map(BIND_NEAR), map(BIND_FAR)]
     }
 
-    pub fn bind_entries(&self) -> [wgpu::BindGroupEntry<'_>; 3] {
+    pub fn bind_entries(&self) -> [wgpu::BindGroupEntry<'_>; 2] {
         [
             wgpu::BindGroupEntry { binding: BIND_NEAR, resource: wgpu::BindingResource::TextureView(&self.cascades[0].view) },
             wgpu::BindGroupEntry { binding: BIND_FAR, resource: wgpu::BindingResource::TextureView(&self.cascades[1].view) },
-            wgpu::BindGroupEntry { binding: BIND_SAMPLER, resource: wgpu::BindingResource::Sampler(&self.sampler) },
         ]
     }
 
@@ -430,10 +418,15 @@ impl Shadows {
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("shadow map"),
-                color_attachments: &[],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &c.view,
-                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }),
+                    resolve_target: None,
+                    // 1 = nothing in the way (the far end of the map).
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color { r: 1.0, g: 0.0, b: 0.0, a: 1.0 }), store: wgpu::StoreOp::Store },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &c.depth,
+                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Discard }),
                     stencil_ops: None,
                 }),
                 timestamp_writes: None,
@@ -466,6 +459,102 @@ impl Shadows {
         let ready = m(0).is_some() && m(1).is_some();
         let mats = [m(0).unwrap_or([0.0; 16]), m(1).unwrap_or([0.0; 16])];
         (mats, [NEAR_HALF, FAR_HALF, if ready { strength } else { 0.0 }, SIZE as f32])
+    }
+}
+
+/// A view of the two maps for the stats overlay: what the GPU actually drew, as contour
+/// bands of depth (red: nothing there). For diagnosing devices that draw shadows wrong.
+pub struct DebugView {
+    pipe: wgpu::RenderPipeline,
+    binds: [wgpu::BindGroup; 2],
+}
+
+impl DebugView {
+    pub fn new(device: &wgpu::Device, shadows: &Shadows, format: wgpu::TextureFormat) -> DebugView {
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("shadow debug"),
+            source: wgpu::ShaderSource::Wgsl(
+                r#"
+@group(0) @binding(0) var map: texture_2d<f32>;
+struct V { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
+@vertex fn vs(@builtin(vertex_index) i: u32) -> V {
+    let p = vec2<f32>(f32((i << 1u) & 2u), f32(i & 2u));
+    var o: V;
+    o.pos = vec4<f32>(p * 2.0 - 1.0, 0.0, 1.0);
+    o.uv = vec2<f32>(p.x, 1.0 - p.y);
+    return o;
+}
+@fragment fn fs(v: V) -> @location(0) vec4<f32> {
+    let n = i32(textureDimensions(map).x);
+    let t = clamp(vec2<i32>(v.uv * f32(n)), vec2<i32>(0), vec2<i32>(n - 1));
+    let d = textureLoad(map, t, 0).r;
+    if (d >= 0.99999) { return vec4<f32>(0.5, 0.1, 0.1, 1.0); }
+    let b = fract(d * 160.0);
+    return vec4<f32>(vec3<f32>(0.25 + 0.75 * b), 1.0);
+}
+"#
+                .into(),
+            ),
+        });
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("shadow debug"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            }],
+        });
+        let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("shadow debug"), bind_group_layouts: &[&layout], push_constant_ranges: &[] });
+        let pipe = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("shadow debug"),
+            layout: Some(&pl),
+            vertex: wgpu::VertexState { module: &shader, entry_point: "vs", compilation_options: Default::default(), buffers: &[] },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: "fs",
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState { format, blend: None, write_mask: wgpu::ColorWrites::ALL })],
+            }),
+            primitive: Default::default(),
+            depth_stencil: None,
+            multisample: Default::default(),
+            multiview: None,
+            cache: None,
+        });
+        let bind = |c: &Cascade| {
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("shadow debug"),
+                layout: &layout,
+                entries: &[wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&c.view) }],
+            })
+        };
+        DebugView { pipe, binds: [bind(&shadows.cascades[0]), bind(&shadows.cascades[1])] }
+    }
+
+    /// Draws the near and far maps side by side, `side` pixels each, from (x, y).
+    pub fn draw(&self, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView, x: f32, y: f32, side: f32) {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("shadow debug"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: target,
+                resolve_target: None,
+                ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+        pass.set_pipeline(&self.pipe);
+        for (i, b) in self.binds.iter().enumerate() {
+            pass.set_viewport(x + i as f32 * (side + 6.0), y, side, side, 0.0, 1.0);
+            pass.set_bind_group(0, b, &[]);
+            pass.draw(0..3, 0..1);
+        }
     }
 }
 

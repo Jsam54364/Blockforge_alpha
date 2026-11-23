@@ -281,6 +281,7 @@ impl App {
             clouds: settings.clouds,
             god_rays: settings.god_rays,
             shaders: shadows::Quality::from_index(settings.shaders),
+            shadow_debug: settings.show_stats,
             figure: None,
         }
     }

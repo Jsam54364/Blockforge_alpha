@@ -51,9 +51,8 @@ struct Globals {
 // The night sky photo: stars, Milky Way and moon (background taken out), the whole sphere.
 @group(0) @binding(7) var night_map: texture_2d<f32>;
 // Shadow maps (depth from the light) and their comparison sampler.
-@group(0) @binding(8) var shadow_near: texture_depth_2d;
-@group(0) @binding(9) var shadow_far: texture_depth_2d;
-@group(0) @binding(10) var shadow_cmp: sampler_comparison;
+@group(0) @binding(8) var shadow_near: texture_2d<f32>;
+@group(0) @binding(9) var shadow_far: texture_2d<f32>;
 
 struct VsIn {
     @location(0) packed: vec2<u32>,
@@ -520,17 +519,23 @@ fn water_shade(world: vec3<f32>, face: u32, light: vec3<f32>, shore: f32) -> vec
 
 // ---- Shadows ----
 fn shadow_tap(far: bool, uv: vec2<f32>, z: f32) -> f32 {
+    // The exact texel (no sampler, no hardware comparison): lit if nothing nearer the light.
+    let size = i32(g.shadow.w);
+    let t = clamp(vec2<i32>(floor(uv * g.shadow.w)), vec2<i32>(0), vec2<i32>(size - 1));
+    var d = 0.0;
     if (far) {
-        return textureSampleCompareLevel(shadow_far, shadow_cmp, uv, z);
+        d = textureLoad(shadow_far, t, 0).r;
+    } else {
+        d = textureLoad(shadow_near, t, 0).r;
     }
-    return textureSampleCompareLevel(shadow_near, shadow_cmp, uv, z);
+    return select(0.0, 1.0, z <= d);
 }
 
 // How much of the light reaches a point (1 lit .. 0 in shadow). `px` is the pixel, for noise.
 // The near map while inside it (switching to the far one over a dithered band before its
 // edge, so the change in sharpness doesn't draw a line); the far one fades out at its edge.
 // The point is moved off the surface along its normal by about a texel first, which together
-// with the depth bias the maps were drawn with keeps surfaces from shadowing themselves.
+// with a small depth bias keeps surfaces from shadowing themselves.
 fn shadow_at(world: vec3<f32>, n: vec3<f32>, px: vec2<f32>) -> f32 {
     let size = g.shadow.w;
     let noise = fract(52.9829189 * fract(dot(px, vec2<f32>(0.06711056, 0.00583715))));
@@ -557,9 +562,7 @@ fn shadow_at(world: vec3<f32>, n: vec3<f32>, px: vec2<f32>) -> f32 {
     }
     let uv = p.xy * vec2<f32>(0.5, -0.5) + 0.5;
     var s = 0.0;
-    if (g.light.w <= 0.0) {
-        s = shadow_tap(far, uv, p.z);
-    } else {
+    {
         // Four taps on a circle turned a different way at every pixel: soft, grainy edges
         // instead of a blocky staircase, for four lookups.
         let a = noise * 6.2831853;
