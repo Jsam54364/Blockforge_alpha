@@ -710,8 +710,15 @@ GPU has it.
 
 ## Shadows and the shader look (`app/src/shadows.rs`, the shader)
 
-Settings > Video > Shaders: Off, Lite (the default) or Fancy, like a Minecraft shader pack
-but built in, and cheap enough for a phone.
+Settings > Shaders: Off, Lite (the default) or Fancy, like a Minecraft shader pack but built
+in, and cheap enough for a phone.
+
+**Customisable** (`app/src/look.rs`), like a shader pack's options screen, on the same tab:
+a Preset (Default, Vibrant, Cinematic, Soft, Natural; Custom once anything is changed) and
+each part of the look on its own: Shadow Darkness, Sunlight Warmth (warm sun against cool
+shade), Bounce Light, Colour, Brightness, Contrast, Leaf Sway, Fog Distance and Warm
+Torchlight. They are percentages of the designed look (100% everywhere is Default) and go to
+the shader as factors, so they cost nothing; they apply with Shaders on.
 
 * **Sun shadows** from two shadow maps (2048 x 2048) seen down the light's direction: a sharp
   one 112 blocks wide, redrawn every frame (every other frame on Lite), and a coarse one 448

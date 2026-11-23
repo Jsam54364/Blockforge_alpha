@@ -310,9 +310,11 @@ fn settings_take_effect_at_once_and_lead_back() {
         tap(&mut u, Action::OpenSettings);
         assert_eq!((u.screen, u.tab), (Screen::Settings, 0));
         // Every group lays out, with its settings on screen.
-        let expect: [&[Action]; 4] = [
+        use crate::look::Field;
+        let expect: [&[Action]; 5] = [
             &[Action::ToggleWalk, Action::ToggleView, Action::ToggleStats],
-            &[Action::RenderDist(1), Action::RenderDist(-1), Action::LodDist(1), Action::CycleLodQuality, Action::ToggleFog, Action::ToggleClouds, Action::ToggleRays, Action::CycleShaders, Action::CycleResolution, Action::ToggleVsync],
+            &[Action::RenderDist(1), Action::RenderDist(-1), Action::LodDist(1), Action::CycleLodQuality, Action::ToggleFog, Action::ToggleClouds, Action::ToggleRays, Action::CycleResolution, Action::ToggleVsync],
+            &[Action::CycleShaders, Action::CyclePreset(1), Action::LookStep(Field::Shadows, -1), Action::LookStep(Field::Fog, 1), Action::ToggleTorches],
             &[Action::CycleCull, Action::ToggleMesher],
             &[Action::OpenControls, Action::HudOpacity(1), Action::LookSpeed(-1), Action::JoySize(1), Action::ToggleTouchBuild, Action::ToggleOneStance],
         ];
@@ -709,7 +711,7 @@ fn the_controls_editor_moves_resizes_hides_and_adds_controls() {
         u.blocks = blocks();
         build(&mut u);
         tap(&mut u, Action::OpenSettings);
-        tap(&mut u, Action::Tab(3));
+        tap(&mut u, Action::Tab(4));
         check_layout(&mut u, wf, hf);
         for a in [Action::HudOpacity(1), Action::LookSpeed(-1), Action::JoySize(1)] {
             find(&u, a);
@@ -805,7 +807,7 @@ fn one_stance_button_stands_in_for_crouch_crawl_and_roll() {
         build(&mut u);
         assert!(!has(&u, Action::Hold("stance")));
         u.screen = Screen::Settings;
-        u.tab = 3;
+        u.tab = 4;
         build(&mut u);
         tap(&mut u, Action::ToggleOneStance);
         assert!(u.settings.one_stance);
@@ -882,7 +884,7 @@ fn the_hud_keeps_clear_of_the_safe_area_the_system_reports() {
 
 #[test]
 fn settings_have_a_tab_each_and_names_read_well() {
-    assert_eq!(TABS.len(), 4);
+    assert_eq!(TABS.len(), 5);
     for (name, icon, _) in TABS {
         assert!(crate::atlas::atlas().has_icon(icon), "{name}: no {icon} icon");
     }
@@ -911,6 +913,7 @@ fn settings_survive_a_round_trip_through_text() {
         god_rays: false,
         shaders: 2,
         resolution: 3,
+        look: crate::look::ShaderLook { fog: 70, warm_torches: false, ..crate::look::PRESETS[2].1 },
         walk: false,
         view: CamView::Front,
         hud_opacity: 50,

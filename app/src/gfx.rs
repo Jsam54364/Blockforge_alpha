@@ -92,6 +92,7 @@ struct Globals {
     light: [f32; 4],
     light_color: [f32; 4],
     look: [f32; 4],
+    look2: [f32; 4],
     /// Leaves and ferns: one bit per texture layer.
     foliage: [[u32; 4]; 32],
 }
@@ -121,6 +122,8 @@ pub struct RenderOptions {
     pub shadow_debug: bool,
     /// The share of the screen's resolution to draw the world at (`None`: automatic).
     pub render_scale: Option<f32>,
+    /// The shader look's options (with Shaders on).
+    pub look: crate::look::ShaderLook,
     /// A character to draw over the HUD's first `.1` vertices (the inventory's equipment
     /// tab): where he stands; his triangles as given to `set_portrait`.
     pub figure: Option<(crate::ui::Showcase, usize)>,
@@ -1448,6 +1451,7 @@ impl Gfx {
             light: [0.0, 1.0, 0.0, 1.0],
             light_color: [0.0; 4],
             look: [0.0; 4],
+            look2: [1.0, 1.0, 0.0, 0.0],
             foliage: [[0; 4]; 32],
         }
     }
@@ -1728,7 +1732,8 @@ impl Gfx {
         let (light_dir, light_col, light_strength) = shadows::light(&sky::params(opts.time_of_day));
         let look_on = opts.shaders != shadows::Quality::Off;
         let shadow_jobs = self.shadows.plan(opts.shaders, cam.pos, fwd, light_dir);
-        let (shadow_mat, shadow_u) = self.shadows.uniforms(&shadow_jobs, light_strength);
+        let (shadow_mat, shadow_u) = self.shadows.uniforms(&shadow_jobs, light_strength * opts.look.shadow_strength());
+        let (look, look2) = if look_on { opts.look.uniforms() } else { ([0.0; 4], [1.0, 1.0, 0.0, 0.0]) };
 
         let mut globals = Globals {
             view_proj: vp,
@@ -1750,8 +1755,9 @@ impl Gfx {
             shadow: shadow_u,
             // w: which shadow filter (see `shadow_softness`).
             light: [light_dir[0], light_dir[1], light_dir[2], shadow_softness(opts.shaders)],
-            light_color: [light_col[0], light_col[1], light_col[2], if look_on { 1.0 } else { 0.0 }],
-            look: if look_on { [1.0, 1.0, 1.0, 1.0] } else { [0.0; 4] },
+            light_color: [light_col[0], light_col[1], light_col[2], if look_on { opts.look.sway as f32 / 100.0 } else { 0.0 }],
+            look: [look[0], look[1], look[2], look[3]],
+            look2,
             foliage: self.foliage,
         };
         self.queue.write_buffer(&self.globals_solid, 0, as_bytes(std::slice::from_ref(&globals)));
@@ -2682,10 +2688,11 @@ mod tests {
         // 64 (mat4) + 4 * 16 (vec4s) + 32 * 16 (palette) + 16 (lod window) + 32 * 16 (lod mask)
         // + 16 (tint window) + 3 * 16 (sky basis) + sky: 4 * 16 + 4 * 16 (glow) + 6 * 16 (faces)
         // + 3 * 16 (night rotation) + 3 * 16 + 16 (clouds) + 16 (rays)
-        // + 2 * 64 (shadow matrices) + 4 * 16 (shadow, light, light colour, look) + 32 * 16 (foliage)
+        // + 2 * 64 (shadow matrices) + 5 * 16 (shadow, light, light colour, look, look2)
+        // + 32 * 16 (foliage)
         assert_eq!(
             std::mem::size_of::<Globals>(),
-            64 + 64 + 512 + 16 + 1024 + 16 + 48 + 64 + 64 + 96 + 48 + 48 + 32 + 128 + 64 + 512
+            64 + 64 + 512 + 16 + 1024 + 16 + 48 + 64 + 64 + 96 + 48 + 48 + 32 + 128 + 80 + 512
         );
     }
 

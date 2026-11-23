@@ -48,9 +48,10 @@ struct Top {
 }
 
 /// The settings page's groups: name, icon and what is in them.
-pub const TABS: [(&str, &str, &str); 4] = [
+pub const TABS: [(&str, &str, &str); 5] = [
     ("General", "monitor", "How you get about and what you see of the game: walking or flying, the camera, the stats overlay and the time of day."),
     ("Video", "image", "How far and how finely the world is drawn, and its sky: fog, clouds and god rays. Turn these down if the game runs slowly."),
+    ("Shaders", "auto_awesome", "The shader look: shadows, sunlight, bounce light, colour and leaves in the wind. Pick a preset or tune each part; they apply with Shaders on."),
     ("Performance", "speed", "What the renderer leaves out and how it builds the terrain. The defaults suit most phones."),
     ("Controls", "touch_app", "The buttons on the screen: where they are and how big, how solid they look, how fast dragging turns the view, the stick's size, building by touch, and one button for crouch, crawl and roll."),
 ];
@@ -780,7 +781,6 @@ impl Ui {
                 ("Fog", on_off(s.fog, Action::ToggleFog)),
                 ("Clouds", on_off(s.clouds, Action::ToggleClouds)),
                 ("God Rays", on_off(s.god_rays, Action::ToggleRays)),
-                ("Shaders", Control::Stepper(crate::shadows::Quality::from_index(s.shaders).label().into(), Action::CycleShaders, Action::CycleShaders)),
                 ("Resolution", Control::Stepper(super::resolution_label(s.resolution), Action::CycleResolution, Action::CycleResolution)),
                 if self.vsync_supported {
                     ("VSync", on_off(s.vsync, Action::ToggleVsync))
@@ -788,7 +788,20 @@ impl Ui {
                     ("VSync", Control::Fixed("Always on".into()))
                 },
             ],
-            2 => vec![
+            2 => {
+                use crate::look::Field;
+                let l = s.look;
+                let mut v = vec![
+                    ("Shaders", Control::Stepper(crate::shadows::Quality::from_index(s.shaders).label().into(), Action::CycleShaders, Action::CycleShaders)),
+                    ("Preset", Control::Stepper(l.preset_name().into(), Action::CyclePreset(-1), Action::CyclePreset(1))),
+                ];
+                for f in Field::ALL {
+                    v.push((f.label(), Control::Stepper(l.value_label(f), Action::LookStep(f, -1), Action::LookStep(f, 1))));
+                }
+                v.push(("Warm Torchlight", on_off(l.warm_torches, Action::ToggleTorches)));
+                v
+            }
+            3 => vec![
                 ("Culling", Control::Stepper(cull_name(s.cull), Action::CycleCull, Action::CycleCull)),
                 ("Mesher", Control::Stepper(if s.greedy { "Greedy".into() } else { "Simple".into() }, Action::ToggleMesher, Action::ToggleMesher)),
             ],

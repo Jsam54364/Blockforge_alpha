@@ -136,6 +136,8 @@ pub struct Settings {
     /// How much of the screen's resolution the world is drawn at: an index into
     /// `RESOLUTIONS` (0: Auto, which lowers it only while the GPU can't keep up).
     pub resolution: u8,
+    /// The shader look's options (Settings > Shaders).
+    pub look: crate::look::ShaderLook,
     /// Walking as the character (true) or the free-flying camera.
     pub walk: bool,
     /// Where the camera is while walking.
@@ -209,6 +211,7 @@ impl Default for Settings {
             god_rays: true,
             shaders: 1,
             resolution: 0,
+            look: crate::look::ShaderLook::DEFAULT,
             walk: true,
             view: CamView::Back,
             hud_opacity: 85,
@@ -224,7 +227,7 @@ impl Settings {
     /// `key=value` lines, one per setting, for the settings file kept between launches.
     pub fn to_text(&self) -> String {
         format!(
-            "render_chunks={}\nlod_level={}\nlod_quality={}\nfog={}\ncull={}\nvsync={}\ngreedy={}\nshow_stats={}\nclouds={}\ngod_rays={}\nshaders={}\nresolution={}\nwalk={}\nview={}\nhud_opacity={}\nlook_speed={}\njoy_size={}\ntouch_build={}\none_stance={}\n",
+            "render_chunks={}\nlod_level={}\nlod_quality={}\nfog={}\ncull={}\nvsync={}\ngreedy={}\nshow_stats={}\nclouds={}\ngod_rays={}\nshaders={}\nresolution={}\nlook={}\nwalk={}\nview={}\nhud_opacity={}\nlook_speed={}\njoy_size={}\ntouch_build={}\none_stance={}\n",
             self.render_chunks,
             self.lod_level,
             self.lod_quality,
@@ -237,6 +240,7 @@ impl Settings {
             self.god_rays,
             self.shaders,
             self.resolution,
+            self.look.save(),
             self.walk,
             self.view.key(),
             self.hud_opacity,
@@ -288,6 +292,11 @@ impl Settings {
                 "shaders" => {
                     if let Ok(v) = value.parse::<u8>() {
                         self.shaders = v.min(2);
+                    }
+                }
+                "look" => {
+                    if let Some(l) = crate::look::ShaderLook::load(value) {
+                        self.look = l;
                     }
                 }
                 "resolution" => {
@@ -375,6 +384,11 @@ pub enum Action {
     ToggleRays,
     CycleShaders,
     CycleResolution,
+    /// Shader options: the next (+1) or previous (-1) preset.
+    CyclePreset(i8),
+    /// Shader options: one step of an option up (+1) or down (-1).
+    LookStep(crate::look::Field, i8),
+    ToggleTorches,
     /// Walk as the character, or fly the camera.
     ToggleWalk,
     /// Third person or first person.
@@ -1183,6 +1197,18 @@ impl Ui {
             Action::CycleShaders => {
                 let s = self.edited();
                 s.shaders = (s.shaders + 1) % 3;
+                false
+            }
+            Action::CyclePreset(d) => {
+                self.edited().look.cycle_preset(d);
+                false
+            }
+            Action::LookStep(f, d) => {
+                self.edited().look.step(f, d);
+                false
+            }
+            Action::ToggleTorches => {
+                self.edited().look.toggle_torches();
                 false
             }
             Action::CycleResolution => {

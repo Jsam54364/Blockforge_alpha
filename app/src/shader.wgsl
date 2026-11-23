@@ -33,8 +33,12 @@ struct Globals {
     shadow_mat: array<mat4x4<f32>, 2>, // world -> near / far shadow map
     shadow: vec4<f32>,       // x, y: half widths of the maps (blocks), z: strength (0 = off), w: map size
     light: vec4<f32>,        // xyz: towards the light that casts the shadows (sun or moon); w: soft-edge radius in texels (0: one lookup)
-    light_color: vec4<f32>,  // rgb: its direct light; w: foliage sways (0 / 1)
-    look: vec4<f32>,         // x: bounce light, y: colour grading, z: warm block light, w: shader look on (0 / 1)
+    light_color: vec4<f32>,  // rgb: its direct light; w: how much foliage sways (0: still)
+    // The shader look's options (app/src/look.rs), as factors of the designed look (0 with
+    // shaders off): x: warm sun / cool shade, y: extra colour, z: warm block light (0 / 1),
+    // w: bounce light.
+    look: vec4<f32>,
+    look2: vec4<f32>,        // x: brightness, y: contrast (both 1 as designed)
     foliage: array<vec4<u32>, 32>, // one bit per texture layer: leaves and ferns
 };
 
@@ -157,8 +161,8 @@ fn vs_main(v: VsIn) -> VsOut {
 
     var world = v.origin.xyz + local;
     let leafy = is_foliage(tex);
-    if (leafy && g.light_color.w > 0.5) {
-        world += sway(world);
+    if (leafy && g.light_color.w > 0.0) {
+        world += sway(world) * g.light_color.w;
     }
     // Water has no ambient occlusion: on its surface the AO bits say how far the shore is
     // (blockforge::mesh::shore_corners: 0 touching .. 3 two blocks or more).
@@ -328,11 +332,15 @@ fn sky_radiance(d: vec3<f32>, lod: f32) -> vec3<f32> {
 // hue (an orange sunset stays orange instead of clipping to yellow or white); only very bright
 // light (the sun, the sky right around it) washes out toward white.
 fn display(c_in: vec3<f32>) -> vec3<f32> {
-    var c = c_in;
+    var c = c_in * g.look2.x;
     // The shader look: a little richer colour, as shader packs grade it.
     if (g.look.y > 0.0) {
         let l = dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
         c = max(mix(vec3<f32>(l), c, 1.0 + 0.18 * g.look.y), vec3<f32>(0.0));
+    }
+    // Contrast around a middle grey (0.25): over 1 darker darks and brighter lights.
+    if (abs(g.look2.y - 1.0) > 0.001) {
+        c = 0.25 * pow(max(c, vec3<f32>(0.0)) / 0.25, vec3<f32>(g.look2.y));
     }
     let k = 0.8;
     let m = max(c.r, max(c.g, c.b));
@@ -619,14 +627,16 @@ fn surface_light(f: VsOut, n: vec3<f32>, tint: vec3<f32>) -> vec3<f32> {
     var light = f.color + f.direct * vis;
     if (g.look.x > 0.0) {
         // Shader-pack contrast: shade a little cooler and dimmer, sunlight a little warmer and
-        // stronger, so shadows read clearly.
+        // stronger, so shadows read clearly (stronger or gentler with the Warmth option).
         let k = g.look.x;
-        light = f.color * mix(vec3<f32>(1.0), vec3<f32>(0.78, 0.86, 1.0), k)
-            + f.direct * vis * mix(vec3<f32>(1.0), vec3<f32>(1.12, 1.05, 0.94), k);
+        light = f.color * max(mix(vec3<f32>(1.0), vec3<f32>(0.78, 0.86, 1.0), k), vec3<f32>(0.3))
+            + f.direct * vis * max(mix(vec3<f32>(1.0), vec3<f32>(1.12, 1.05, 0.94), k), vec3<f32>(0.3));
+    }
+    if (g.look.w > 0.0) {
         let sun = g.light_color.rgb * max(g.light.y, 0.0);
         let ground = mix(tint, vec3<f32>(0.32, 0.29, 0.25), 0.5);
         let from_below = (0.5 - 0.5 * n.y) * f.open;
-        light += (sun * ground * (0.22 * from_below) + f.direct * ((1.0 - vis) * 0.08) * ground * 2.0) * k;
+        light += (sun * ground * (0.22 * from_below) + f.direct * ((1.0 - vis) * 0.08) * ground * 2.0) * g.look.w;
     }
     return light;
 }

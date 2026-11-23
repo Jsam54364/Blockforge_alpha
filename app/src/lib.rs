@@ -14,6 +14,7 @@ mod game;
 mod gfx;
 mod glyphs;
 mod gpu_timer;
+pub mod look;
 pub mod hyrig;
 mod icons;
 mod math;
@@ -80,6 +81,8 @@ struct DevShot {
     shaders: u8,
     /// The Resolution setting (index into `ui::RESOLUTIONS`).
     resolution: u8,
+    /// The shader look's preset (index into `look::PRESETS`).
+    preset: u8,
     frames: u64,
     path: PathBuf,
     playing_frames: u64,
@@ -271,6 +274,8 @@ impl App {
     fn render_options(game: &game::Game) -> gfx::RenderOptions {
         let settings = game.ui.settings;
         let (fog_start, fog_end) = game.fog_range();
+        // The Fog Distance shader option moves where fog starts (with Shaders on).
+        let fog_start = if game.ui.settings.shaders > 0 { (fog_start * game.ui.settings.look.fog_factor()).min(fog_end * 0.95) } else { fog_start };
         gfx::RenderOptions {
             fog: settings.fog,
             frustum_cull: settings.cull.frustum(),
@@ -285,6 +290,7 @@ impl App {
             shaders: shadows::Quality::from_index(settings.shaders),
             shadow_debug: settings.show_stats,
             render_scale: ui::RESOLUTIONS.get(settings.resolution as usize).copied().flatten(),
+            look: settings.look,
             figure: None,
         }
     }
@@ -379,6 +385,8 @@ impl App {
         game.clock.shift(d.hours - game.clock.hours());
         game.ui.settings.shaders = d.shaders;
         game.ui.settings.resolution = d.resolution;
+        game.ui.settings.look = look::PRESETS[d.preset as usize % look::PRESETS.len()].1;
+        game.ui.settings.show_stats = false;
         if game.ui.screen == ui::Screen::Playing {
             d.playing_frames += 1;
         }
@@ -680,6 +688,7 @@ pub fn run_desktop() {
         hours: var("BLOCKFORGE_HOURS", "10").parse().unwrap_or(10.0),
         shaders: var("BLOCKFORGE_SHADERS", "1").parse().unwrap_or(1),
         resolution: var("BLOCKFORGE_RES", "1").parse().unwrap_or(1),
+        preset: var("BLOCKFORGE_PRESET", "0").parse().unwrap_or(0),
         frames: var("BLOCKFORGE_FRAMES", "120").parse().unwrap_or(120),
         path: PathBuf::from(var("BLOCKFORGE_SHOT", "devshot.png")),
         playing_frames: 0,
