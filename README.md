@@ -704,9 +704,10 @@ but built in, and cheap enough for a phone.
   has changed. Each keeps the matrix it was drawn with, so a stale map is still right where it
   covers. The squares snap to whole texels (no crawling edges), only solid terrain with some
   sky-lit face casts (underground chunks can't shadow anything the sun reaches), faces turned
-  from the sun and caves skip the lookup, and edges are softened by the hardware's 2x2
-  comparison filter (plus 4 rotated taps on Fancy). The moon casts them at night. The
-  character casts and receives them.
+  from the sun and caves skip the lookup, and edges are softened by 4 rotated taps. The maps
+  are plain float images read texel by texel (no depth textures, comparison samplers or
+  hardware depth bias, which some phone GPUs get wrong); with the stats overlay on they are
+  shown in the corner. The moon casts them at night. The character casts and receives them.
 * **Fake global illumination**: sunlit ground bounces light, coloured like the biome's ground,
   onto walls and undersides; part of what a shadow takes away comes back as bounced light, so
   shade is dim and blue-ish rather than black; block light is warm and pools around lamps.
