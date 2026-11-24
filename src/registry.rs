@@ -49,6 +49,9 @@ pub struct BlockDef {
     /// The biome it belongs to (its key, e.g. "wildwood"), if any.
     pub biome: Option<String>,
     pub model: Model,
+    /// A plant drawn with this many sprites (its texture, then `<texture>_2` ..), one picked
+    /// per column, so a field of it doesn't repeat (`variants = N`, at most 4).
+    pub variants: u8,
     /// The upper block of a two-block plant (named `..._top`, standing on its `..._bottom`):
     /// it sways with the stalk below it, and goes when that does.
     pub plant_upper: bool,
@@ -191,6 +194,11 @@ impl BlockRegistry {
             let light = get_num(t, "light", &name)?.unwrap_or(0.0).clamp(0.0, 15.0) as u8;
             let hardness = get_num(t, "hardness", &name)?.unwrap_or(1.0) as f32;
 
+            let variants = match get_num(t, "variants", &name)? {
+                None => 1,
+                Some(n) if (1.0..=4.0).contains(&n) && n.fract() == 0.0 => n as u8,
+                Some(_) => return Err(RegistryError(format!("block '{name}': variants must be 1 to 4"))),
+            };
             let all = get_str(t, "texture", &name)?.unwrap_or(name.as_str()).to_string();
             let top = get_str(t, "top", &name)?.unwrap_or(all.as_str()).to_string();
             let bottom = get_str(t, "bottom", &name)?.unwrap_or(all.as_str()).to_string();
@@ -202,6 +210,16 @@ impl BlockRegistry {
             );
             // Order must match Face: +X, -X, +Y, -Y, +Z, -Z
             let tex = [side, side, top, bottom, side, side];
+            // A plant's other sprites, in the layers right after its own (the shader adds the
+            // variant to the layer).
+            if variants > 1 {
+                if side as usize + 1 != reg.textures.len() {
+                    return Err(RegistryError(format!("block '{name}': a plant with variants needs a texture of its own")));
+                }
+                for v in 2..=variants {
+                    reg.intern_texture(&format!("{}_{v}", reg.textures[side as usize]));
+                }
+            }
 
             let behavior = get_str(t, "behavior", &name)?.map(|s| s.to_string());
             let group = get_str(t, "group", &name)?.unwrap_or("natural").to_string();
@@ -233,6 +251,7 @@ impl BlockRegistry {
                 slab,
                 biome,
                 plant_upper,
+                variants,
                 model,
             });
         }

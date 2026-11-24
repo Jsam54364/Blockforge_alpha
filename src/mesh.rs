@@ -250,6 +250,14 @@ pub struct ChunkMesh {
     pub cutout: MeshLayer,
     pub translucent: MeshLayer,
     pub plant_quads: usize,
+    /// The plants are sorted by a rank from their column (`plant_rank`), in quarters: how many
+    /// of the plant quads have rank quarter 0, 0..=1, 0..=2 and any. Far away the renderer
+    /// draws only the first few (thinner grass), the shader thins the rest smoothly.
+    pub plant_rank_quads: [u32; 4],
+    /// For sky occlusion: per column (x + 32 z), 1 + the local y of the highest block that
+    /// keeps sky light off what is under it (solid or leaves; not plants or water), 0 for
+    /// none. Empty when the chunk has none at all.
+    pub tops: Vec<u8>,
     /// The opaque quads are sorted by the way they face (`Face` order): how many face each
     /// way. The renderer skips the directions that face away from the camera for the whole
     /// chunk (`facing_quads`), before the GPU sees them.
@@ -450,27 +458,67 @@ pub(crate) fn emit_quad(
 
 /// A plant (`Model::Cross`): two planes through the middle of its cell, one along z (face 6)
 /// and one along x (face 7), each exactly a block wide so its 32 x 32 sprite keeps square
-/// texels (32 to the block, as everything else); each twice, once per side (foliage is drawn
-/// with back faces culled). The shader lights them as the ground, sways their tops and moves
-/// each plant off the middle by whole texels (from a hash of its cell), so they don't line up.
-/// Bottom corners are darker (grass is shaded at its base). `tex_top` bit 0 marks the top
-/// corners, bit 1 the corners at the plane's far end (for the shader to find the cell); b's
-/// bit 29 marks the upper block of a two-block plant (`upper`), which sways on from where
-/// the lower one's tips are.
-pub(crate) fn emit_cross(layer: &mut MeshLayer, ox: i32, oy: i32, oz: i32, tex: u16, block: u8, upper: bool) {
+/// texels (32 to the block, as everything else). One-sided quads: plants have a pipeline of
+/// their own that draws both sides. The shader lights them as the ground, sways their tops,
+/// moves each off the middle by whole texels, picks one of its `variants` sprites, mirrors
+/// and tints it a little, all from a hash of its column, and thins plants out with distance
+/// by `rank`. Bottom corners are darker (grass is shaded at its base).
+///
+/// Bits: `tex_top` bit 0 marks the top corners, bit 1 the corners at the plane's far end (for
+/// the shader to find the cell); b bit 29 the upper block of a two-block plant (`upper`),
+/// which sways on from where the lower one's tips are; the texture field (b's low 16 bits) is
+/// layer (12 bits) | variants - 1 (2) | rank quarter (2).
+pub(crate) fn emit_cross(layer: &mut MeshLayer, ox: i32, oy: i32, oz: i32, tex: u16, block: u8, upper: bool, variants: u8, rank: u8) {
+    debug_assert!(tex < 4096);
+    let tex = (tex as u32 & 4095) | ((variants.clamp(1, 4) as u32 - 1) << 12) | ((rank as u32 & 3) << 14);
     // (face, start and end (x, z) in quarter blocks)
     let planes: [(u32, [(i32, i32); 2]); 2] = [(6, [(2, 0), (2, 4)]), (7, [(0, 2), (4, 2)])];
     for (face, [(x0, z0), (x1, z1)]) in planes {
         let corner = |x: i32, z: i32, top: bool, far: bool| {
             let y = oy + if top { 4 } else { 0 };
             let a = (ox + x) as u32 | ((y as u32) << 8) | (((oz + z) as u32) << 16) | (face << 24) | ((if top { 3 } else { 1 }) << 27);
-            let b = tex as u32 | (15 << 16) | (((block & 15) as u32) << 20) | ((top as u32) << 27) | ((far as u32) << 28) | ((upper as u32) << 29);
+            let b = tex | (15 << 16) | (((block & 15) as u32) << 20) | ((top as u32) << 27) | ((far as u32) << 28) | ((upper as u32) << 29);
             PackedVertex { a, b }
         };
-        let (a, b, c, d) = (corner(x0, z0, false, false), corner(x1, z1, false, true), corner(x1, z1, true, true), corner(x0, z0, true, false));
-        layer.vertices.extend([a, b, c, d]);
-        layer.vertices.extend([a, d, c, b]);
+        layer.vertices.extend([corner(x0, z0, false, false), corner(x1, z1, false, true), corner(x1, z1, true, true), corner(x0, z0, true, false)]);
     }
+}
+
+/// `ChunkMesh::tops`.
+fn column_tops(reg: &BlockRegistry, pc: &PaddedChunk) -> Vec<u8> {
+    let mut tops = vec![0u8; (CHUNK_SIZE * CHUNK_SIZE) as usize];
+    let mut any = false;
+    for z in 0..CHUNK_SIZE {
+        for x in 0..CHUNK_SIZE {
+            for y in (0..CHUNK_SIZE).rev() {
+                let s = pc.at(x, y, z);
+                if s.is_air() {
+                    continue;
+                }
+                let d = reg.get(s);
+                if d.model == Model::Cube && (d.opaque || d.render == RenderLayer::Cutout) {
+                    tops[(x + z * CHUNK_SIZE) as usize] = y as u8 + 1;
+                    any = true;
+                    break;
+                }
+            }
+        }
+    }
+    if any {
+        tops
+    } else {
+        Vec::new()
+    }
+}
+
+/// A plant's rank quarter, 0..3, from its column within the chunk: plants of a low rank stay
+/// drawn furthest. Both blocks of a two-block plant get the same.
+pub(crate) fn plant_rank(x: i32, z: i32) -> u8 {
+    let mut h = (x as u32).wrapping_mul(0x9E37_79B1) ^ (z as u32).wrapping_mul(0x85EB_CA77);
+    h ^= h >> 15;
+    h = h.wrapping_mul(0x2C1B_3C6D);
+    h ^= h >> 13;
+    (h & 3) as u8
 }
 
 /// For side faces, sets each corner's `tex_top`: how far (in quarter blocks) the quad's top
@@ -571,7 +619,8 @@ fn rows(reg: &BlockRegistry, pc: &PaddedChunk) -> Vec<Row> {
 
 fn mesh_chunk_impl(reg: &BlockRegistry, pc: &PaddedChunk, skip_greedy: bool) -> ChunkMesh {
     let mut mesh = ChunkMesh::default();
-    let mut plants = MeshLayer::default();
+    // Plants by rank quarter, joined in that order at the end.
+    let mut plants: [MeshLayer; 4] = Default::default();
     // Only blocks that can show a face are visited: a full-height block with a hiding block on
     // all six sides has none, and most of a chunk is either that (deep stone) or air.
     let rows = rows(reg, pc);
@@ -592,7 +641,8 @@ fn mesh_chunk_impl(reg: &BlockRegistry, pc: &PaddedChunk, skip_greedy: bool) -> 
                 }
                 let def = reg.get(state);
                 if def.model == Model::Cross {
-                    emit_cross(&mut plants, x * 4, y * 4, z * 4, def.tex[Face::PosX.index()], def.light_emission, def.plant_upper);
+                    let rank = plant_rank(x, z);
+                    emit_cross(&mut plants[rank as usize], x * 4, y * 4, z * 4, def.tex[Face::PosX.index()], def.light_emission, def.plant_upper, def.variants, rank);
                     continue;
                 }
                 let (ymin, ymax) = state.shape().y_range_q();
@@ -651,8 +701,14 @@ fn mesh_chunk_impl(reg: &BlockRegistry, pc: &PaddedChunk, skip_greedy: bool) -> 
             }
         }
     }
-    mesh.plant_quads = plants.quad_count();
-    mesh.cutout.vertices.extend(plants.vertices);
+    mesh.tops = column_tops(reg, pc);
+    let mut sum = 0;
+    for (r, p) in plants.into_iter().enumerate() {
+        sum += p.quad_count() as u32;
+        mesh.plant_rank_quads[r] = sum;
+        mesh.cutout.vertices.extend(p.vertices);
+    }
+    mesh.plant_quads = sum as usize;
     mesh
 }
 
@@ -908,9 +964,11 @@ mod tests {
         let mut pc = PaddedChunk::filled(AIR);
         pc.set(3, 4, 5, grass);
         let m = mesh_chunk(&r, &pc);
-        assert_eq!(m.cutout.quad_count(), 4, "two planes, both sides");
+        assert_eq!(m.cutout.quad_count(), 2, "two planes (the plant pipeline draws both sides)");
+        assert_eq!(m.plant_quads, 2);
+        assert_eq!(m.plant_rank_quads[3], 2);
         let faces: Vec<u32> = m.cutout.vertices.iter().map(|v| v.face_index()).collect();
-        assert!(faces[..8].iter().all(|&f| f == 6) && faces[8..].iter().all(|&f| f == 7));
+        assert!(faces[..4].iter().all(|&f| f == 6) && faces[4..].iter().all(|&f| f == 7));
         // Through the middle of its cell, a block wide and high (32 texels to the block both
         // ways); only the top corners sway.
         for v in &m.cutout.vertices {

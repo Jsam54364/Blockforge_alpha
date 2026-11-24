@@ -472,14 +472,30 @@ point, `worldgen.rs` turns that into blocks, `flora.rs` grows trees and rocks on
   from broad patches, so tall swathes and short lawns cross a field; in the tallest patches
   meadow, dry and lush grass grows 1.5 and 2 blocks high, as a `_bottom` block with its
   `_top` above (each still a 32 x 32 sprite, cut from one drawing), swaying as one stalk,
-  set down and broken as one plant. Also ferns, leafy and
-  berry bushes, dandelions, poppies, cornflowers, daisies, lavender, dead bushes, reeds and
-  heather: flower meadows in patches, ferns under trees, reeds along rivers, dead bushes on
-  sand (`WorldGen::plant_for`). Meadow and lush grass, ferns and leafy bushes are greyscale
-  and take the biome's grass colour. Sprites are painted by `tools/paint_plants.py`, blade by
+  set down and broken as one plant. Every grass sprite has a second drawing, and each plant
+  picks one, may be mirrored and is tinted a little warmer or brighter by a hash of its
+  cell, so a field doesn't repeat. Also ferns and tall ferns, leafy, berry and blueberry
+  bushes, wild roses and lilacs, dandelions, buttercups, poppies, cornflowers, daisies, oxeye
+  daisies, cosmos, four tulips, forget-me-nots, lupins, lavender, goldenrod, sunflowers,
+  bluebells, foxgloves, thistles, marigolds, orchids, arctic poppies, cotton grass, clover,
+  broad jungle leaves, red and brown mushrooms, dead bushes, reeds and heather. Flower
+  meadows come in patches, each with a few kinds together (dandelions and buttercups; poppies
+  and cornflowers; tulips and forget-me-nots; lupins, lavender and sunflowers); bluebells
+  and foxgloves in forest glades, mushrooms and ferns under old trees, orchids and broad
+  leaves in jungle, cotton grass and arctic poppies on tundra, reeds along rivers, dead
+  bushes on sand (`WorldGen::plant_for`). Meadow and lush grass, ferns, clover and jungle
+  leaves are greyscale and take the biome's grass colour. Sprites are painted by `tools/paint_plants.py`, blade by
   blade on whole pixels. Plants sway at their tips, are walked through, broken with a tap,
-  replaced by a block built onto them, and fall when the ground under them goes; they are
-  drawn within 96 blocks.
+  replaced by a block built onto them, and fall when the ground under them goes. For speed
+  each plane is one single-sided quad drawn without culling, plants cast no shadows, and
+  they thin out with distance: each chunk's plants are sorted into four ranks by a hash, a
+  far chunk draws only its first ranks, and the shader drops single plants smoothly in
+  between. **Grass** (Performance tab: Low, Medium, High) sets how far it reaches.
+* **Ambient occlusion**: corner shading on every block, and sky occlusion from a 256 x 256
+  map of column heights around the camera, so ground under trees, beside cliffs and in
+  narrow valleys is darker.
+* **Rivers and streams** don't cross: a stream narrows to nothing as it comes to a river,
+  ending at its bank like a tributary.
 * **See-through leaves**, as Minecraft's fancy leaves: holes in clumps (a third of each leaf
   texture, where it is darkest), faces between leaves kept near a canopy's surface so its
   inside shows through, back faces culled. Leaves and plants are alpha-tested in a pass of
@@ -488,7 +504,7 @@ point, `worldgen.rs` turns that into blocks, `flora.rs` grows trees and rocks on
 * Distant terrain (`lod.rs`) samples the same functions in batches, so it matches.
 * `cargo run --release --example worldmap -- <seed> <blocks per pixel> map.ppm` draws a map;
   `gen_bench` and `lodtime` time the generator.
-* Worlds are versioned (`WORLDGEN_VERSION` = 11): an older world is kept in its own save and
+* Worlds are versioned (`WORLDGEN_VERSION` = 16): an older world is kept in its own save and
   the new one starts fresh.
 
 ## Block textures (`assets/textures`, `tools/paint_textures.py`)

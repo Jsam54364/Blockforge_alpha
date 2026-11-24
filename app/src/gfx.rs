@@ -93,6 +93,9 @@ struct Globals {
     light_color: [f32; 4],
     look: [f32; 4],
     look2: [f32; 4],
+    /// Sky occlusion map (`Occlusion`): x, z of its corner, the height its 0 stands for,
+    /// w 1 when in use.
+    occ: [f32; 4],
     /// Leaves and ferns: one bit per texture layer.
     foliage: [[u32; 4]; 32],
 }
@@ -124,6 +127,8 @@ pub struct RenderOptions {
     pub render_scale: Option<f32>,
     /// The shader look's options (with Shaders on).
     pub look: crate::look::ShaderLook,
+    /// The Grass setting: how far plants are drawn (0 low, 1 medium, 2 high).
+    pub grass: u8,
     /// A character to draw over the HUD's first `.1` vertices (the inventory's equipment
     /// tab): where he stands; his triangles as given to `set_portrait`.
     pub figure: Option<(crate::ui::Showcase, usize)>,
@@ -809,8 +814,12 @@ struct GpuChunk {
     cutout: Option<GpuLayer>,
     /// How many of `cutout`'s quads, at its end, are plants (drawn only near the camera).
     plant_quads: u32,
+    /// Of those, how many have rank quarter 0, 0..=1, 0..=2, any (mesh::ChunkMesh).
+    plant_rank_quads: [u32; 4],
     /// `solid`'s quads facing each way, in `Face` order (they are sorted so).
     face_quads: [u32; 6],
+    /// Each column's highest sky-blocking block (mesh::ChunkMesh::tops), for `Occlusion`.
+    tops: Vec<u8>,
     water: Option<GpuLayer>,
     /// Some face sees the sky. A chunk that is all underground can't shadow anything the sun
     /// reaches (what is behind it from the sun is underground too), so it casts no shadow.
@@ -864,6 +873,8 @@ pub struct Gfx {
     pipe_solid: wgpu::RenderPipeline,
     pipe_solid_nocull: wgpu::RenderPipeline,
     pipe_cutout: wgpu::RenderPipeline,
+    /// Plants: both sides of their planes, from one quad each.
+    pipe_plant: wgpu::RenderPipeline,
     pipe_water: wgpu::RenderPipeline,
     pipe_lod: wgpu::RenderPipeline,
     pipe_sky: wgpu::RenderPipeline,
@@ -907,6 +918,7 @@ pub struct Gfx {
     /// Shadow maps (see `shadows`), and which texture layers are foliage.
     shadows: Shadows,
     shadow_debug: shadows::DebugView,
+    occlusion: Occlusion,
     foliage: [[u32; 4]; 32],
     /// The GPU, its API and shadow sampling, for the performance overlay.
     gpu_line: String,
@@ -1060,8 +1072,19 @@ impl Gfx {
                 },
                 shadow_entries[0],
                 shadow_entries[1],
+                wgpu::BindGroupLayoutEntry {
+                    binding: 10,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
+        let occlusion = Occlusion::new(&device);
         let (tint_tex, tint_view, tint_sampler) = tint_texture(&device);
         let (block_view, block_sampler, texture_remap) = block_textures(&device, &queue, reg);
         shadows.set_textures(&device, &block_view, &block_sampler);
@@ -1103,6 +1126,7 @@ impl Gfx {
                     wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&night_view) },
                     sh[0].clone(),
                     sh[1].clone(),
+                    wgpu::BindGroupEntry { binding: 10, resource: wgpu::BindingResource::TextureView(&occlusion.view) },
                 ],
             })
         };
@@ -1120,6 +1144,7 @@ impl Gfx {
         // Plants carry both sides of their planes.
         let pipe_cutout =
             voxel_pipeline(&device, &layout, &shader, "vs_main", "fs_cutout", format, None, true, Some(wgpu::Face::Back), "foliage");
+        let pipe_plant = voxel_pipeline(&device, &layout, &shader, "vs_main", "fs_cutout", format, None, true, None, "plants");
         let pipe_water = voxel_pipeline(
             &device,
             &layout,
@@ -1254,6 +1279,7 @@ impl Gfx {
             pipe_solid,
             pipe_solid_nocull,
             pipe_cutout,
+            pipe_plant,
             pipe_water,
             pipe_lod,
             pipe_sky,
@@ -1289,6 +1315,7 @@ impl Gfx {
             foliage: shadows::foliage_mask(reg.texture_names(), texture_remap_ref.as_deref()),
             shadows,
             shadow_debug,
+            occlusion,
             gpu_line,
         })
     }
@@ -1324,6 +1351,7 @@ impl Gfx {
             self.release(c.solid);
             self.release(c.cutout);
             self.release(c.water);
+            self.occlusion.dirty = true;
         }
         for (_, l) in std::mem::take(&mut self.lods) {
             self.release(l.layer);
@@ -1468,6 +1496,7 @@ impl Gfx {
             light_color: [0.0; 4],
             look: [0.0; 4],
             look2: [1.0, 1.0, 0.0, 0.0],
+            occ: [0.0; 4],
             foliage: [[0; 4]; 32],
         }
     }
@@ -1551,8 +1580,11 @@ impl Gfx {
                 let water = self.upload(&[&mesh.translucent.vertices]);
                 let sky_lit = mesh.opaque.vertices.iter().chain(&mesh.cutout.vertices).any(|v| v.sky() > 0);
                 let plant_quads = mesh.plant_quads as u32;
+                let plant_rank_quads = mesh.plant_rank_quads;
                 let face_quads = mesh.face_quads;
-                self.chunks.insert(pos, GpuChunk { solid, cutout, plant_quads, face_quads, water, sky_lit });
+                let tops = mesh.tops.clone();
+                self.occlusion.dirty = true;
+                self.chunks.insert(pos, GpuChunk { solid, cutout, plant_quads, plant_rank_quads, face_quads, water, sky_lit, tops });
             }
         }
         for key in client.lod.take_evicted() {
@@ -1632,6 +1664,7 @@ impl Gfx {
         self.apply_vsync(opts.vsync);
         self.sync_meshes(client);
         self.apply_scale(opts.render_scale.unwrap_or(self.scale_auto.scale));
+        self.occlusion.update(&self.queue, &self.chunks, cam.pos);
         let (scene_w, scene_h) = self.scene.as_ref().map_or((self.config.width, self.config.height), |s| (s.w, s.h));
 
         let aspect = self.config.width as f32 / self.config.height as f32;
@@ -1752,7 +1785,10 @@ impl Gfx {
         let look_on = opts.shaders != shadows::Quality::Off;
         let shadow_jobs = self.shadows.plan(opts.shaders, cam.pos, fwd, light_dir);
         let (shadow_mat, shadow_u) = self.shadows.uniforms(&shadow_jobs, light_strength * opts.look.shadow_strength());
-        let (look, look2) = if look_on { opts.look.uniforms() } else { ([0.0; 4], [1.0, 1.0, 0.0, 0.0]) };
+        let (look, mut look2) = if look_on { opts.look.uniforms() } else { ([0.0; 4], [1.0, 1.0, 0.0, 0.0]) };
+        let (full, none) = grass_distances(opts.grass);
+        look2[2] = full;
+        look2[3] = none;
 
         let mut globals = Globals {
             view_proj: vp,
@@ -1777,6 +1813,7 @@ impl Gfx {
             light_color: [light_col[0], light_col[1], light_col[2], if look_on { opts.look.sway as f32 / 100.0 } else { 0.0 }],
             look: [look[0], look[1], look[2], look[3]],
             look2,
+            occ: self.occlusion.uniform(),
             foliage: self.foliage,
         };
         self.queue.write_buffer(&self.globals_solid, 0, as_bytes(std::slice::from_ref(&globals)));
@@ -1839,8 +1876,9 @@ impl Gfx {
                 }
                 for (layer, foliage) in [(&c.solid, false), (&c.cutout, true)] {
                     if let Some(layer) = layer {
-                        // Plants cast into the near map only (the far one is too coarse).
-                        let quads = if foliage && job.cascade == 1 { layer.quads - c.plant_quads } else { layer.quads };
+                        // Leaves cast shadows, plants don't (thousands of little shadows,
+                        // hardly seen in the grass, cost the most of any shadow casters).
+                        let quads = if foliage { layer.quads - c.plant_quads } else { layer.quads };
                         if quads > 0 {
                             casters.push(([min[0], min[1], min[2], 0.0], self.pool.slice(&layer.slot), quads.min(MAX_QUADS), foliage));
                         }
@@ -1901,17 +1939,31 @@ impl Gfx {
                     }
                 }
             }
-            // See-through foliage, near to far, depth-tested against the solid terrain. Plants
-            // (at the end of each chunk's foliage) only within PLANT_DISTANCE.
-            pass.set_pipeline(&self.pipe_cutout);
-            for (i, (d2, pos)) in vis.iter().enumerate().rev() {
-                let Some(c) = self.chunks.get(pos) else { continue };
-                if let Some(layer) = c.cutout.as_ref() {
-                    let n = if *d2 < PLANT_DISTANCE * PLANT_DISTANCE { layer.quads } else { layer.quads - c.plant_quads };
-                    if n > 0 {
+            // See-through foliage, near to far, depth-tested against the solid terrain: leaves
+            // (one-sided), then plants (at the end of each chunk's foliage, both sides, thinned
+            // out with distance: only the ranks that can still be drawn at the chunk's nearest
+            // point; the shader thins those smoothly, plant by plant).
+            let (full, none) = grass_distances(opts.grass);
+            for plants in [false, true] {
+                pass.set_pipeline(if plants { &self.pipe_plant } else { &self.pipe_cutout });
+                for (i, (d2, pos)) in vis.iter().enumerate().rev() {
+                    let Some(c) = self.chunks.get(pos) else { continue };
+                    let Some(layer) = c.cutout.as_ref() else { continue };
+                    let leaves = layer.quads - c.plant_quads;
+                    let (a, b) = if plants {
+                        // (d2: to the chunk's centre; its nearest point is up to 28 nearer)
+                        let near = (d2.sqrt() - 28.0).max(0.0);
+                        let keep = 1.0 - smoothstep(full, none, near);
+                        let ranks = (keep * 4.0).ceil() as usize;
+                        (leaves, leaves + if ranks == 0 { 0 } else { c.plant_rank_quads[ranks.min(4) - 1] })
+                    } else {
+                        (0, leaves)
+                    };
+                    let (a, b) = (a.min(MAX_QUADS), b.min(MAX_QUADS));
+                    if b > a {
                         pass.set_vertex_buffer(0, self.pool.slice(&layer.slot));
-                        pass.draw_indexed(0..n.min(MAX_QUADS) * 6, 0, i as u32..i as u32 + 1);
-                        quads += n as u64;
+                        pass.draw_indexed(a * 6..b * 6, 0, i as u32..i as u32 + 1);
+                        quads += (b - a) as u64;
                     }
                 }
             }
@@ -2179,8 +2231,103 @@ fn facing_ranges(counts: &[u32; 6], total: u32, min: [f32; 3], cam: [f32; 3], cu
     out
 }
 
-/// How far from the camera (to a chunk's centre, blocks) grass and flowers are drawn.
-const PLANT_DISTANCE: f32 = 96.0;
+/// Sky occlusion, as ambient occlusion on the scale of trees and overhangs: how much of
+/// the sky above a point is blocked. A map of the highest sky-blocking block (solid or leaves)
+/// of every column within `SIZE` / 2 blocks of the camera (from the chunks' `tops`), as
+/// heights from `base`, one byte each; the shader samples it around each point, bilinear, and
+/// darkens the sky's light by how much stands above (under a canopy, an overhang, inside a
+/// tree's crown). Remade when the camera moves to another chunk or chunks change (at most
+/// 4 times a second).
+struct Occlusion {
+    tex: wgpu::Texture,
+    view: wgpu::TextureView,
+    /// The map's corner (x, z) and base height, once made.
+    origin: Option<(i32, i32, i32)>,
+    dirty: bool,
+    made: Instant,
+}
+
+impl Occlusion {
+    const SIZE: i32 = 256;
+
+    fn new(device: &wgpu::Device) -> Occlusion {
+        let tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("sky occlusion"),
+            size: wgpu::Extent3d { width: Self::SIZE as u32, height: Self::SIZE as u32, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+        Occlusion { tex, view, origin: None, dirty: true, made: Instant::now() }
+    }
+
+    fn uniform(&self) -> [f32; 4] {
+        match self.origin {
+            Some((x, z, y)) => [x as f32, z as f32, y as f32, 1.0],
+            None => [0.0; 4],
+        }
+    }
+
+    /// Remakes the map if the camera at `cam` has moved to another chunk, or chunks changed.
+    fn update(&mut self, queue: &wgpu::Queue, chunks: &HashMap<ChunkPos, GpuChunk>, cam: [f32; 3]) {
+        let c = |v: f32| (v.floor() as i32).div_euclid(CHUNK_SIZE);
+        let half = Self::SIZE / CHUNK_SIZE / 2;
+        let origin = ((c(cam[0]) - half) * CHUNK_SIZE, (c(cam[2]) - half) * CHUNK_SIZE, (cam[1].floor() as i32 - 120).div_euclid(16) * 16);
+        if self.origin == Some(origin) && !(self.dirty && self.made.elapsed().as_secs_f32() > 0.25) {
+            return;
+        }
+        let (x0, z0, base) = origin;
+        let n = Self::SIZE as usize;
+        let mut top = vec![i32::MIN; n * n];
+        for (pos, ch) in chunks {
+            if ch.tops.is_empty() {
+                continue;
+            }
+            let (ox, oz) = (pos.x * CHUNK_SIZE - x0, pos.z * CHUNK_SIZE - z0);
+            if ox < 0 || oz < 0 || ox >= Self::SIZE || oz >= Self::SIZE {
+                continue;
+            }
+            for lz in 0..CHUNK_SIZE {
+                for lx in 0..CHUNK_SIZE {
+                    let t = ch.tops[(lx + lz * CHUNK_SIZE) as usize];
+                    if t > 0 {
+                        let i = (oz + lz) as usize * n + (ox + lx) as usize;
+                        top[i] = top[i].max(pos.y * CHUNK_SIZE + t as i32);
+                    }
+                }
+            }
+        }
+        let px: Vec<u8> = top.iter().map(|&t| if t == i32::MIN { 0 } else { (t - base).clamp(0, 255) as u8 }).collect();
+        queue.write_texture(
+            wgpu::ImageCopyTexture { texture: &self.tex, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            &px,
+            wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(Self::SIZE as u32), rows_per_image: Some(Self::SIZE as u32) },
+            wgpu::Extent3d { width: Self::SIZE as u32, height: Self::SIZE as u32, depth_or_array_layers: 1 },
+        );
+        self.origin = Some(origin);
+        self.dirty = false;
+        self.made = Instant::now();
+    }
+}
+
+/// The Grass setting's distances (blocks): every plant drawn up to the first, thinned out
+/// to none at the second.
+fn grass_distances(setting: u8) -> (f32, f32) {
+    match setting {
+        0 => (10.0, 40.0),
+        1 => (22.0, 72.0),
+        _ => (40.0, 110.0),
+    }
+}
+
+fn smoothstep(a: f32, b: f32, x: f32) -> f32 {
+    let t = ((x - a) / (b - a)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
 
 fn voxel_pipeline(
     device: &wgpu::Device,
@@ -2794,11 +2941,11 @@ mod tests {
         // 64 (mat4) + 4 * 16 (vec4s) + 32 * 16 (palette) + 16 (lod window) + 32 * 16 (lod mask)
         // + 16 (tint window) + 3 * 16 (sky basis) + sky: 4 * 16 + 4 * 16 (glow) + 6 * 16 (faces)
         // + 3 * 16 (night rotation) + 3 * 16 + 16 (clouds) + 16 (rays)
-        // + 2 * 64 (shadow matrices) + 5 * 16 (shadow, light, light colour, look, look2)
+        // + 2 * 64 (shadow matrices) + 6 * 16 (shadow, light, light colour, look, look2, occ)
         // + 32 * 16 (foliage)
         assert_eq!(
             std::mem::size_of::<Globals>(),
-            64 + 64 + 512 + 16 + 1024 + 16 + 48 + 64 + 64 + 96 + 48 + 48 + 32 + 128 + 80 + 512
+            64 + 64 + 512 + 16 + 1024 + 16 + 48 + 64 + 64 + 96 + 48 + 48 + 32 + 128 + 96 + 512
         );
     }
 

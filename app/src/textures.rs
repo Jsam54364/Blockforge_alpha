@@ -23,7 +23,7 @@ macro_rules! files {
 include!("texture_files.rs");
 
 /// The plant sprites (`tools/paint_plants.py`), drawn on cross-shaped blocks.
-pub const PLANTS: [&str; 39] = [
+pub const PLANTS: [&str; 69] = [
     "short_grass",
     "grass_tuft",
     "medium_grass",
@@ -63,10 +63,40 @@ pub const PLANTS: [&str; 39] = [
     "lush_high_top",
     "lush_giant_bottom",
     "lush_giant_top",
+    "tulip_red",
+    "tulip_orange",
+    "tulip_pink",
+    "tulip_white",
+    "buttercup",
+    "forget_me_not",
+    "bluebell",
+    "oxeye_daisy",
+    "cosmos",
+    "thistle",
+    "orchid",
+    "arctic_poppy",
+    "cotton_grass",
+    "marigold",
+    "goldenrod",
+    "lupin",
+    "red_mushroom",
+    "brown_mushroom",
+    "clover",
+    "big_leaf",
+    "blueberry_bush",
+    "wild_rose",
+    "sunflower_bottom",
+    "sunflower_top",
+    "tall_fern_bottom",
+    "tall_fern_top",
+    "lilac_bottom",
+    "lilac_top",
+    "foxglove_bottom",
+    "foxglove_top",
 ];
 
 /// Plant sprites in greyscale, tinted like the grass around them.
-const TINTED_PLANTS: [&str; 18] = [
+const TINTED_PLANTS: [&str; 22] = [
     "short_grass",
     "grass_tuft",
     "medium_grass",
@@ -85,16 +115,28 @@ const TINTED_PLANTS: [&str; 18] = [
     "lush_high_top",
     "lush_giant_bottom",
     "lush_giant_top",
+    "clover",
+    "big_leaf",
+    "tall_fern_bottom",
+    "tall_fern_top",
 ];
 
 /// Textures multiplied by the biome colour all over.
 fn fully_tinted(name: &str) -> bool {
-    name.ends_with("grass_top") || name == "leaves" || TINTED_PLANTS.contains(&name)
+    name.ends_with("grass_top") || name == "leaves" || TINTED_PLANTS.contains(&plant_base(name))
 }
 
 /// See-through foliage: leaves and plants (alpha-tested, swaying; see the module docs).
 pub fn is_foliage(name: &str) -> bool {
-    name == "leaves" || name.ends_with("_leaves") || PLANTS.contains(&name)
+    name == "leaves" || name.ends_with("_leaves") || PLANTS.contains(&plant_base(name))
+}
+
+/// A plant sprite's base name: "short_grass_2" (its second variant) is "short_grass".
+fn plant_base(name: &str) -> &str {
+    match name.rsplit_once('_') {
+        Some((base, v)) if matches!(v, "2" | "3" | "4") && PLANTS.contains(&base) => base,
+        _ => name,
+    }
 }
 
 /// Which pixels of a foliage texture are solid. Its own alpha where it has one; else (leaves

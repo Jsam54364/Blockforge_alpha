@@ -315,7 +315,7 @@ fn settings_take_effect_at_once_and_lead_back() {
             &[Action::ToggleWalk, Action::ToggleView, Action::ToggleStats],
             &[Action::RenderDist(1), Action::RenderDist(-1), Action::LodDist(1), Action::CycleLodQuality, Action::ToggleFog, Action::ToggleClouds, Action::ToggleRays, Action::CycleResolution, Action::ToggleVsync],
             &[Action::CycleShaders, Action::CyclePreset(1), Action::LookStep(Field::Shadows, -1), Action::LookStep(Field::Fog, 1), Action::ToggleTorches],
-            &[Action::CycleCull, Action::ToggleMesher],
+            &[Action::CycleCull, Action::CycleGrass, Action::ToggleMesher],
             &[Action::OpenControls, Action::HudOpacity(1), Action::LookSpeed(-1), Action::JoySize(1), Action::ToggleTouchBuild, Action::ToggleOneStance],
         ];
         for (t, actions) in expect.iter().enumerate() {
@@ -913,6 +913,7 @@ fn settings_survive_a_round_trip_through_text() {
         god_rays: false,
         shaders: 2,
         resolution: 3,
+        grass: 2,
         look: crate::look::ShaderLook { fog: 70, warm_torches: false, ..crate::look::PRESETS[2].1 },
         walk: false,
         view: CamView::Front,

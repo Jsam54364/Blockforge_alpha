@@ -291,6 +291,7 @@ impl App {
             shadow_debug: settings.show_stats,
             render_scale: ui::RESOLUTIONS.get(settings.resolution as usize).copied().flatten(),
             look: settings.look,
+            grass: settings.grass,
             figure: None,
         }
     }

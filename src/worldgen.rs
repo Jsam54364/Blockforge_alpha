@@ -26,7 +26,7 @@ use crate::rng::hash3;
 pub const SEA_LEVEL: i32 = 0;
 /// Bumped whenever the same seed would generate different terrain: worlds saved by an
 /// older generator are kept apart (their edits would land on different ground).
-pub const WORLDGEN_VERSION: u32 = 15;
+pub const WORLDGEN_VERSION: u32 = 16;
 pub const BEDROCK_Y: i32 = -128;
 /// No caves below this; deep chunks collapse to a single uniform entry.
 const CAVE_FLOOR: i32 = -48;
@@ -91,6 +91,33 @@ struct Plants {
     dead: u16,
     reeds: u16,
     heather: u16,
+    tulip_red: u16,
+    tulip_orange: u16,
+    tulip_pink: u16,
+    tulip_white: u16,
+    buttercup: u16,
+    forget_me_not: u16,
+    bluebell: u16,
+    oxeye_daisy: u16,
+    cosmos: u16,
+    thistle: u16,
+    orchid: u16,
+    arctic_poppy: u16,
+    cotton_grass: u16,
+    marigold: u16,
+    goldenrod: u16,
+    lupin: u16,
+    red_mush: u16,
+    brown_mush: u16,
+    clover: u16,
+    big_leaf: u16,
+    blueberry: u16,
+    wild_rose: u16,
+    /// Two-block plants as (bottom, top): sunflower, tall fern, lilac, foxglove.
+    sunflower: (u16, u16),
+    tall_fern: (u16, u16),
+    lilac: (u16, u16),
+    foxglove: (u16, u16),
 }
 
 /// Kinds of grass (an index into `Plants::grass`).
@@ -111,16 +138,42 @@ impl Plants {
         if id == 0 {
             return 0;
         }
-        self.tall.iter().flatten().find(|p| p.0 == id).map_or(0, |p| p.1)
+        self.tall.iter().flatten().chain(self.pairs().iter()).find(|p| p.0 == id).map_or(0, |p| p.1)
+    }
+
+    fn pairs(&self) -> [(u16, u16); 4] {
+        [self.sunflower, self.tall_fern, self.lilac, self.foxglove]
     }
 
     fn contains(&self, id: u16) -> bool {
         id != 0
             && (self.grass.iter().flatten().any(|&g| g == id)
-                || self.tall.iter().flatten().any(|&(b, t)| b == id || t == id)
+                || self.tall.iter().flatten().chain(self.pairs().iter()).any(|&(b, t)| b == id || t == id)
                 || [
                     self.fern, self.bush, self.berries, self.dandelion, self.poppy, self.cornflower, self.daisy, self.lavender, self.dead, self.reeds,
                     self.heather,
+                    self.tulip_red,
+                    self.tulip_orange,
+                    self.tulip_pink,
+                    self.tulip_white,
+                    self.buttercup,
+                    self.forget_me_not,
+                    self.bluebell,
+                    self.oxeye_daisy,
+                    self.cosmos,
+                    self.thistle,
+                    self.orchid,
+                    self.arctic_poppy,
+                    self.cotton_grass,
+                    self.marigold,
+                    self.goldenrod,
+                    self.lupin,
+                    self.red_mush,
+                    self.brown_mush,
+                    self.clover,
+                    self.big_leaf,
+                    self.blueberry,
+                    self.wild_rose,
                 ]
                 .contains(&id))
     }
@@ -324,6 +377,32 @@ impl WorldGen {
             dead: p("dead_bush"),
             reeds: p("reeds"),
             heather: p("heather"),
+            tulip_red: p("tulip_red"),
+            tulip_orange: p("tulip_orange"),
+            tulip_pink: p("tulip_pink"),
+            tulip_white: p("tulip_white"),
+            buttercup: p("buttercup"),
+            forget_me_not: p("forget_me_not"),
+            bluebell: p("bluebell"),
+            oxeye_daisy: p("oxeye_daisy"),
+            cosmos: p("cosmos"),
+            thistle: p("thistle"),
+            orchid: p("orchid"),
+            arctic_poppy: p("arctic_poppy"),
+            cotton_grass: p("cotton_grass"),
+            marigold: p("marigold"),
+            goldenrod: p("goldenrod"),
+            lupin: p("lupin"),
+            red_mush: p("red_mushroom"),
+            brown_mush: p("brown_mushroom"),
+            clover: p("clover"),
+            big_leaf: p("big_leaf"),
+            blueberry: p("blueberry_bush"),
+            wild_rose: p("wild_rose"),
+            sunflower: (p("sunflower_bottom"), p("sunflower_top")),
+            tall_fern: (p("tall_fern_bottom"), p("tall_fern_top")),
+            lilac: (p("lilac_bottom"), p("lilac_top")),
+            foxglove: (p("foxglove_bottom"), p("foxglove_top")),
         };
         let mut wood = [(0u16, 0u16); 16];
         let w = |log: &str, leaves: &str| (or(log, "log"), or(leaves, "leaves"));
@@ -943,34 +1022,145 @@ impl WorldGen {
             return if pick < 0.5 { p.reeds } else { grass(Grass::Lush, 0.25) };
         }
         let flowers = patch > 0.3;
+        // Which flowers a meadow patch has: a few kinds together, as wild meadows grow, and
+        // another few in the next patch over.
+        let theme = self.patches.at(x as f32 * 0.21 + 5000.0, z as f32 * 0.21 - 3000.0, 1.0);
+        let theme = ((theme * 6.0 + 40.0).max(0.0) as usize) % 4;
+        let meadow: Vec<(u16, f32)> = match theme {
+            0 => vec![(p.dandelion, 2.0), (p.buttercup, 2.5), (p.oxeye_daisy, 1.5), (p.clover, 1.5)],
+            1 => vec![(p.poppy, 2.5), (p.cornflower, 2.0), (p.daisy, 1.0), (p.cosmos, 1.0)],
+            2 => vec![(p.tulip_red, 1.2), (p.tulip_orange, 0.8), (p.tulip_pink, 1.0), (p.tulip_white, 0.8), (p.forget_me_not, 1.6)],
+            _ => vec![(p.lupin, 2.0), (p.lavender, 1.5), (p.goldenrod, 1.0), (p.sunflower.0, 0.5)],
+        };
+        let with = |mut base: Vec<(u16, f32)>, extra: &[(u16, f32)]| {
+            base.extend_from_slice(extra);
+            base
+        };
         // (kind of grass, height bias, density, the rest: plant and weight, GRASS for grass)
         let (kind, bias, density, table): (Grass, f32, f32, Vec<(u16, f32)>) = match s.biome {
-            Biome::Plains if flowers => (
+            Biome::Plains if flowers => (Grass::Meadow, -0.1, 0.72, with(meadow, &[(GRASS, 6.0), (p.wild_rose, 0.05)])),
+            Biome::Plains => (
                 Grass::Meadow,
-                -0.1,
-                0.72,
-                vec![(GRASS, 6.0), (p.dandelion, 2.0), (p.poppy, 1.5), (p.cornflower, 1.5), (p.daisy, 2.0), (p.lavender, 0.6)],
+                0.05,
+                0.66,
+                vec![
+                    (GRASS, 9.0),
+                    (p.clover, 0.35),
+                    (p.daisy, 0.15),
+                    (p.dandelion, 0.15),
+                    (p.buttercup, 0.15),
+                    (p.bush, 0.08),
+                    (p.wild_rose, 0.03),
+                ],
             ),
-            Biome::Plains => (Grass::Meadow, 0.05, 0.66, vec![(GRASS, 9.0), (p.daisy, 0.15), (p.dandelion, 0.15), (p.bush, 0.08)]),
-            Biome::Steppe => (Grass::Dry, 0.0, 0.5, vec![(GRASS, 8.0), (p.lavender, if flowers { 0.8 } else { 0.1 }), (p.dead, 0.15)]),
-            Biome::Savanna => (Grass::Dry, 0.2, 0.55, vec![(GRASS, 8.0), (p.dead, 0.15), (p.bush, 0.1)]),
+            Biome::Steppe => (
+                Grass::Dry,
+                0.0,
+                0.5,
+                vec![
+                    (GRASS, 8.0),
+                    (p.lavender, if flowers { 0.8 } else { 0.1 }),
+                    (p.thistle, if flowers { 0.5 } else { 0.12 }),
+                    (p.goldenrod, if flowers { 0.4 } else { 0.05 }),
+                    (p.sunflower.0, if flowers { 0.25 } else { 0.0 }),
+                    (p.dead, 0.15),
+                ],
+            ),
+            Biome::Savanna => (
+                Grass::Dry,
+                0.2,
+                0.55,
+                vec![(GRASS, 8.0), (p.dead, 0.15), (p.bush, 0.1), (p.marigold, if flowers { 0.5 } else { 0.05 }), (p.thistle, 0.08)],
+            ),
             Biome::Forest => (
                 Grass::Meadow,
                 -0.15,
                 0.45,
-                vec![(GRASS, 4.0), (p.fern, 2.5), (p.bush, 0.6), (p.berries, 0.3), (p.daisy, if flowers { 0.6 } else { 0.05 })],
+                vec![
+                    (GRASS, 4.0),
+                    (p.fern, 2.5),
+                    (p.tall_fern.0, 0.4),
+                    (p.bush, 0.6),
+                    (p.berries, 0.3),
+                    (p.wild_rose, 0.12),
+                    (p.daisy, if flowers { 0.5 } else { 0.05 }),
+                    (p.bluebell, if flowers { 1.4 } else { 0.05 }),
+                    (p.forget_me_not, if flowers { 0.6 } else { 0.0 }),
+                    (p.foxglove.0, if flowers { 0.35 } else { 0.03 }),
+                    (p.lilac.0, 0.04),
+                    (p.red_mush, 0.06),
+                    (p.brown_mush, 0.12),
+                ],
             ),
-            Biome::OldForest => (Grass::Meadow, -0.25, 0.48, vec![(p.fern, 5.0), (GRASS, 2.0), (p.bush, 0.7), (p.berries, 0.5)]),
-            Biome::Swamp => (Grass::Lush, 0.2, 0.62, vec![(GRASS, 6.0), (p.reeds, 2.0), (p.fern, 1.0)]),
-            Biome::Jungle => (Grass::Lush, 0.15, 0.7, vec![(GRASS, 5.0), (p.fern, 3.0), (p.bush, 1.0)]),
+            Biome::OldForest => (
+                Grass::Meadow,
+                -0.25,
+                0.48,
+                vec![
+                    (p.fern, 5.0),
+                    (p.tall_fern.0, 1.2),
+                    (GRASS, 2.0),
+                    (p.bush, 0.7),
+                    (p.berries, 0.5),
+                    (p.bluebell, if flowers { 1.0 } else { 0.1 }),
+                    (p.foxglove.0, 0.12),
+                    (p.red_mush, 0.2),
+                    (p.brown_mush, 0.35),
+                ],
+            ),
+            Biome::Swamp => (
+                Grass::Lush,
+                0.2,
+                0.62,
+                vec![
+                    (GRASS, 6.0),
+                    (p.reeds, 2.0),
+                    (p.fern, 1.0),
+                    (p.marigold, if flowers { 0.8 } else { 0.1 }),
+                    (p.big_leaf, 0.4),
+                    (p.brown_mush, 0.2),
+                    (p.cotton_grass, 0.2),
+                ],
+            ),
+            Biome::Jungle => (
+                Grass::Lush,
+                0.15,
+                0.7,
+                vec![
+                    (GRASS, 5.0),
+                    (p.fern, 2.0),
+                    (p.big_leaf, 2.5),
+                    (p.tall_fern.0, 0.8),
+                    (p.bush, 1.0),
+                    (p.orchid, if flowers { 0.8 } else { 0.12 }),
+                    (p.cosmos, if flowers { 0.3 } else { 0.0 }),
+                    (p.red_mush, 0.05),
+                ],
+            ),
             Biome::Taiga => (
                 if patch > 0.0 { Grass::Frost } else { Grass::Meadow },
                 -0.2,
                 0.38,
-                vec![(GRASS, 3.0), (p.fern, 3.0), (p.berries, 0.8), (p.bush, 0.4), (p.heather, 0.5)],
+                vec![
+                    (GRASS, 3.0),
+                    (p.fern, 3.0),
+                    (p.tall_fern.0, 0.3),
+                    (p.berries, 0.5),
+                    (p.blueberry, 1.0),
+                    (p.bush, 0.4),
+                    (p.heather, 0.5),
+                    (p.cotton_grass, 0.3),
+                    (p.red_mush, 0.15),
+                    (p.brown_mush, 0.25),
+                ],
             ),
-            Biome::Tundra => (Grass::Frost, -0.25, 0.3, vec![(GRASS, 5.0), (p.heather, 2.0)]),
-            Biome::Peaks => (Grass::Frost, -0.35, 0.12, vec![(GRASS, 3.0), (p.heather, 1.0)]),
+            Biome::Tundra => (
+                Grass::Frost,
+                -0.25,
+                0.3,
+                vec![(GRASS, 5.0), (p.heather, 2.0), (p.cotton_grass, 1.2), (p.arctic_poppy, if flowers { 1.2 } else { 0.2 }), (p.blueberry, 0.3)],
+            ),
+            Biome::Peaks => (Grass::Frost, -0.35, 0.12, vec![(GRASS, 3.0), (p.heather, 1.0), (p.arctic_poppy, 0.4)]),
             Biome::Beach => (Grass::Dry, -0.3, 0.06, vec![(GRASS, 1.0)]),
             _ => return 0,
         };

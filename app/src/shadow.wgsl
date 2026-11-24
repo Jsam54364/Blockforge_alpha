@@ -75,7 +75,7 @@ fn vs_cutout(@location(0) packed: vec2<u32>, @location(1) origin: vec4<f32>) -> 
     var o: CutOut;
     o.pos = s.view_proj * vec4<f32>(origin.xyz + local, 1.0);
     o.uv = face_uv(face, local);
-    o.layer = packed.y & 65535u;
+    o.layer = packed.y & 4095u;
     return o;
 }
 

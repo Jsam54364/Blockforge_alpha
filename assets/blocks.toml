@@ -14182,6 +14182,7 @@ opaque = false
 render = "cutout"
 model = "cross"
 hardness = 0
+variants = 2
 
 [[block]]
 name = "grass_tuft"
@@ -14193,6 +14194,7 @@ opaque = false
 render = "cutout"
 model = "cross"
 hardness = 0
+variants = 2
 
 [[block]]
 name = "tall_grass"
@@ -14204,6 +14206,7 @@ opaque = false
 render = "cutout"
 model = "cross"
 hardness = 0
+variants = 2
 
 [[block]]
 name = "dry_tuft"
@@ -14215,6 +14218,7 @@ opaque = false
 render = "cutout"
 model = "cross"
 hardness = 0
+variants = 2
 
 [[block]]
 name = "leafy_bush"
@@ -14338,6 +14342,7 @@ opaque = false
 render = "cutout"
 model = "cross"
 hardness = 0
+variants = 2
 
 [[block]]
 name = "dry_short"
@@ -14349,6 +14354,7 @@ opaque = false
 render = "cutout"
 model = "cross"
 hardness = 0
+variants = 2
 
 [[block]]
 name = "dry_medium"
@@ -14360,6 +14366,7 @@ opaque = false
 render = "cutout"
 model = "cross"
 hardness = 0
+variants = 2
 
 [[block]]
 name = "dry_tall"
@@ -14371,6 +14378,7 @@ opaque = false
 render = "cutout"
 model = "cross"
 hardness = 0
+variants = 2
 
 [[block]]
 name = "lush_short"
@@ -14382,6 +14390,7 @@ opaque = false
 render = "cutout"
 model = "cross"
 hardness = 0
+variants = 2
 
 [[block]]
 name = "lush_normal"
@@ -14393,6 +14402,7 @@ opaque = false
 render = "cutout"
 model = "cross"
 hardness = 0
+variants = 2
 
 [[block]]
 name = "lush_medium"
@@ -14404,6 +14414,7 @@ opaque = false
 render = "cutout"
 model = "cross"
 hardness = 0
+variants = 2
 
 [[block]]
 name = "lush_tall"
@@ -14415,6 +14426,7 @@ opaque = false
 render = "cutout"
 model = "cross"
 hardness = 0
+variants = 2
 
 [[block]]
 name = "frost_short"
@@ -14426,6 +14438,7 @@ opaque = false
 render = "cutout"
 model = "cross"
 hardness = 0
+variants = 2
 
 [[block]]
 name = "frost_normal"
@@ -14437,6 +14450,7 @@ opaque = false
 render = "cutout"
 model = "cross"
 hardness = 0
+variants = 2
 
 [[block]]
 name = "frost_medium"
@@ -14448,6 +14462,7 @@ opaque = false
 render = "cutout"
 model = "cross"
 hardness = 0
+variants = 2
 
 [[block]]
 name = "frost_tall"
@@ -14459,6 +14474,7 @@ opaque = false
 render = "cutout"
 model = "cross"
 hardness = 0
+variants = 2
 
 # Grass over two blocks (1.5 and 2 high): a `_bottom` block with its `_top` above it.
 
@@ -14472,6 +14488,7 @@ opaque = false
 render = "cutout"
 model = "cross"
 hardness = 0
+variants = 2
 
 [[block]]
 name = "grass_high_top"
@@ -14483,6 +14500,7 @@ opaque = false
 render = "cutout"
 model = "cross"
 hardness = 0
+variants = 2
 
 [[block]]
 name = "grass_giant_bottom"
@@ -14494,6 +14512,7 @@ opaque = false
 render = "cutout"
 model = "cross"
 hardness = 0
+variants = 2
 
 [[block]]
 name = "grass_giant_top"
@@ -14505,6 +14524,7 @@ opaque = false
 render = "cutout"
 model = "cross"
 hardness = 0
+variants = 2
 
 [[block]]
 name = "dry_high_bottom"
@@ -14516,6 +14536,7 @@ opaque = false
 render = "cutout"
 model = "cross"
 hardness = 0
+variants = 2
 
 [[block]]
 name = "dry_high_top"
@@ -14527,6 +14548,7 @@ opaque = false
 render = "cutout"
 model = "cross"
 hardness = 0
+variants = 2
 
 [[block]]
 name = "dry_giant_bottom"
@@ -14538,6 +14560,7 @@ opaque = false
 render = "cutout"
 model = "cross"
 hardness = 0
+variants = 2
 
 [[block]]
 name = "dry_giant_top"
@@ -14549,6 +14572,7 @@ opaque = false
 render = "cutout"
 model = "cross"
 hardness = 0
+variants = 2
 
 [[block]]
 name = "lush_high_bottom"
@@ -14560,6 +14584,7 @@ opaque = false
 render = "cutout"
 model = "cross"
 hardness = 0
+variants = 2
 
 [[block]]
 name = "lush_high_top"
@@ -14571,6 +14596,7 @@ opaque = false
 render = "cutout"
 model = "cross"
 hardness = 0
+variants = 2
 
 [[block]]
 name = "lush_giant_bottom"
@@ -14582,12 +14608,346 @@ opaque = false
 render = "cutout"
 model = "cross"
 hardness = 0
+variants = 2
 
 [[block]]
 name = "lush_giant_top"
 group = "natural"
 family = "plant"
 label = "Head-high Lush Grass (top)"
+solid = false
+opaque = false
+render = "cutout"
+model = "cross"
+hardness = 0
+variants = 2
+
+# More wildflowers, mushrooms and bushes, and two-block sunflowers, ferns, lilacs and foxgloves.
+
+[[block]]
+name = "tulip_red"
+group = "natural"
+family = "plant"
+label = "Red Tulip"
+solid = false
+opaque = false
+render = "cutout"
+model = "cross"
+hardness = 0
+
+[[block]]
+name = "tulip_orange"
+group = "natural"
+family = "plant"
+label = "Orange Tulip"
+solid = false
+opaque = false
+render = "cutout"
+model = "cross"
+hardness = 0
+
+[[block]]
+name = "tulip_pink"
+group = "natural"
+family = "plant"
+label = "Pink Tulip"
+solid = false
+opaque = false
+render = "cutout"
+model = "cross"
+hardness = 0
+
+[[block]]
+name = "tulip_white"
+group = "natural"
+family = "plant"
+label = "White Tulip"
+solid = false
+opaque = false
+render = "cutout"
+model = "cross"
+hardness = 0
+
+[[block]]
+name = "buttercup"
+group = "natural"
+family = "plant"
+label = "Buttercup"
+solid = false
+opaque = false
+render = "cutout"
+model = "cross"
+hardness = 0
+
+[[block]]
+name = "forget_me_not"
+group = "natural"
+family = "plant"
+label = "Forget-me-not"
+solid = false
+opaque = false
+render = "cutout"
+model = "cross"
+hardness = 0
+
+[[block]]
+name = "bluebell"
+group = "natural"
+family = "plant"
+label = "Bluebell"
+solid = false
+opaque = false
+render = "cutout"
+model = "cross"
+hardness = 0
+
+[[block]]
+name = "oxeye_daisy"
+group = "natural"
+family = "plant"
+label = "Oxeye Daisy"
+solid = false
+opaque = false
+render = "cutout"
+model = "cross"
+hardness = 0
+
+[[block]]
+name = "cosmos"
+group = "natural"
+family = "plant"
+label = "Cosmos"
+solid = false
+opaque = false
+render = "cutout"
+model = "cross"
+hardness = 0
+
+[[block]]
+name = "thistle"
+group = "natural"
+family = "plant"
+label = "Thistle"
+solid = false
+opaque = false
+render = "cutout"
+model = "cross"
+hardness = 0
+
+[[block]]
+name = "orchid"
+group = "natural"
+family = "plant"
+label = "Orchid"
+solid = false
+opaque = false
+render = "cutout"
+model = "cross"
+hardness = 0
+
+[[block]]
+name = "arctic_poppy"
+group = "natural"
+family = "plant"
+label = "Arctic Poppy"
+solid = false
+opaque = false
+render = "cutout"
+model = "cross"
+hardness = 0
+
+[[block]]
+name = "cotton_grass"
+group = "natural"
+family = "plant"
+label = "Cotton Grass"
+solid = false
+opaque = false
+render = "cutout"
+model = "cross"
+hardness = 0
+
+[[block]]
+name = "marigold"
+group = "natural"
+family = "plant"
+label = "Marigold"
+solid = false
+opaque = false
+render = "cutout"
+model = "cross"
+hardness = 0
+
+[[block]]
+name = "goldenrod"
+group = "natural"
+family = "plant"
+label = "Goldenrod"
+solid = false
+opaque = false
+render = "cutout"
+model = "cross"
+hardness = 0
+
+[[block]]
+name = "lupin"
+group = "natural"
+family = "plant"
+label = "Lupin"
+solid = false
+opaque = false
+render = "cutout"
+model = "cross"
+hardness = 0
+
+[[block]]
+name = "red_mushroom"
+group = "natural"
+family = "plant"
+label = "Red Mushroom"
+solid = false
+opaque = false
+render = "cutout"
+model = "cross"
+hardness = 0
+
+[[block]]
+name = "brown_mushroom"
+group = "natural"
+family = "plant"
+label = "Brown Mushroom"
+solid = false
+opaque = false
+render = "cutout"
+model = "cross"
+hardness = 0
+
+[[block]]
+name = "clover"
+group = "natural"
+family = "plant"
+label = "Clover"
+solid = false
+opaque = false
+render = "cutout"
+model = "cross"
+hardness = 0
+
+[[block]]
+name = "big_leaf"
+group = "natural"
+family = "plant"
+label = "Jungle Leaf"
+solid = false
+opaque = false
+render = "cutout"
+model = "cross"
+hardness = 0
+
+[[block]]
+name = "blueberry_bush"
+group = "natural"
+family = "plant"
+label = "Blueberry Bush"
+solid = false
+opaque = false
+render = "cutout"
+model = "cross"
+hardness = 0
+
+[[block]]
+name = "wild_rose"
+group = "natural"
+family = "plant"
+label = "Wild Rose"
+solid = false
+opaque = false
+render = "cutout"
+model = "cross"
+hardness = 0
+
+[[block]]
+name = "sunflower_bottom"
+group = "natural"
+family = "plant"
+label = "Sunflower"
+solid = false
+opaque = false
+render = "cutout"
+model = "cross"
+hardness = 0
+
+[[block]]
+name = "sunflower_top"
+group = "natural"
+family = "plant"
+label = "Sunflower (top)"
+solid = false
+opaque = false
+render = "cutout"
+model = "cross"
+hardness = 0
+
+[[block]]
+name = "tall_fern_bottom"
+group = "natural"
+family = "plant"
+label = "Tall Fern"
+solid = false
+opaque = false
+render = "cutout"
+model = "cross"
+hardness = 0
+
+[[block]]
+name = "tall_fern_top"
+group = "natural"
+family = "plant"
+label = "Tall Fern (top)"
+solid = false
+opaque = false
+render = "cutout"
+model = "cross"
+hardness = 0
+
+[[block]]
+name = "lilac_bottom"
+group = "natural"
+family = "plant"
+label = "Lilac"
+solid = false
+opaque = false
+render = "cutout"
+model = "cross"
+hardness = 0
+
+[[block]]
+name = "lilac_top"
+group = "natural"
+family = "plant"
+label = "Lilac (top)"
+solid = false
+opaque = false
+render = "cutout"
+model = "cross"
+hardness = 0
+
+[[block]]
+name = "foxglove_bottom"
+group = "natural"
+family = "plant"
+label = "Foxglove"
+solid = false
+opaque = false
+render = "cutout"
+model = "cross"
+hardness = 0
+
+[[block]]
+name = "foxglove_top"
+group = "natural"
+family = "plant"
+label = "Foxglove (top)"
 solid = false
 opaque = false
 render = "cutout"

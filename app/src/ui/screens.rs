@@ -803,6 +803,7 @@ impl Ui {
             }
             3 => vec![
                 ("Culling", Control::Stepper(cull_name(s.cull), Action::CycleCull, Action::CycleCull)),
+                ("Grass", Control::Stepper(["Low", "Medium", "High"][s.grass.min(2) as usize].into(), Action::CycleGrass, Action::CycleGrass)),
                 ("Mesher", Control::Stepper(if s.greedy { "Greedy".into() } else { "Simple".into() }, Action::ToggleMesher, Action::ToggleMesher)),
             ],
             _ => vec![

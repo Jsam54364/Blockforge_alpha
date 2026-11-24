@@ -423,7 +423,11 @@ impl Land {
             let w_small = w_big * 0.55 * smoothstep(0.08, 0.2, r.continent);
             let n_big = self.rivers.at(rx, rz, cell).abs();
             let n_small = self.streams.at(rx * 1.1, rz * 1.1, cell).abs();
-            let ratio = (n_big / w_big.max(1e-6)).min(if w_small > 1e-5 { n_small / w_small } else { f32::MAX });
+            // Streams pinch out as they come to a river: one runs into it like a tributary
+            // and ends at its bank, instead of crossing it or running alongside it.
+            let big = n_big / w_big.max(1e-6);
+            let w_small = w_small * smoothstep(0.9, 4.0, big);
+            let ratio = big.min(if w_small > 1e-5 { n_small / w_small } else { f32::MAX });
             // Upland valleys are wider (relative to their stream) than lowland ones, and the
             // higher the land stands over the water the wider its valley, so its sides slope
             // instead of standing as walls.

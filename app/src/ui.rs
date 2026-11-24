@@ -138,6 +138,8 @@ pub struct Settings {
     pub resolution: u8,
     /// The shader look's options (Settings > Shaders).
     pub look: crate::look::ShaderLook,
+    /// How far grass and flowers are drawn: 0 low, 1 medium, 2 high.
+    pub grass: u8,
     /// Walking as the character (true) or the free-flying camera.
     pub walk: bool,
     /// Where the camera is while walking.
@@ -212,6 +214,7 @@ impl Default for Settings {
             shaders: 1,
             resolution: 0,
             look: crate::look::ShaderLook::DEFAULT,
+            grass: 1,
             walk: true,
             view: CamView::Back,
             hud_opacity: 85,
@@ -227,7 +230,7 @@ impl Settings {
     /// `key=value` lines, one per setting, for the settings file kept between launches.
     pub fn to_text(&self) -> String {
         format!(
-            "render_chunks={}\nlod_level={}\nlod_quality={}\nfog={}\ncull={}\nvsync={}\ngreedy={}\nshow_stats={}\nclouds={}\ngod_rays={}\nshaders={}\nresolution={}\nlook={}\nwalk={}\nview={}\nhud_opacity={}\nlook_speed={}\njoy_size={}\ntouch_build={}\none_stance={}\n",
+            "render_chunks={}\nlod_level={}\nlod_quality={}\nfog={}\ncull={}\nvsync={}\ngreedy={}\nshow_stats={}\nclouds={}\ngod_rays={}\nshaders={}\nresolution={}\nlook={}\ngrass={}\nwalk={}\nview={}\nhud_opacity={}\nlook_speed={}\njoy_size={}\ntouch_build={}\none_stance={}\n",
             self.render_chunks,
             self.lod_level,
             self.lod_quality,
@@ -241,6 +244,7 @@ impl Settings {
             self.shaders,
             self.resolution,
             self.look.save(),
+            self.grass,
             self.walk,
             self.view.key(),
             self.hud_opacity,
@@ -292,6 +296,11 @@ impl Settings {
                 "shaders" => {
                     if let Ok(v) = value.parse::<u8>() {
                         self.shaders = v.min(2);
+                    }
+                }
+                "grass" => {
+                    if let Ok(v) = value.parse::<u8>() {
+                        self.grass = v.min(2);
                     }
                 }
                 "look" => {
@@ -384,6 +393,7 @@ pub enum Action {
     ToggleRays,
     CycleShaders,
     CycleResolution,
+    CycleGrass,
     /// Shader options: the next (+1) or previous (-1) preset.
     CyclePreset(i8),
     /// Shader options: one step of an option up (+1) or down (-1).
@@ -1209,6 +1219,11 @@ impl Ui {
             }
             Action::ToggleTorches => {
                 self.edited().look.toggle_torches();
+                false
+            }
+            Action::CycleGrass => {
+                let s = self.edited();
+                s.grass = (s.grass + 1) % 3;
                 false
             }
             Action::CycleResolution => {

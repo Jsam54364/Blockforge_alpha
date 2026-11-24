@@ -38,7 +38,9 @@ struct Globals {
     // shaders off): x: warm sun / cool shade, y: extra colour, z: warm block light (0 / 1),
     // w: bounce light.
     look: vec4<f32>,
-    look2: vec4<f32>,        // x: brightness, y: contrast (both 1 as designed)
+    look2: vec4<f32>,        // x: brightness, y: contrast (both 1 as designed); z, w: plants
+                             // all drawn up to z blocks away, thinned out to none at w
+    occ: vec4<f32>,          // sky occlusion map: corner x, z; its base height; w 1 = in use
     foliage: array<vec4<u32>, 32>, // one bit per texture layer: leaves and ferns
 };
 
@@ -57,6 +59,9 @@ struct Globals {
 // Shadow maps (depth from the light) and their comparison sampler.
 @group(0) @binding(8) var shadow_near: texture_2d<f32>;
 @group(0) @binding(9) var shadow_far: texture_2d<f32>;
+// Sky occlusion (app/src/gfx.rs `Occlusion`): each column's highest sky-blocking block, as a
+// byte above `g.occ.z`, 256 x 256 blocks from `g.occ.xy`.
+@group(0) @binding(10) var occ_map: texture_2d<f32>;
 
 struct VsIn {
     @location(0) packed: vec2<u32>,
@@ -161,24 +166,40 @@ fn vs_main(v: VsIn) -> VsOut {
     let local = vec3<f32>(f32(a & 255u), f32((a >> 8u) & 255u), f32((a >> 16u) & 255u)) * 0.25 + grow
         - vec3<f32>(0.0, sink, 0.0);
     let ao = (a >> 27u) & 3u;
-    let tex = b & 65535u;
+    // The texture field: layer (12 bits); for plants also variants - 1 (2) and rank (2).
+    var tex = b & 4095u;
     let sky = f32((b >> 16u) & 15u) / 15.0;
     let blk = f32((b >> 20u) & 15u) / 15.0;
 
     var world = v.origin.xyz + local;
     var uv_local = local;
-    // A plant moves off the middle of its cell by whole texels (1/32 block), its own way.
+    // Plants, each its own way, from a hash of its column (both blocks of a two-block plant
+    // alike): moved off the middle of its cell by whole texels (1/32 block), one of its
+    // sprites, mirrored or not, a little yellower or greener, lighter or darker; and thinned
+    // out with distance (by its rank: low ranks stay furthest), dropped ones made a point.
+    var plant_tint = vec3<f32>(1.0);
+    var mirror = false;
     if (face >= 6u) {
         let top = f32((b >> 27u) & 1u);
         let far = f32((b >> 28u) & 1u);
         let along = select(vec3<f32>(0.0, 0.0, 1.0), vec3<f32>(1.0, 0.0, 0.0), face == 7u);
         let cell = floor(world - along * far - vec3<f32>(0.0, top, 0.0) + vec3<f32>(0.01, 0.01, 0.01));
-        // (By column, not cell: both blocks of a two-block plant move the same way.)
         let h = hash_block(vec3<f32>(cell.x, 0.0, cell.z) + vec3<f32>(0.5));
         let off = vec3<f32>(f32(h & 15u) - 7.5, 0.0, f32((h >> 4u) & 15u) - 7.5) * (0.75 / 32.0);
         let snapped = round(off * 32.0) / 32.0;
         world += snapped;
         uv_local += snapped;
+        let variants = ((b >> 12u) & 3u) + 1u;
+        tex += (h >> 8u) % variants;
+        mirror = ((h >> 11u) & 1u) == 1u;
+        let warm = f32((h >> 12u) & 15u) / 15.0 - 0.5;
+        let bright = f32((h >> 16u) & 15u) / 15.0 - 0.5;
+        plant_tint = vec3<f32>(1.0 + 0.10 * warm, 1.0 + 0.02 * warm, 1.0 - 0.14 * warm) * (1.0 + 0.16 * bright);
+        let rank = (f32((b >> 14u) & 3u) + f32((h >> 20u) & 255u) / 256.0) * 0.25;
+        let d = distance(cell.xz + vec2<f32>(0.5), g.cam_pos.xz);
+        if (rank >= 1.0 - smoothstep(g.look2.z, g.look2.w, d)) {
+            world = cell + vec3<f32>(0.5, 0.0, 0.5);
+        }
     }
     let leafy = is_foliage(tex);
     if (leafy && g.light_color.w > 0.0) {
@@ -191,7 +212,8 @@ fn vs_main(v: VsIn) -> VsOut {
     // Water has no ambient occlusion: on its surface the AO bits say how far the shore is
     // (blockforge::mesh::shore_corners: 0 touching .. 3 two blocks or more).
     let water = tex == u32(g.flags.z + 0.5);
-    let ao_f = select(0.55 + 0.15 * f32(ao), 1.0, water);
+    // (Deeper than it was: corners in a nook clearly darker.)
+    let ao_f = select(0.42 + 0.1933 * f32(ao), 1.0, water);
 
     var o: VsOut;
     o.clip = g.view_proj * vec4<f32>(world, 1.0);
@@ -205,7 +227,7 @@ fn vs_main(v: VsIn) -> VsOut {
     let ambient = max(g.face_light[select(min(face, 5u), 2u, face >= 6u)].rgb - direct, vec3<f32>(0.0));
     let open = max(sky, 0.25);
     let shaded = g.shadow.z > 0.0;
-    o.color = ambient * (ao_f * open) + block_light(blk);
+    o.color = (ambient * (ao_f * open) + block_light(blk)) * plant_tint;
     // With shadows, sunlight goes wherever the shadow map lets it (under an overhang that the
     // sky light only half reaches, too); the sky light only keeps it out of caves. Leaves let
     // some light through to their far side.
@@ -215,12 +237,15 @@ fn vs_main(v: VsIn) -> VsOut {
     }
     let gate = select(open, smoothstep(0.15, 0.6, sky), shaded);
     let ao_d = select(ao_f, mix(ao_f, 1.0, 0.5), shaded);
-    o.direct = g.light_color.rgb * (max(facing, through) * ao_d * gate);
+    o.direct = g.light_color.rgb * (max(facing, through) * ao_d * gate) * plant_tint;
     o.open = sky;
     o.world = world;
     // Side faces: lift the texture so its top row starts at the quad's top (half-slabs).
     let lift = select(f32((b >> 27u) & 3u) * 0.25, 0.0, face >= 6u);
     o.uv = face_uv(face, uv_local + vec3<f32>(0.0, lift, 0.0));
+    if (mirror) {
+        o.uv.x = -o.uv.x;
+    }
     o.layer = tex;
     o.face = face;
     // Distance 0, 1, 1.41 or 2+ blocks, as closeness falling linearly to 0 at two blocks.
@@ -700,7 +725,30 @@ fn fs_cutout(f: VsOut) -> @location(0) vec4<f32> {
     return shade(f, tex);
 }
 
-fn shade(f: VsOut, tex: vec4<f32>) -> vec4<f32> {
+// How much of the sky above `p` (on a surface facing `n`) is blocked, 0..1: the highest
+// sky-blocking blocks around it, a block and a bit away each way, against its height.
+// Ambient occlusion on the scale of trees and overhangs: the ground under a canopy, the
+// inside of a crown, the foot of a cliff that leans out.
+fn sky_occlusion(p: vec3<f32>, n: vec3<f32>) -> f32 {
+    if (g.occ.w < 0.5) {
+        return 0.0;
+    }
+    let q = p + n * 0.6;
+    let at = (q.xz - g.occ.xy) / 256.0;
+    if (any(at < vec2<f32>(0.02)) || any(at > vec2<f32>(0.98))) {
+        return 0.0;
+    }
+    var offs = array<vec2<f32>, 4>(vec2<f32>(1.3, 0.4), vec2<f32>(-0.4, 1.3), vec2<f32>(-1.3, -0.4), vec2<f32>(0.4, -1.3));
+    var occ = 0.0;
+    for (var i = 0; i < 4; i++) {
+        let h = textureSampleLevel(occ_map, sky_sampler, at + offs[i] / 256.0, 0.0).r * 255.0 + g.occ.z;
+        occ += smoothstep(0.3, 2.5, h - q.y);
+    }
+    return occ * 0.25;
+}
+
+fn shade(f_in: VsOut, tex: vec4<f32>) -> vec4<f32> {
+    var f = f_in;
     let d = distance(f.world, g.cam_pos.xyz);
     let fog = clamp((d - g.fog_params.x) / (g.fog_params.y - g.fog_params.x), 0.0, 1.0) * g.flags.x;
     var col: vec3<f32>;
@@ -716,6 +764,8 @@ fn shade(f: VsOut, tex: vec4<f32>) -> vec4<f32> {
         // foliage it says only whether (and how much is leaf: see `foliage_cover`).
         let untinted = select(tex.a, select(0.0, 1.0, tex.a >= 0.5), is_foliage(f.layer));
         let albedo = mix(tex.rgb * t.rgb, tex.rgb, untinted) * mix(0.86, 1.14, t.a);
+        // Less of the sky's light where something stands over it.
+        f.color *= 1.0 - 0.62 * sky_occlusion(f.world, n);
         col = albedo * surface_light(f, n, t.rgb);
     }
     // Fog takes on the sky's colour in that direction, so far terrain melts into the sky
