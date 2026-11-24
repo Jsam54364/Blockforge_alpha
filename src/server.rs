@@ -379,13 +379,34 @@ impl Server {
         if !e.old.is_air() {
             self.events.push_back((e.pos, BlockEvent::Broken(e.old)));
         }
-        // A plant loses its footing with the ground under it.
+        // A plant loses its footing with the ground under it (the top of a two-block plant,
+        // with its bottom).
         let reg = &self.world.registry;
+        let up = e.pos.neighbor(crate::coords::Face::PosY);
+        let down = e.pos.neighbor(crate::coords::Face::NegY);
         if !reg.get(e.new).solid {
-            let up = e.pos.neighbor(crate::coords::Face::PosY);
             if let Some(s) = self.world.get_block(up) {
                 if !s.is_air() && reg.get(s).model == crate::registry::Model::Cross {
                     self.commands.push(Command::SetBlock { pos: up, state: AIR });
+                }
+            }
+        }
+        // Breaking the top of a two-block plant takes its bottom too.
+        if !e.old.is_air() && reg.get(e.old).plant_upper && e.new.is_air() {
+            if let Some(s) = self.world.get_block(down) {
+                let name = &reg.get(s).name;
+                if name.ends_with("_bottom") && reg.get(e.old).name.strip_suffix("_top") == name.strip_suffix("_bottom") {
+                    self.commands.push(Command::SetBlock { pos: down, state: AIR });
+                }
+            }
+        }
+        // A two-block plant set down grows its top, where there is room.
+        if !e.new.is_air() && reg.get(e.new).model == crate::registry::Model::Cross {
+            if let Some(stem) = reg.get(e.new).name.strip_suffix("_bottom") {
+                if let (Some(top), Some(above)) = (reg.id(&format!("{stem}_top")), self.world.get_block(up)) {
+                    if above.is_air() {
+                        self.commands.push(Command::SetBlock { pos: up, state: BlockState::full(top) });
+                    }
                 }
             }
         }

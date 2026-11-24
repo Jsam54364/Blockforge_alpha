@@ -49,6 +49,9 @@ pub struct BlockDef {
     /// The biome it belongs to (its key, e.g. "wildwood"), if any.
     pub biome: Option<String>,
     pub model: Model,
+    /// The upper block of a two-block plant (named `..._top`, standing on its `..._bottom`):
+    /// it sways with the stalk below it, and goes when that does.
+    pub plant_upper: bool,
 }
 
 #[derive(Debug)]
@@ -211,6 +214,7 @@ impl BlockRegistry {
                 "cross" => Model::Cross,
                 other => return Err(RegistryError(format!("block '{name}': unknown model '{other}'"))),
             };
+            let plant_upper = model == Model::Cross && name.ends_with("_top");
 
             let id = reg.defs.len() as u16;
             reg.by_name.insert(name.clone(), id);
@@ -228,6 +232,7 @@ impl BlockRegistry {
                 label,
                 slab,
                 biome,
+                plant_upper,
                 model,
             });
         }

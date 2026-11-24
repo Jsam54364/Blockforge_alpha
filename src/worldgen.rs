@@ -26,7 +26,7 @@ use crate::rng::hash3;
 pub const SEA_LEVEL: i32 = 0;
 /// Bumped whenever the same seed would generate different terrain: worlds saved by an
 /// older generator are kept apart (their edits would land on different ground).
-pub const WORLDGEN_VERSION: u32 = 14;
+pub const WORLDGEN_VERSION: u32 = 15;
 pub const BEDROCK_Y: i32 = -128;
 /// No caves below this; deep chunks collapse to a single uniform entry.
 const CAVE_FLOOR: i32 = -48;
@@ -77,6 +77,9 @@ impl Column {
 struct Plants {
     /// Grass by kind (`Grass`) and height (short, normal, medium, tall).
     grass: [[u16; 4]; 4],
+    /// Grass over two blocks, 1.5 and 2 high, as (bottom, top), for the meadow, dry and lush
+    /// kinds (frost grass stays low).
+    tall: [[(u16, u16); 2]; 3],
     fern: u16,
     bush: u16,
     berries: u16,
@@ -103,9 +106,18 @@ enum Grass {
 const GRASS: u16 = u16::MAX;
 
 impl Plants {
+    /// The top block of the two-block plant whose bottom is `id`, or 0.
+    fn upper_of(&self, id: u16) -> u16 {
+        if id == 0 {
+            return 0;
+        }
+        self.tall.iter().flatten().find(|p| p.0 == id).map_or(0, |p| p.1)
+    }
+
     fn contains(&self, id: u16) -> bool {
         id != 0
             && (self.grass.iter().flatten().any(|&g| g == id)
+                || self.tall.iter().flatten().any(|&(b, t)| b == id || t == id)
                 || [
                     self.fern, self.bush, self.berries, self.dandelion, self.poppy, self.cornflower, self.daisy, self.lavender, self.dead, self.reeds,
                     self.heather,
@@ -295,6 +307,11 @@ impl WorldGen {
                 [p("dry_short"), p("dry_tuft"), p("dry_medium"), p("dry_tall")],
                 [p("lush_short"), p("lush_normal"), p("lush_medium"), p("lush_tall")],
                 [p("frost_short"), p("frost_normal"), p("frost_medium"), p("frost_tall")],
+            ],
+            tall: [
+                [(p("grass_high_bottom"), p("grass_high_top")), (p("grass_giant_bottom"), p("grass_giant_top"))],
+                [(p("dry_high_bottom"), p("dry_high_top")), (p("dry_giant_bottom"), p("dry_giant_top"))],
+                [(p("lush_high_bottom"), p("lush_high_top")), (p("lush_giant_bottom"), p("lush_giant_top"))],
             ],
             fern: p("fern"),
             bush: p("leafy_bush"),
@@ -736,7 +753,11 @@ impl WorldGen {
                 c.water.push(water);
                 c.ice.push(water != DRY && s.t < -0.5);
                 // Plants grow on dry ground with a whole block on top (not on a slab).
-                c.plant.push(if water == DRY && hq.rem_euclid(4) < 2 { self.plant_for(x, z, s, surf, slope) } else { 0 });
+                let plant = if water == DRY && hq.rem_euclid(4) < 2 { self.plant_for(x, z, s, surf, slope) } else { 0 };
+                if self.plants.upper_of(plant) != 0 {
+                    c.max_top = c.max_top.max(top + 1); // its top block, above the ground's
+                }
+                c.plant.push(plant);
             }
         }
         // Features: inside the column the land is already known.
@@ -845,6 +866,10 @@ impl WorldGen {
         if col.plant[i] != 0 && wy == hq.div_euclid(4) {
             state = BlockState::full(col.plant[i]);
         }
+        let upper = self.plants.upper_of(col.plant[i]);
+        if upper != 0 && wy == hq.div_euclid(4) + 1 {
+            state = BlockState::full(upper);
+        }
         // Features, in the same order and with the same rules as `generate_chunk`.
         for f in &col.features {
             let (lo, hi) = f.bounds();
@@ -891,11 +916,17 @@ impl WorldGen {
         let patch = self.patches.at(x as f32 * 0.8 + 311.0, z as f32 * 0.8 - 97.0, 1.0);
         let clump = 0.45 + 0.9 * crate::noise::smoothstep(-0.35, 0.55, patch);
         // Grass: its kind from the biome, its height from broad patches (tall swathes, short
-        // lawns) plus a little of each tuft's own.
+        // lawns) plus a little of each tuft's own. In the tallest patches it grows over two
+        // blocks, 1.5 and then 2 high (not frost grass).
         let grass = |kind: Grass, bias: f32| -> u16 {
             let field = self.patches.at(x as f32 * 0.35 - 1200.0, z as f32 * 0.35 + 800.0, 1.0);
             let v = 0.5 + 0.55 * field + (jitter - 0.5) * 0.45 + bias;
-            p.grass[kind as usize][((v * 4.0).floor().clamp(0.0, 3.0)) as usize]
+            // Bands: short, normal, medium, tall, then 1.5 and 2 blocks in the tallest patches.
+            let step = [0.25, 0.5, 0.7, 0.83, 0.91].iter().filter(|&&b| v >= b).count();
+            match (step, kind) {
+                (4.., Grass::Frost) | (0..=3, _) => p.grass[kind as usize][step.min(3)],
+                (_, k) => p.tall[k as usize][step - 4].0,
+            }
         };
         if sandy {
             let density = match s.biome {
@@ -974,6 +1005,12 @@ impl WorldGen {
                 let hq = col.height_q[i];
                 let (top, rem) = (hq.div_euclid(4), hq.rem_euclid(4));
                 let (wx, wz) = (col.cx * CHUNK_SIZE + lx, col.cz * CHUNK_SIZE + lz);
+                let upper = self.plants.upper_of(col.plant[i]);
+                if upper != 0 && y0 == top + 1 {
+                    // Only the top block of a two-block plant reaches into this chunk.
+                    chunk.set(LocalPos { x: lx as u8, y: 0, z: lz as u8 }.index(), BlockState::full(upper));
+                    continue;
+                }
                 if y0 > top.max(col.water[i]) {
                     continue; // only air here (features come below)
                 }
@@ -986,6 +1023,9 @@ impl WorldGen {
                 // The plant on the ground (trees, stamped next, take its place).
                 if col.plant[i] != 0 && (y0..=y1).contains(&top) {
                     chunk.set(LocalPos { x: lx as u8, y: (top - y0) as u8, z: lz as u8 }.index(), BlockState::full(col.plant[i]));
+                    if upper != 0 && top < y1 {
+                        chunk.set(LocalPos { x: lx as u8, y: (top + 1 - y0) as u8, z: lz as u8 }.index(), BlockState::full(upper));
+                    }
                 }
             }
         }
@@ -1031,6 +1071,42 @@ mod tests {
                 col.min_top <= SEA_LEVEL && col.height_q.iter().any(|q| q.div_euclid(4) > SEA_LEVEL + 2)
             })
             .expect("a coast within 128 km")
+    }
+
+    #[test]
+    fn two_block_grass_stands_whole_even_across_chunks() {
+        let (_r, g) = make();
+        let mut seen = 0;
+        for i in 0..300 {
+            let (cx, cz) = ((i % 20) * 37 - 370, (i / 20) * 41 - 410);
+            let col = g.column(cx, cz);
+            for (k, &plant) in col.plant.iter().enumerate() {
+                let upper = g.plants.upper_of(plant);
+                if upper == 0 {
+                    continue;
+                }
+                seen += 1;
+                let (x, z) = (cx * CHUNK_SIZE + (k % 32) as i32, cz * CHUNK_SIZE + (k / 32) as i32);
+                let top = col.height_q[k].div_euclid(4);
+                // (A tree or bush may stand there instead.)
+                let (b, t) = (g.seed_block(&col, x, top, z).id(), g.seed_block(&col, x, top + 1, z).id());
+                if b != plant {
+                    continue;
+                }
+                assert!(t == upper || !g.plants.contains(t), "{x},{top},{z}: top {t}");
+                // The chunk holding the top block has it, also when that is the chunk above.
+                let cy = (top + 1).div_euclid(CHUNK_SIZE);
+                let chunk = g.generate_chunk(ChunkPos::new(cx, cy, cz), &col);
+                let lp = LocalPos { x: (k % 32) as u8, y: (top + 1 - cy * CHUNK_SIZE) as u8, z: (k / 32) as u8 };
+                let got = chunk.get(lp.index());
+                // (A tree may stand there instead.)
+                assert!(got.id() == upper || !g.plants.contains(got.id()), "{x},{top},{z}: {got:?}");
+                if seen > 40 {
+                    return;
+                }
+            }
+        }
+        assert!(seen > 0, "some two-block grass grows");
     }
 
     #[test]

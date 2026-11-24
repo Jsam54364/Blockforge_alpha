@@ -65,7 +65,7 @@ fn vs_cutout(@location(0) packed: vec2<u32>, @location(1) origin: vec4<f32>) -> 
         let far = f32((b >> 28u) & 1u);
         let along = select(vec3<f32>(0.0, 0.0, 1.0), vec3<f32>(1.0, 0.0, 0.0), face == 7u);
         let cell = floor(origin.xyz + local - along * far - vec3<f32>(0.0, top, 0.0) + vec3<f32>(0.01, 0.01, 0.01));
-        let q = vec3<i32>(floor(cell + vec3<f32>(0.5)));
+        let q = vec3<i32>(floor(vec3<f32>(cell.x, 0.0, cell.z) + vec3<f32>(0.5)));
         var h = (u32(q.x) * 0x8da6b343u) ^ (u32(q.y) * 0xd8163841u) ^ (u32(q.z) * 0xcb1ab31fu);
         h = (h ^ (h >> 15u)) * 0x2c1b3c6du;
         h = h ^ (h >> 12u);

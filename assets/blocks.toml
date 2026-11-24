@@ -14459,3 +14459,137 @@ opaque = false
 render = "cutout"
 model = "cross"
 hardness = 0
+
+# Grass over two blocks (1.5 and 2 high): a `_bottom` block with its `_top` above it.
+
+[[block]]
+name = "grass_high_bottom"
+group = "natural"
+family = "plant"
+label = "Waist-high Grass"
+solid = false
+opaque = false
+render = "cutout"
+model = "cross"
+hardness = 0
+
+[[block]]
+name = "grass_high_top"
+group = "natural"
+family = "plant"
+label = "Waist-high Grass (top)"
+solid = false
+opaque = false
+render = "cutout"
+model = "cross"
+hardness = 0
+
+[[block]]
+name = "grass_giant_bottom"
+group = "natural"
+family = "plant"
+label = "Head-high Grass"
+solid = false
+opaque = false
+render = "cutout"
+model = "cross"
+hardness = 0
+
+[[block]]
+name = "grass_giant_top"
+group = "natural"
+family = "plant"
+label = "Head-high Grass (top)"
+solid = false
+opaque = false
+render = "cutout"
+model = "cross"
+hardness = 0
+
+[[block]]
+name = "dry_high_bottom"
+group = "natural"
+family = "plant"
+label = "Waist-high Dry Grass"
+solid = false
+opaque = false
+render = "cutout"
+model = "cross"
+hardness = 0
+
+[[block]]
+name = "dry_high_top"
+group = "natural"
+family = "plant"
+label = "Waist-high Dry Grass (top)"
+solid = false
+opaque = false
+render = "cutout"
+model = "cross"
+hardness = 0
+
+[[block]]
+name = "dry_giant_bottom"
+group = "natural"
+family = "plant"
+label = "Head-high Dry Grass"
+solid = false
+opaque = false
+render = "cutout"
+model = "cross"
+hardness = 0
+
+[[block]]
+name = "dry_giant_top"
+group = "natural"
+family = "plant"
+label = "Head-high Dry Grass (top)"
+solid = false
+opaque = false
+render = "cutout"
+model = "cross"
+hardness = 0
+
+[[block]]
+name = "lush_high_bottom"
+group = "natural"
+family = "plant"
+label = "Waist-high Lush Grass"
+solid = false
+opaque = false
+render = "cutout"
+model = "cross"
+hardness = 0
+
+[[block]]
+name = "lush_high_top"
+group = "natural"
+family = "plant"
+label = "Waist-high Lush Grass (top)"
+solid = false
+opaque = false
+render = "cutout"
+model = "cross"
+hardness = 0
+
+[[block]]
+name = "lush_giant_bottom"
+group = "natural"
+family = "plant"
+label = "Head-high Lush Grass"
+solid = false
+opaque = false
+render = "cutout"
+model = "cross"
+hardness = 0
+
+[[block]]
+name = "lush_giant_top"
+group = "natural"
+family = "plant"
+label = "Head-high Lush Grass (top)"
+solid = false
+opaque = false
+render = "cutout"
+model = "cross"
+hardness = 0

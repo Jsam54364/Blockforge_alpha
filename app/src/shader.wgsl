@@ -173,7 +173,8 @@ fn vs_main(v: VsIn) -> VsOut {
         let far = f32((b >> 28u) & 1u);
         let along = select(vec3<f32>(0.0, 0.0, 1.0), vec3<f32>(1.0, 0.0, 0.0), face == 7u);
         let cell = floor(world - along * far - vec3<f32>(0.0, top, 0.0) + vec3<f32>(0.01, 0.01, 0.01));
-        let h = hash_block(cell + vec3<f32>(0.5));
+        // (By column, not cell: both blocks of a two-block plant move the same way.)
+        let h = hash_block(vec3<f32>(cell.x, 0.0, cell.z) + vec3<f32>(0.5));
         let off = vec3<f32>(f32(h & 15u) - 7.5, 0.0, f32((h >> 4u) & 15u) - 7.5) * (0.75 / 32.0);
         let snapped = round(off * 32.0) / 32.0;
         world += snapped;
@@ -181,8 +182,10 @@ fn vs_main(v: VsIn) -> VsOut {
     }
     let leafy = is_foliage(tex);
     if (leafy && g.light_color.w > 0.0) {
-        // A plant sways at its tips only (its top corners carry bit 27), rooted at the base.
-        let rooted = select(1.0, f32((b >> 27u) & 1u), face >= 6u);
+        // A plant sways at its tips only (its top corners carry bit 27), rooted at the base;
+        // the upper block of a two-block plant (bit 29) from the lower one's tips on, twice
+        // as far at its own.
+        let rooted = select(1.0, f32((b >> 27u) & 1u) + f32((b >> 29u) & 1u), face >= 6u);
         world += sway(world) * (g.light_color.w * rooted);
     }
     // Water has no ambient occlusion: on its surface the AO bits say how far the shore is

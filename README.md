@@ -469,7 +469,10 @@ point, `worldgen.rs` turns that into blocks, `flora.rs` grows trees and rocks on
   other texture (the rule for anything made for the game), moved off the middle by whole
   texels per cell so they don't line up. Grass comes in four kinds (meadow, dry, lush, frost)
   and four heights (short, normal, medium, tall), the kind from the biome and the height
-  from broad patches, so tall swathes and short lawns cross a field. Also ferns, leafy and
+  from broad patches, so tall swathes and short lawns cross a field; in the tallest patches
+  meadow, dry and lush grass grows 1.5 and 2 blocks high, as a `_bottom` block with its
+  `_top` above (each still a 32 x 32 sprite, cut from one drawing), swaying as one stalk,
+  set down and broken as one plant. Also ferns, leafy and
   berry bushes, dandelions, poppies, cornflowers, daisies, lavender, dead bushes, reeds and
   heather: flower meadows in patches, ferns under trees, reeds along rivers, dead bushes on
   sand (`WorldGen::plant_for`). Meadow and lush grass, ferns and leafy bushes are greyscale

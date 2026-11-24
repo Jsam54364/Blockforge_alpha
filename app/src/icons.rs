@@ -24,7 +24,7 @@ pub fn placeable(reg: &BlockRegistry) -> Vec<u16> {
     (1..reg.len() as u16)
         .filter(|&id| {
             let d = reg.def(id);
-            (d.solid || d.model == Model::Cross) && d.hardness >= 0.0 && d.name != "water"
+            (d.solid || (d.model == Model::Cross && !d.plant_upper)) && d.hardness >= 0.0 && d.name != "water"
         })
         .collect()
 }

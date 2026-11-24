@@ -454,15 +454,17 @@ pub(crate) fn emit_quad(
 /// with back faces culled). The shader lights them as the ground, sways their tops and moves
 /// each plant off the middle by whole texels (from a hash of its cell), so they don't line up.
 /// Bottom corners are darker (grass is shaded at its base). `tex_top` bit 0 marks the top
-/// corners, bit 1 the corners at the plane's far end (for the shader to find the cell).
-pub(crate) fn emit_cross(layer: &mut MeshLayer, ox: i32, oy: i32, oz: i32, tex: u16, block: u8) {
+/// corners, bit 1 the corners at the plane's far end (for the shader to find the cell); b's
+/// bit 29 marks the upper block of a two-block plant (`upper`), which sways on from where
+/// the lower one's tips are.
+pub(crate) fn emit_cross(layer: &mut MeshLayer, ox: i32, oy: i32, oz: i32, tex: u16, block: u8, upper: bool) {
     // (face, start and end (x, z) in quarter blocks)
     let planes: [(u32, [(i32, i32); 2]); 2] = [(6, [(2, 0), (2, 4)]), (7, [(0, 2), (4, 2)])];
     for (face, [(x0, z0), (x1, z1)]) in planes {
         let corner = |x: i32, z: i32, top: bool, far: bool| {
             let y = oy + if top { 4 } else { 0 };
             let a = (ox + x) as u32 | ((y as u32) << 8) | (((oz + z) as u32) << 16) | (face << 24) | ((if top { 3 } else { 1 }) << 27);
-            let b = tex as u32 | (15 << 16) | (((block & 15) as u32) << 20) | ((top as u32) << 27) | ((far as u32) << 28);
+            let b = tex as u32 | (15 << 16) | (((block & 15) as u32) << 20) | ((top as u32) << 27) | ((far as u32) << 28) | ((upper as u32) << 29);
             PackedVertex { a, b }
         };
         let (a, b, c, d) = (corner(x0, z0, false, false), corner(x1, z1, false, true), corner(x1, z1, true, true), corner(x0, z0, true, false));
@@ -590,7 +592,7 @@ fn mesh_chunk_impl(reg: &BlockRegistry, pc: &PaddedChunk, skip_greedy: bool) -> 
                 }
                 let def = reg.get(state);
                 if def.model == Model::Cross {
-                    emit_cross(&mut plants, x * 4, y * 4, z * 4, def.tex[Face::PosX.index()], def.light_emission);
+                    emit_cross(&mut plants, x * 4, y * 4, z * 4, def.tex[Face::PosX.index()], def.light_emission, def.plant_upper);
                     continue;
                 }
                 let (ymin, ymax) = state.shape().y_range_q();

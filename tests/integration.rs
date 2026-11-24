@@ -87,6 +87,27 @@ fn break_and_place_roundtrip_through_server() {
 }
 
 #[test]
+fn a_two_block_plant_grows_its_top_and_goes_whole() {
+    let (_h, mut c, reg) = start(7);
+    assert!(pump_until(&mut c, Duration::from_secs(60), loaded));
+    let (sx, sz, cam) = spawn(7, &reg);
+    let ground = ground_at(&c, &reg, sx, sz, cam[1]);
+    let (bottom, top) = (reg.id("grass_giant_bottom").unwrap(), reg.id("grass_giant_top").unwrap());
+    let base = BlockPos::new(sx, ground + 1, sz);
+    let above = BlockPos::new(sx, ground + 2, sz);
+    // Clear the two cells over the ground, then set the bottom down: its top grows above it.
+    for p in [above, base] {
+        c.break_block(p);
+    }
+    assert!(pump_until(&mut c, Duration::from_secs(10), |c| [base, above].iter().all(|&p| c.store.block(p).map_or(false, |s| s.is_air()))));
+    c.place_block(base, blockforge::block::BlockState::full(bottom));
+    assert!(pump_until(&mut c, Duration::from_secs(10), |c| c.store.block(above).map_or(false, |s| s.id() == top)), "its top grew");
+    // Breaking the top takes the bottom too.
+    c.break_block(above);
+    assert!(pump_until(&mut c, Duration::from_secs(10), |c| [base, above].iter().all(|&p| c.store.block(p).map_or(false, |s| s.is_air()))));
+}
+
+#[test]
 fn sand_falls_and_lands_on_ground() {
     let (_h, mut c, reg) = start(7);
     assert!(pump_until(&mut c, Duration::from_secs(60), loaded));

@@ -290,11 +290,67 @@ def grass_set(prefix_names, seed, kind):
                 c.put(hx + (k % 2), hy + k, [v * (1.0 - 0.06 * k) for v in col])
         c.save(name)
 
+
+# ---- Tall grass over two blocks: 1.5 and 2 blocks high, drawn on a 32 x 64 canvas and cut
+# into a bottom and a top sprite (still 32 x 32, 32 texels to the block), which the game
+# stacks as two blocks, as Minecraft does its tall grass.
+
+def tall_grass_set(prefix, seed, kind):
+    for (size, lo_h, hi_h, n) in (('high', 38, 47, 13), ('giant', 52, 62, 12)):
+        rnd = random.Random(seed * 100 + len(size))
+        px = np.zeros((2 * N, N, 4), np.uint8)
+
+        def put(x, y, rgb):
+            x, y = int(round(x)), int(round(y))
+            if 0 <= x < N and 0 <= y < 2 * N:
+                px[y, x, :3] = [max(0, min(255, int(c))) for c in rgb]
+                px[y, x, 3] = 255
+
+        heads = []
+        for k in range(n):
+            x0 = int(3 + (25 * (k + rnd.random())) / n)
+            length = rnd.randint(lo_h, hi_h) if rnd.random() < 0.75 else rnd.randint(lo_h // 2, lo_h)
+            lean = rnd.choice([-1, 1]) * rnd.randint(1, max(2, length // 7))
+            if kind == 'meadow':
+                b, t = rnd.randint(100, 130), rnd.randint(190, 235)
+                colour = lambda u, b=b, t=t: grey(b + (t - b) * u)
+            elif kind == 'lush':
+                b, t = rnd.randint(80, 110), rnd.randint(180, 225)
+                colour = lambda u, b=b, t=t: grey(b + (t - b) * u)
+            else:
+                b, t = rnd.uniform(0.58, 0.7), rnd.uniform(0.9, 1.0)
+                colour = lambda u, b=b, t=t: [v * (b + (t - b) * u) for v in (226, 198, 132)]
+            prev = None
+            for r in range(length):
+                u = r / max(1, length - 1)
+                x = x0 + int(round(lean * u * u))
+                y = 2 * N - 1 - r
+                col = colour(u)
+                if prev is not None and abs(x - prev) > 1:
+                    step = 1 if x > prev else -1
+                    for xx in range(prev + step, x, step):
+                        put(xx, y + 1, col)
+                put(x, y, col)
+                if kind == 'lush' and u < 0.5:
+                    put(x + (1 if lean >= 0 else -1), y, [v * 0.88 for v in col])
+                prev = x
+            if kind != 'lush' and length >= lo_h and rnd.random() < 0.35:
+                heads.append((x0 + lean, 2 * N - length))
+        for (hx, hy) in heads[:4]:
+            col = grey(232) if kind == 'meadow' else (236, 214, 150)
+            for k in range(5):
+                put(hx + (k % 2), hy + k, [v * (1.0 - 0.05 * k) for v in col])
+        for half, rows in (('top', px[:N]), ('bottom', px[N:])):
+            Image.fromarray(np.ascontiguousarray(rows), 'RGBA').save(os.path.join(OUT, f'{prefix}_{size}_{half}.png'))
+
 if __name__ == '__main__':
     grass_set({'short': 'short_grass', 'normal': 'grass_tuft', 'medium': 'medium_grass', 'tall': 'tall_grass'}, 11, 'meadow')
     grass_set({'short': 'dry_short', 'normal': 'dry_tuft', 'medium': 'dry_medium', 'tall': 'dry_tall'}, 12, 'dry')
     grass_set({'short': 'lush_short', 'normal': 'lush_normal', 'medium': 'lush_medium', 'tall': 'lush_tall'}, 13, 'lush')
     grass_set({'short': 'frost_short', 'normal': 'frost_normal', 'medium': 'frost_medium', 'tall': 'frost_tall'}, 14, 'frost')
+    tall_grass_set('grass', 21, 'meadow')
+    tall_grass_set('dry', 22, 'dry')
+    tall_grass_set('lush', 23, 'lush')
     fern('fern', 15)
     bush('leafy_bush', 16, grey(215))
     bush('berry_bush', 17, (70, 118, 52), berries=(196, 36, 46))
@@ -306,4 +362,4 @@ if __name__ == '__main__':
     dead_bush('dead_bush', 23)
     reeds('reeds', 24)
     heather('heather', 25)
-    print('painted 27 plant sprites')
+    print('painted 39 plant sprites')
