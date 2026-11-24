@@ -298,7 +298,8 @@ impl Server {
             ClientMsg::BreakBlock { pos } => {
                 if let Some(s) = self.world.get_block(pos) {
                     let def = self.world.registry.get(s);
-                    if !s.is_air() && def.solid && def.hardness >= 0.0 {
+                    let plant = def.model == crate::registry::Model::Cross;
+                    if !s.is_air() && (def.solid || plant) && def.hardness >= 0.0 {
                         self.player_edits.push((pos, AIR));
                     }
                 }
@@ -377,6 +378,16 @@ impl Server {
         }
         if !e.old.is_air() {
             self.events.push_back((e.pos, BlockEvent::Broken(e.old)));
+        }
+        // A plant loses its footing with the ground under it.
+        let reg = &self.world.registry;
+        if !reg.get(e.new).solid {
+            let up = e.pos.neighbor(crate::coords::Face::PosY);
+            if let Some(s) = self.world.get_block(up) {
+                if !s.is_air() && reg.get(s).model == crate::registry::Model::Cross {
+                    self.commands.push(Command::SetBlock { pos: up, state: AIR });
+                }
+            }
         }
         if !e.new.is_air() {
             self.events.push_back((e.pos, BlockEvent::Placed(e.new)));

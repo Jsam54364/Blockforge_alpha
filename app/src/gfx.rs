@@ -805,6 +805,10 @@ struct GpuLayer {
 
 struct GpuChunk {
     solid: Option<GpuLayer>,
+    /// See-through foliage (leaves, plants): alpha-tested, after the solid terrain.
+    cutout: Option<GpuLayer>,
+    /// How many of `cutout`'s quads, at its end, are plants (drawn only near the camera).
+    plant_quads: u32,
     water: Option<GpuLayer>,
     /// Some face sees the sky. A chunk that is all underground can't shadow anything the sun
     /// reaches (what is behind it from the sun is underground too), so it casts no shadow.
@@ -857,6 +861,7 @@ pub struct Gfx {
     cloud_mesh: Option<(wgpu::Buffer, u32)>,
     pipe_solid: wgpu::RenderPipeline,
     pipe_solid_nocull: wgpu::RenderPipeline,
+    pipe_cutout: wgpu::RenderPipeline,
     pipe_water: wgpu::RenderPipeline,
     pipe_lod: wgpu::RenderPipeline,
     pipe_sky: wgpu::RenderPipeline,
@@ -978,7 +983,7 @@ impl Gfx {
         });
 
         let shadow_entries = Shadows::layout_entries();
-        let shadows = Shadows::new(&device, MAX_INSTANCES, std::mem::size_of::<rig::Vertex>() as u64);
+        let mut shadows = Shadows::new(&device, MAX_INSTANCES, std::mem::size_of::<rig::Vertex>() as u64);
         let shadow_debug = shadows::DebugView::new(&device, &shadows, format);
         let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("globals layout"),
@@ -1057,6 +1062,7 @@ impl Gfx {
         });
         let (tint_tex, tint_view, tint_sampler) = tint_texture(&device);
         let (block_view, block_sampler, texture_remap) = block_textures(&device, &queue, reg);
+        shadows.set_textures(&device, &block_view, &block_sampler);
         let mut sky = Sky::new();
         let (sky_view, sky_sampler) = sky_texture(&device, &queue, &sky.map);
         sky.map.keep_levels_up_to(64); // the GPU has the rest; the light needs only these
@@ -1104,14 +1110,20 @@ impl Gfx {
 
         // Solid terrain is one-sided: cull back faces (the winding is covered by tests).
         let pipe_solid =
-            voxel_pipeline(&device, &layout, &shader, "vs_main", format, None, true, Some(wgpu::Face::Back), "solid");
+            voxel_pipeline(&device, &layout, &shader, "vs_main", "fs_main", format, None, true, Some(wgpu::Face::Back), "solid");
         let pipe_solid_nocull =
-            voxel_pipeline(&device, &layout, &shader, "vs_main", format, None, true, None, "solid (no culling)");
+            voxel_pipeline(&device, &layout, &shader, "vs_main", "fs_main", format, None, true, None, "solid (no culling)");
+        // Foliage: one-sided, as Minecraft draws leaves: through a leaf block's holes shows the
+        // leaves behind it (whose faces toward it are kept) or the sky, not its own back faces.
+        // Plants carry both sides of their planes.
+        let pipe_cutout =
+            voxel_pipeline(&device, &layout, &shader, "vs_main", "fs_cutout", format, None, true, Some(wgpu::Face::Back), "foliage");
         let pipe_water = voxel_pipeline(
             &device,
             &layout,
             &shader,
             "vs_main",
+            "fs_main",
             format,
             Some(wgpu::BlendState::ALPHA_BLENDING),
             false,
@@ -1120,7 +1132,7 @@ impl Gfx {
         );
         // LOD terrain: same vertex size and instance slot, its own vertex shader.
         let pipe_lod =
-            voxel_pipeline(&device, &layout, &shader, "vs_lod", format, None, true, Some(wgpu::Face::Back), "lod");
+            voxel_pipeline(&device, &layout, &shader, "vs_lod", "fs_main", format, None, true, Some(wgpu::Face::Back), "lod");
         let pipe_sky = sky_pipeline(&device, &layout, &shader, format);
         let pipe_cloud = cloud_pipeline(&device, &layout, &shader, format);
         let (char_layout, bind_char) = character_texture(&device, &queue);
@@ -1239,6 +1251,7 @@ impl Gfx {
             cloud_mesh: None,
             pipe_solid,
             pipe_solid_nocull,
+            pipe_cutout,
             pipe_water,
             pipe_lod,
             pipe_sky,
@@ -1307,6 +1320,7 @@ impl Gfx {
     pub fn clear_world(&mut self) {
         for (_, c) in std::mem::take(&mut self.chunks) {
             self.release(c.solid);
+            self.release(c.cutout);
             self.release(c.water);
         }
         for (_, l) in std::mem::take(&mut self.lods) {
@@ -1525,15 +1539,17 @@ impl Gfx {
         for pos in client.take_mesh_changes(UPLOADS_PER_FRAME) {
             if let Some(old) = self.chunks.remove(&pos) {
                 self.release(old.solid);
+                self.release(old.cutout);
                 self.release(old.water);
             }
             self.shadows.terrain_changed();
             if let Some(mesh) = client.meshes.get(&pos) {
-                // Cutout (leaves) shares the opaque draw for now.
-                let solid = self.upload(&[&mesh.opaque.vertices, &mesh.cutout.vertices]);
+                let solid = self.upload(&[&mesh.opaque.vertices]);
+                let cutout = self.upload(&[&mesh.cutout.vertices]);
                 let water = self.upload(&[&mesh.translucent.vertices]);
                 let sky_lit = mesh.opaque.vertices.iter().chain(&mesh.cutout.vertices).any(|v| v.sky() > 0);
-                self.chunks.insert(pos, GpuChunk { solid, water, sky_lit });
+                let plant_quads = mesh.plant_quads as u32;
+                self.chunks.insert(pos, GpuChunk { solid, cutout, plant_quads, water, sky_lit });
             }
         }
         for key in client.lod.take_evicted() {
@@ -1808,13 +1824,24 @@ impl Gfx {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame") });
         for job in &shadow_jobs {
             let size = CHUNK_SIZE as f32;
-            let mut casters: Vec<([f32; 4], wgpu::BufferSlice<'_>, u32)> = Vec::new();
+            let mut casters: Vec<([f32; 4], wgpu::BufferSlice<'_>, u32, bool)> = Vec::new();
             for (pos, c) in &self.chunks {
-                let Some(layer) = c.solid.as_ref().filter(|_| c.sky_lit) else { continue };
+                if !c.sky_lit {
+                    continue;
+                }
                 let o = pos.origin();
                 let min = [o.x as f32, o.y as f32, o.z as f32];
-                if job.holds(&self.shadows, min, size) {
-                    casters.push(([min[0], min[1], min[2], 0.0], self.pool.slice(&layer.slot), layer.quads.min(MAX_QUADS)));
+                if !job.holds(&self.shadows, min, size) {
+                    continue;
+                }
+                for (layer, foliage) in [(&c.solid, false), (&c.cutout, true)] {
+                    if let Some(layer) = layer {
+                        // Plants cast into the near map only (the far one is too coarse).
+                        let quads = if foliage && job.cascade == 1 { layer.quads - c.plant_quads } else { layer.quads };
+                        if quads > 0 {
+                            casters.push(([min[0], min[1], min[2], 0.0], self.pool.slice(&layer.slot), quads.min(MAX_QUADS), foliage));
+                        }
+                    }
                 }
             }
             let character = (self.char_verts > 0).then(|| (self.char_buf.slice(..), self.char_verts));
@@ -1859,6 +1886,20 @@ impl Gfx {
                     pass.set_vertex_buffer(0, self.pool.slice(&layer.slot));
                     pass.draw_indexed(0..layer.quads.min(MAX_QUADS) * 6, 0, i as u32..i as u32 + 1);
                     quads += layer.quads as u64;
+                }
+            }
+            // See-through foliage, near to far, depth-tested against the solid terrain. Plants
+            // (at the end of each chunk's foliage) only within PLANT_DISTANCE.
+            pass.set_pipeline(&self.pipe_cutout);
+            for (i, (d2, pos)) in vis.iter().enumerate().rev() {
+                let Some(c) = self.chunks.get(pos) else { continue };
+                if let Some(layer) = c.cutout.as_ref() {
+                    let n = if *d2 < PLANT_DISTANCE * PLANT_DISTANCE { layer.quads } else { layer.quads - c.plant_quads };
+                    if n > 0 {
+                        pass.set_vertex_buffer(0, self.pool.slice(&layer.slot));
+                        pass.draw_indexed(0..n.min(MAX_QUADS) * 6, 0, i as u32..i as u32 + 1);
+                        quads += n as u64;
+                    }
                 }
             }
 
@@ -2094,11 +2135,15 @@ impl Gfx {
     }
 }
 
+/// How far from the camera (to a chunk's centre, blocks) grass and flowers are drawn.
+const PLANT_DISTANCE: f32 = 96.0;
+
 fn voxel_pipeline(
     device: &wgpu::Device,
     layout: &wgpu::PipelineLayout,
     shader: &wgpu::ShaderModule,
     vertex_entry: &str,
+    fragment_entry: &str,
     format: wgpu::TextureFormat,
     blend: Option<wgpu::BlendState>,
     depth_write: bool,
@@ -2127,7 +2172,7 @@ fn voxel_pipeline(
         },
         fragment: Some(wgpu::FragmentState {
             module: shader,
-            entry_point: "fs_main",
+            entry_point: fragment_entry,
             compilation_options: wgpu::PipelineCompilationOptions::default(),
             targets: &[Some(wgpu::ColorTargetState {
                 format,

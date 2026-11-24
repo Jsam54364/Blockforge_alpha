@@ -18,6 +18,16 @@ pub enum RenderLayer {
     Translucent,
 }
 
+/// A block's shape for drawing.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Model {
+    /// A cube (or slab), one quad per visible face.
+    Cube,
+    /// Two crossed planes corner to corner, as Minecraft and Vintage Story draw grass,
+    /// flowers and small bushes (`model = "cross"`).
+    Cross,
+}
+
 #[derive(Clone, Debug)]
 pub struct BlockDef {
     pub name: String,
@@ -38,6 +48,7 @@ pub struct BlockDef {
     pub slab: bool,
     /// The biome it belongs to (its key, e.g. "wildwood"), if any.
     pub biome: Option<String>,
+    pub model: Model,
 }
 
 #[derive(Debug)]
@@ -195,6 +206,11 @@ impl BlockRegistry {
             let label = get_str(t, "label", &name)?.map(|s| s.to_string());
             let slab = get_bool(t, "slab", &name)?.unwrap_or(false);
             let biome = get_str(t, "biome", &name)?.map(|s| s.to_string());
+            let model = match get_str(t, "model", &name)?.unwrap_or("cube") {
+                "cube" => Model::Cube,
+                "cross" => Model::Cross,
+                other => return Err(RegistryError(format!("block '{name}': unknown model '{other}'"))),
+            };
 
             let id = reg.defs.len() as u16;
             reg.by_name.insert(name.clone(), id);
@@ -212,6 +228,7 @@ impl BlockRegistry {
                 label,
                 slab,
                 biome,
+                model,
             });
         }
 

@@ -3,7 +3,7 @@
 
 use blockforge::coords::Face;
 use blockforge::block::{BlockState, Shape};
-use blockforge::registry::BlockRegistry;
+use blockforge::registry::{BlockRegistry, Model};
 
 use crate::texgen::SIZE as TEX;
 use crate::textures;
@@ -18,12 +18,13 @@ const GREEN: [f32; 3] = [0x91 as f32 / 255.0, 0xBD as f32 / 255.0, 0x59 as f32 /
 /// How each face is lit: top, left (+Z) and right (+X).
 const SHADE: [f32; 3] = [1.0, 0.80, 0.62];
 
-/// The blocks a player can place, in the registry's order: solid, breakable, not water.
+/// The blocks a player can place, in the registry's order: solid or plants, breakable, not
+/// water.
 pub fn placeable(reg: &BlockRegistry) -> Vec<u16> {
     (1..reg.len() as u16)
         .filter(|&id| {
             let d = reg.def(id);
-            d.solid && d.hardness >= 0.0 && d.name != "water"
+            (d.solid || d.model == Model::Cross) && d.hardness >= 0.0 && d.name != "water"
         })
         .collect()
 }
@@ -216,10 +217,12 @@ pub fn display_name(name: &str) -> String {
 fn face_texels(reg: &BlockRegistry, tex: u16) -> Vec<[f32; 3]> {
     let name = reg.texture_names().get(tex as usize).map(String::as_str).unwrap_or("");
     let px = textures::load(name);
+    let foliage = textures::is_foliage(name);
     px.chunks(4)
         .map(|p| {
-            // alpha = 255 minus how much of the biome colour to apply
-            let t = 1.0 - p[3] as f32 / 255.0;
+            // alpha = 255 minus how much of the biome colour to apply (foliage: tinted below
+            // 128, whatever its holes; see `textures`)
+            let t = if foliage { (p[3] < 128) as u8 as f32 } else { 1.0 - p[3] as f32 / 255.0 };
             let mut c = [0.0; 3];
             for i in 0..3 {
                 c[i] = p[i] as f32 / 255.0 * (1.0 + (GREEN[i] - 1.0) * t);
@@ -229,10 +232,37 @@ fn face_texels(reg: &BlockRegistry, tex: u16) -> Vec<[f32; 3]> {
         .collect()
 }
 
+/// A plant's icon: its sprite, flat, twice the size (see-through where it is).
+fn sprite(reg: &BlockRegistry, tex: u16) -> Vec<u8> {
+    let name = reg.texture_names().get(tex as usize).map(String::as_str).unwrap_or("");
+    let px = textures::load(name);
+    let colour = face_texels(reg, tex);
+    let k = ICON as usize / TEX;
+    let mut out = vec![0u8; (ICON * ICON * 4) as usize];
+    for y in 0..ICON as usize {
+        for x in 0..ICON as usize {
+            let i = (y / k) * TEX + x / k;
+            let a = px[i * 4 + 3];
+            let leaf = if a < 128 { a >= 64 } else { a >= 192 };
+            if leaf {
+                let o = (y * ICON as usize + x) * 4;
+                for c in 0..3 {
+                    out[o + c] = (colour[i][c].clamp(0.0, 1.0) * 255.0).round() as u8;
+                }
+                out[o + 3] = 255;
+            }
+        }
+    }
+    out
+}
+
 /// The item `id` as a cube icon (a slab: the lower half of one): `ICON` x `ICON` RGBA,
 /// transparent around it.
 pub fn render(reg: &BlockRegistry, id: u16) -> Vec<u8> {
     let def = reg.def(id);
+    if def.model == Model::Cross {
+        return sprite(reg, def.tex[Face::PosX.index()]);
+    }
     // How tall it is (a slab: half, its sides showing the lower half of their texture).
     let tall = if is_slab(id) { 0.5 } else { 1.0 };
     let faces = [
@@ -333,7 +363,7 @@ mod tests {
         let names: Vec<&str> = ids.iter().map(|&i| reg.def(i).name.as_str()).collect();
         assert!(names.contains(&"stone") && names.contains(&"grass") && names.contains(&"log"));
         assert!(!names.contains(&"air") && !names.contains(&"water") && !names.contains(&"bedrock"));
-        for &id in &ids {
+        for &id in ids.iter().filter(|&&i| reg.def(i).model == Model::Cube) {
             let px = render(&reg, id);
             assert_eq!(px.len(), (ICON * ICON * 4) as usize);
             let at = |x: u32, y: u32| &px[((y * ICON + x) * 4) as usize..((y * ICON + x) * 4 + 4) as usize];

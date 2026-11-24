@@ -7,6 +7,7 @@
 #   light=0..15  hardness=1.0 (negative = unbreakable)
 #   texture / top / side / bottom  (texture names, interned into ids)
 #   behavior="name"  (must be registered in behavior.rs)
+#   model="cube"|"cross"  (cross: two crossed planes corner to corner, for plants)
 
 [[block]]
 name = "air"
@@ -14151,9 +14152,11 @@ name = "fern"
 group = "natural"
 family = "plant"
 biome = "wildwood"
+solid = false
 opaque = false
 render = "cutout"
-hardness = 0.1
+model = "cross"
+hardness = 0
 
 [[block]]
 name = "meadow"
@@ -14165,3 +14168,160 @@ hardness = 0.6
 top = "meadow_top"
 side = "prairie_grass_side"
 bottom = "dirt"
+
+# Plants: Vintage Story-style grass, flowers and bushes, drawn as two crossed planes
+# (tools/paint_plants.py paints their sprites). Walked through; broken with a tap.
+
+[[block]]
+name = "short_grass"
+group = "natural"
+family = "plant"
+label = "Short Grass"
+solid = false
+opaque = false
+render = "cutout"
+model = "cross"
+hardness = 0
+
+[[block]]
+name = "grass_tuft"
+group = "natural"
+family = "plant"
+label = "Grass"
+solid = false
+opaque = false
+render = "cutout"
+model = "cross"
+hardness = 0
+
+[[block]]
+name = "tall_grass"
+group = "natural"
+family = "plant"
+label = "Tall Grass"
+solid = false
+opaque = false
+render = "cutout"
+model = "cross"
+hardness = 0
+
+[[block]]
+name = "dry_tuft"
+group = "natural"
+family = "plant"
+label = "Dry Grass Tuft"
+solid = false
+opaque = false
+render = "cutout"
+model = "cross"
+hardness = 0
+
+[[block]]
+name = "leafy_bush"
+group = "natural"
+family = "plant"
+label = "Leafy Bush"
+solid = false
+opaque = false
+render = "cutout"
+model = "cross"
+hardness = 0
+
+[[block]]
+name = "berry_bush"
+group = "natural"
+family = "plant"
+label = "Berry Bush"
+solid = false
+opaque = false
+render = "cutout"
+model = "cross"
+hardness = 0
+
+[[block]]
+name = "dandelion"
+group = "natural"
+family = "plant"
+label = "Dandelion"
+solid = false
+opaque = false
+render = "cutout"
+model = "cross"
+hardness = 0
+
+[[block]]
+name = "poppy"
+group = "natural"
+family = "plant"
+label = "Poppy"
+solid = false
+opaque = false
+render = "cutout"
+model = "cross"
+hardness = 0
+
+[[block]]
+name = "cornflower"
+group = "natural"
+family = "plant"
+label = "Cornflower"
+solid = false
+opaque = false
+render = "cutout"
+model = "cross"
+hardness = 0
+
+[[block]]
+name = "daisy"
+group = "natural"
+family = "plant"
+label = "Daisy"
+solid = false
+opaque = false
+render = "cutout"
+model = "cross"
+hardness = 0
+
+[[block]]
+name = "lavender"
+group = "natural"
+family = "plant"
+label = "Lavender"
+solid = false
+opaque = false
+render = "cutout"
+model = "cross"
+hardness = 0
+
+[[block]]
+name = "dead_bush"
+group = "natural"
+family = "plant"
+label = "Dead Bush"
+solid = false
+opaque = false
+render = "cutout"
+model = "cross"
+hardness = 0
+
+[[block]]
+name = "reeds"
+group = "natural"
+family = "plant"
+label = "Reeds"
+solid = false
+opaque = false
+render = "cutout"
+model = "cross"
+hardness = 0
+
+[[block]]
+name = "heather"
+group = "natural"
+family = "plant"
+label = "Heather"
+solid = false
+opaque = false
+render = "cutout"
+model = "cross"
+hardness = 0

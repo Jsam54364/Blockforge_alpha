@@ -877,11 +877,11 @@ impl Game {
             // The camera is in front of him: reach from his own eyes instead.
             let p = self.player.position();
             let eyes = [p[0] as f32, p[1] as f32 + 1.6, p[2] as f32];
-            return raycast(eyes, self.cam.forward(), REACH, |p| self.client.is_solid(p));
+            return raycast(eyes, self.cam.forward(), REACH, |p| self.client.is_targetable(p));
         }
         // Behind the character, the camera is further from what he can reach.
         let behind = if s.view == CamView::Back { 4.0 } else { 0.0 };
-        raycast(self.cam.pos, self.cam.forward(), REACH + behind, |p| self.client.is_solid(p))
+        raycast(self.cam.pos, self.cam.forward(), REACH + behind, |p| self.client.is_targetable(p))
     }
 
     fn break_target(&mut self) {
@@ -899,7 +899,8 @@ impl Game {
         }
         if let Some(hit) = self.target() {
             let block = BlockState(item).id();
-            let mut cell = hit.pos.neighbor(hit.face);
+            // Building onto a plant puts the block in its place (grass is not a wall).
+            let mut cell = if self.client.is_plant(hit.pos) { hit.pos } else { hit.pos.neighbor(hit.face) };
             let mut state = BlockState::full(block);
             if crate::icons::is_slab(item) {
                 // A slab onto the top of a block lies at the bottom of the cell above it, under

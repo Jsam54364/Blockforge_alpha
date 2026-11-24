@@ -88,7 +88,7 @@ fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
 pub fn foliage_mask(names: &[String], remap: Option<&[u16]>) -> [[u32; 4]; 32] {
     let mut mask = [[0u32; 4]; 32];
     for (i, n) in names.iter().enumerate() {
-        let leafy = n == "leaves" || n.ends_with("_leaves") || n == "fern";
+        let leafy = crate::textures::is_foliage(n);
         if !leafy {
             continue;
         }
@@ -177,6 +177,10 @@ impl Job {
 pub struct Shadows {
     cascades: [Cascade; 2],
     pipe_chunk: wgpu::RenderPipeline,
+    /// See-through foliage, alpha-tested with the block textures (`set_textures`).
+    pipe_cutout: wgpu::RenderPipeline,
+    tex_layout: wgpu::BindGroupLayout,
+    tex_bind: Option<wgpu::BindGroup>,
     pipe_char: wgpu::RenderPipeline,
     frame: u64,
     /// Terrain changed since the far map was drawn.
@@ -204,13 +208,40 @@ impl Shadows {
             bind_group_layouts: &[&layout],
             push_constant_ranges: &[],
         });
+        let tex_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("shadow foliage textures"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let pl_cutout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("shadow foliage"),
+            bind_group_layouts: &[&layout, &tex_layout],
+            push_constant_ranges: &[],
+        });
         const CHUNK_ATTRS: [wgpu::VertexAttribute; 1] = wgpu::vertex_attr_array![0 => Uint32x2];
         const INSTANCE_ATTRS: [wgpu::VertexAttribute; 1] = wgpu::vertex_attr_array![1 => Float32x4];
         const CHAR_ATTRS: [wgpu::VertexAttribute; 3] = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2];
         let pipeline = |label: &str, entry: &str, buffers: &[wgpu::VertexBufferLayout]| {
+            let (layout, fs) = if entry == "vs_cutout" { (&pl_cutout, "fs_cutout") } else { (&pl, "fs_depth") };
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(label),
-                layout: Some(&pl),
+                layout: Some(layout),
                 vertex: wgpu::VertexState {
                     module: &shader,
                     entry_point: entry,
@@ -219,7 +250,7 @@ impl Shadows {
                 },
                 fragment: Some(wgpu::FragmentState {
                     module: &shader,
-                    entry_point: "fs_depth",
+                    entry_point: fs,
                     compilation_options: Default::default(),
                     targets: &[Some(wgpu::ColorTargetState { format: FORMAT, blend: None, write_mask: wgpu::ColorWrites::RED })],
                 }),
@@ -247,6 +278,14 @@ impl Shadows {
         let pipe_chunk = pipeline(
             "shadow terrain",
             "vs_chunk",
+            &[
+                wgpu::VertexBufferLayout { array_stride: 8, step_mode: wgpu::VertexStepMode::Vertex, attributes: &CHUNK_ATTRS },
+                wgpu::VertexBufferLayout { array_stride: 16, step_mode: wgpu::VertexStepMode::Instance, attributes: &INSTANCE_ATTRS },
+            ],
+        );
+        let pipe_cutout = pipeline(
+            "shadow foliage",
+            "vs_cutout",
             &[
                 wgpu::VertexBufferLayout { array_stride: 8, step_mode: wgpu::VertexStepMode::Vertex, attributes: &CHUNK_ATTRS },
                 wgpu::VertexBufferLayout { array_stride: 16, step_mode: wgpu::VertexStepMode::Instance, attributes: &INSTANCE_ATTRS },
@@ -311,6 +350,9 @@ impl Shadows {
         Shadows {
             cascades: [cascade(NEAR_HALF, "shadow map near"), cascade(FAR_HALF, "shadow map far")],
             pipe_chunk,
+            pipe_cutout,
+            tex_layout,
+            tex_bind: None,
             pipe_char,
             frame: 0,
             far_stale: true,
@@ -394,7 +436,7 @@ impl Shadows {
         encoder: &mut wgpu::CommandEncoder,
         index_buf: &wgpu::Buffer,
         job: &Job,
-        chunks: &[([f32; 4], wgpu::BufferSlice<'_>, u32)],
+        chunks: &[([f32; 4], wgpu::BufferSlice<'_>, u32, bool)],
         character: Option<(wgpu::BufferSlice<'_>, u32)>,
         timestamps: Option<wgpu::RenderPassTimestampWrites<'_>>,
     ) {
@@ -435,12 +477,23 @@ impl Shadows {
             });
             pass.set_bind_group(0, &c.bind, &[]);
             if n > 0 {
-                pass.set_pipeline(&self.pipe_chunk);
                 pass.set_index_buffer(index_buf.slice(..), wgpu::IndexFormat::Uint32);
                 pass.set_vertex_buffer(1, c.instances.slice(..));
-                for (i, (_, slice, quads)) in chunks[..n].iter().enumerate() {
-                    pass.set_vertex_buffer(0, *slice);
-                    pass.draw_indexed(0..quads * 6, 0, i as u32..i as u32 + 1);
+                // Solid terrain first, then foliage (each switch of pipeline only once).
+                for foliage in [false, true] {
+                    if foliage {
+                        let Some(tb) = &self.tex_bind else { break };
+                        pass.set_pipeline(&self.pipe_cutout);
+                        pass.set_bind_group(1, tb, &[]);
+                    } else {
+                        pass.set_pipeline(&self.pipe_chunk);
+                    }
+                    for (i, (_, slice, quads, cut)) in chunks[..n].iter().enumerate() {
+                        if *cut == foliage {
+                            pass.set_vertex_buffer(0, *slice);
+                            pass.draw_indexed(0..quads * 6, 0, i as u32..i as u32 + 1);
+                        }
+                    }
                 }
             }
             if let Some((slice, verts)) = character {
@@ -449,6 +502,18 @@ impl Shadows {
                 pass.draw(0..verts, 0..1);
             }
         }
+    }
+
+    /// The block textures, for foliage to cast shadows through its holes.
+    pub fn set_textures(&mut self, device: &wgpu::Device, view: &wgpu::TextureView, sampler: &wgpu::Sampler) {
+        self.tex_bind = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("shadow foliage textures"),
+            layout: &self.tex_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(sampler) },
+            ],
+        }));
     }
 
     /// For the main shader: each map's matrix (this frame's `jobs` take the place of what

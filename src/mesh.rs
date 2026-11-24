@@ -15,7 +15,7 @@
 
 use crate::block::{BlockState, UNKNOWN};
 use crate::coords::{ChunkPos, Face, LocalPos, CHUNK_SIZE, CHUNK_VOLUME};
-use crate::registry::{BlockRegistry, RenderLayer};
+use crate::registry::{BlockRegistry, Model, RenderLayer};
 use crate::world::ChunkStore;
 
 /// How many cells of the neighbouring chunks a snapshot holds on each side: one for faces and
@@ -245,8 +245,11 @@ impl MeshLayer {
 #[derive(Default, Clone, Debug)]
 pub struct ChunkMesh {
     pub opaque: MeshLayer,
+    /// See-through foliage: leaves first, then the plants (`plant_quads` of them, at the end,
+    /// so the renderer can leave distant plants out by drawing fewer quads).
     pub cutout: MeshLayer,
     pub translucent: MeshLayer,
+    pub plant_quads: usize,
 }
 
 impl ChunkMesh {
@@ -309,9 +312,11 @@ fn face_hidden(reg: &BlockRegistry, state: BlockState, face: Face, nb: BlockStat
     }
     let a = reg.get(state);
     let b = reg.get(nb);
-    // Opaque neighbours always occlude. Transparent ones only hide identical blocks
-    // (water next to water, leaves next to leaves).
-    let material_ok = b.opaque || (!a.opaque && nb.id() == state.id());
+    // Opaque neighbours always occlude. Transparent ones only hide identical blocks of the
+    // blended layer (water next to water): see-through leaves keep their faces against each
+    // other, so the inside of a canopy shows through its holes (Minecraft's fancy leaves;
+    // `mesh_chunk_impl` drops those deep inside a canopy).
+    let material_ok = b.opaque || (!a.opaque && nb.id() == state.id() && a.render != RenderLayer::Cutout);
     if !material_ok {
         return false;
     }
@@ -428,6 +433,26 @@ pub(crate) fn emit_quad(
     }
 }
 
+/// The two diagonal faces of a cross-shaped block (`Model::Cross`), from corner to corner of
+/// its cell, as faces 6 and 7, each twice (once per side: foliage is drawn with back faces
+/// culled, so leaves show what is behind their holes); the shader lights them as the ground. Bottom corners are darker (grass is shaded at its base); top corners carry the
+/// `tex_top` bit 1 so only they sway in the wind.
+pub(crate) fn emit_cross(layer: &mut MeshLayer, ox: i32, oy: i32, oz: i32, tex: u16, block: u8) {
+    // (x, z) at each end of the two diagonals, in quarter blocks.
+    let planes: [(u32, [(i32, i32); 2]); 2] = [(6, [(0, 0), (4, 4)]), (7, [(4, 0), (0, 4)])];
+    for (face, [(x0, z0), (x1, z1)]) in planes {
+        let corner = |x: i32, z: i32, top: bool| {
+            let y = oy + if top { 4 } else { 0 };
+            let a = (ox + x) as u32 | ((y as u32) << 8) | (((oz + z) as u32) << 16) | (face << 24) | ((if top { 3 } else { 1 }) << 27);
+            let b = tex as u32 | (15 << 16) | (((block & 15) as u32) << 20) | ((top as u32) << 27);
+            PackedVertex { a, b }
+        };
+        let (a, b, c, d) = (corner(x0, z0, false), corner(x1, z1, false), corner(x1, z1, true), corner(x0, z0, true));
+        layer.vertices.extend([a, b, c, d]);
+        layer.vertices.extend([a, d, c, b]);
+    }
+}
+
 /// For side faces, sets each corner's `tex_top`: how far (in quarter blocks) the quad's top
 /// is below the next whole block, so the texture's top row lines up with the quad's top.
 pub fn anchor_texture_top(face: Face, verts: &mut [PackedVertex; 4]) {
@@ -523,6 +548,7 @@ fn rows(reg: &BlockRegistry, pc: &PaddedChunk) -> Vec<Row> {
 
 fn mesh_chunk_impl(reg: &BlockRegistry, pc: &PaddedChunk, skip_greedy: bool) -> ChunkMesh {
     let mut mesh = ChunkMesh::default();
+    let mut plants = MeshLayer::default();
     // Only blocks that can show a face are visited: a full-height block with a hiding block on
     // all six sides has none, and most of a chunk is either that (deep stone) or air.
     let rows = rows(reg, pc);
@@ -542,13 +568,30 @@ fn mesh_chunk_impl(reg: &BlockRegistry, pc: &PaddedChunk, skip_greedy: bool) -> 
                     continue;
                 }
                 let def = reg.get(state);
+                if def.model == Model::Cross {
+                    emit_cross(&mut plants, x * 4, y * 4, z * 4, def.tex[Face::PosX.index()], def.light_emission);
+                    continue;
+                }
                 let (ymin, ymax) = state.shape().y_range_q();
+                // A see-through block (leaves) beside the same: their shared face only shows
+                // near the canopy's surface, where the inside can be seen through the holes.
+                // Deeper (the neighbour has the same block on all six sides) it is left out.
+                let cutout = def.render == RenderLayer::Cutout;
+                let buried = |nx: i32, ny: i32, nz: i32| {
+                    Face::ALL.iter().all(|f| {
+                        let (a, b, c) = f.normal();
+                        pc.at(nx + a, ny + b, nz + c) == state
+                    })
+                };
                 // A liquid's surface: the top of its block is lowered a little (see shader).
                 let surface = def.render == RenderLayer::Translucent && !def.solid && pc.at(x, y + 1, z) != state;
                 for face in Face::ALL {
                     let (nx, ny, nz) = face.normal();
                     let nb = pc.at(x + nx, y + ny, z + nz);
                     if face_hidden(reg, state, face, nb) {
+                        continue;
+                    }
+                    if cutout && nb == state && buried(x + nx, y + ny, z + nz) {
                         continue;
                     }
                     let ao = if surface && face == Face::PosY {
@@ -585,6 +628,8 @@ fn mesh_chunk_impl(reg: &BlockRegistry, pc: &PaddedChunk, skip_greedy: bool) -> 
             }
         }
     }
+    mesh.plant_quads = plants.quad_count();
+    mesh.cutout.vertices.extend(plants.vertices);
     mesh
 }
 
@@ -778,7 +823,15 @@ mod tests {
                         }
                         for f in Face::ALL {
                             let (nx, ny, nz) = f.normal();
-                            faces += !face_hidden(&r, s, f, pc.at(x + nx, y + ny, z + nz)) as usize;
+                            let nb = pc.at(x + nx, y + ny, z + nz);
+                            // Leaves against leaves buried in more leaves: left out.
+                            let buried = r.get(s).render == RenderLayer::Cutout
+                                && nb == s
+                                && Face::ALL.iter().all(|g| {
+                                    let (a, b, c) = g.normal();
+                                    pc.at(x + nx + a, y + ny + b, z + nz + c) == s
+                                });
+                            faces += (!face_hidden(&r, s, f, nb) && !buried) as usize;
                         }
                     }
                 }
@@ -786,6 +839,49 @@ mod tests {
             assert!(faces > 1000, "seed {seed}: a scene with faces");
             assert_eq!(mesh_chunk(&r, &pc).quad_count(), faces, "seed {seed}");
         }
+    }
+
+    #[test]
+    fn see_through_leaves_show_their_inner_faces_near_the_surface_only() {
+        let r = reg();
+        let leaves = BlockState::full(r.id("leaves").unwrap());
+        // A 5 x 5 x 5 block of leaves in air.
+        let mut pc = PaddedChunk::filled(AIR);
+        for y in 0..5 {
+            for z in 0..5 {
+                for x in 0..5 {
+                    pc.set(x, y, z, leaves);
+                }
+            }
+        }
+        let m = mesh_chunk(&r, &pc);
+        assert_eq!(m.opaque.quad_count() + m.translucent.quad_count(), 0);
+        // Outer faces: 6 * 25. Inner faces between two leaves, both ways: 3 axes * 4 planes *
+        // 25 * 2 = 600, less those whose far side is buried (the 3 x 3 x 3 core, each of its
+        // 27 blocks seen from its 6 neighbours: 162).
+        assert_eq!(m.cutout.quad_count(), 150 + 600 - 162);
+    }
+
+    #[test]
+    fn plants_are_two_crossed_planes_on_faces_six_and_seven() {
+        let r = reg();
+        let grass = BlockState::full(r.id("tall_grass").unwrap());
+        let mut pc = PaddedChunk::filled(AIR);
+        pc.set(3, 4, 5, grass);
+        let m = mesh_chunk(&r, &pc);
+        assert_eq!(m.cutout.quad_count(), 4, "two planes, both sides");
+        let faces: Vec<u32> = m.cutout.vertices.iter().map(|v| v.face_index()).collect();
+        assert!(faces[..8].iter().all(|&f| f == 6) && faces[8..].iter().all(|&f| f == 7));
+        // Corner to corner of its cell, the whole block high; only the top corners sway.
+        for v in &m.cutout.vertices {
+            assert!([12, 16].contains(&v.x()) && [16, 20].contains(&v.y()) && [20, 24].contains(&v.z()));
+            assert_eq!(v.tex_top() & 1 == 1, v.y() == 20);
+        }
+        // A plant hides nothing: the ground under it keeps its top.
+        let stone = BlockState::full(r.id("stone").unwrap());
+        pc.set(3, 3, 5, stone);
+        let m = mesh_chunk(&r, &pc);
+        assert_eq!(m.opaque.quad_count(), 6);
     }
 
     #[test]

@@ -345,6 +345,25 @@ impl Client {
         }
     }
 
+    /// What the player can aim at: solid blocks and plants (which he walks through).
+    pub fn is_targetable(&self, pos: BlockPos) -> bool {
+        match (self.store.block(pos), self.registry.as_ref()) {
+            (Some(s), Some(r)) => {
+                let d = r.get(s);
+                d.solid || (!s.is_air() && d.model == crate::registry::Model::Cross)
+            }
+            _ => false,
+        }
+    }
+
+    /// A plant (`Model::Cross`) is at `pos`.
+    pub fn is_plant(&self, pos: BlockPos) -> bool {
+        match (self.store.block(pos), self.registry.as_ref()) {
+            (Some(s), Some(r)) => !s.is_air() && r.get(s).model == crate::registry::Model::Cross,
+            _ => false,
+        }
+    }
+
     /// For collision: `None` if the chunk at `pos` is not loaded; otherwise the solid part of
     /// the cell, if any, as (bottom, top) heights inside it (a half slab is (0.0, 0.5)).
     pub fn solid_span(&self, pos: BlockPos) -> Option<Option<(f32, f32)>> {

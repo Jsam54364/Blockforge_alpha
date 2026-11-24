@@ -91,6 +91,8 @@ fn face_uv(face: u32, p: vec3<f32>) -> vec2<f32> {
         case 2u: { return vec2<f32>(p.x, p.z); }
         case 3u: { return vec2<f32>(p.x, -p.z); }
         case 4u: { return vec2<f32>(p.x, -p.y); }
+        // The two diagonal planes of cross-shaped plants: across them, x runs 0..1.
+        case 6u, 7u: { return vec2<f32>(p.x, -p.y); }
         default: { return vec2<f32>(-p.x, -p.y); }
     }
 }
@@ -124,14 +126,17 @@ fn block_light(blk: f32) -> vec3<f32> {
     return vec3<f32>(blk);
 }
 
+// (Faces 6 and 7, a plant's diagonal planes, are lit as the ground they grow from: up.)
 fn face_normal(f: u32) -> vec3<f32> {
-    var n = array<vec3<f32>, 6>(
+    var n = array<vec3<f32>, 8>(
         vec3<f32>(1.0, 0.0, 0.0),
         vec3<f32>(-1.0, 0.0, 0.0),
         vec3<f32>(0.0, 1.0, 0.0),
         vec3<f32>(0.0, -1.0, 0.0),
         vec3<f32>(0.0, 0.0, 1.0),
-        vec3<f32>(0.0, 0.0, -1.0)
+        vec3<f32>(0.0, 0.0, -1.0),
+        vec3<f32>(0.0, 1.0, 0.0),
+        vec3<f32>(0.0, 1.0, 0.0)
     );
     return n[min(f, 5u)];
 }
@@ -162,7 +167,9 @@ fn vs_main(v: VsIn) -> VsOut {
     var world = v.origin.xyz + local;
     let leafy = is_foliage(tex);
     if (leafy && g.light_color.w > 0.0) {
-        world += sway(world) * g.light_color.w;
+        // A plant sways at its tips only (its top corners carry bit 27), rooted at the base.
+        let rooted = select(1.0, f32((b >> 27u) & 1u), face >= 6u);
+        world += sway(world) * (g.light_color.w * rooted);
     }
     // Water has no ambient occlusion: on its surface the AO bits say how far the shore is
     // (blockforge::mesh::shore_corners: 0 touching .. 3 two blocks or more).
@@ -178,7 +185,7 @@ fn vs_main(v: VsIn) -> VsOut {
     let n = face_normal(face);
     let facing = max(dot(n, g.light.xyz), 0.0);
     let direct = g.light_color.rgb * facing;
-    let ambient = max(g.face_light[min(face, 5u)].rgb - direct, vec3<f32>(0.0));
+    let ambient = max(g.face_light[select(min(face, 5u), 2u, face >= 6u)].rgb - direct, vec3<f32>(0.0));
     let open = max(sky, 0.25);
     let shaded = g.shadow.z > 0.0;
     o.color = ambient * (ao_f * open) + block_light(blk);
@@ -195,7 +202,7 @@ fn vs_main(v: VsIn) -> VsOut {
     o.open = sky;
     o.world = world;
     // Side faces: lift the texture so its top row starts at the quad's top (half-slabs).
-    let lift = f32((b >> 27u) & 3u) * 0.25;
+    let lift = select(f32((b >> 27u) & 3u) * 0.25, 0.0, face >= 6u);
     o.uv = face_uv(face, local + vec3<f32>(0.0, lift, 0.0));
     o.layer = tex;
     o.face = face;
@@ -382,6 +389,9 @@ fn hash_block(p: vec3<f32>) -> u32 {
 // Every block turns and mirrors its texture its own way (tops: 8 ways; sides: mirrored or
 // not, so grass fringes stay on top), which makes the repeats much harder to see.
 fn block_uv(face: u32, uv: vec2<f32>, world: vec3<f32>) -> vec2<f32> {
+    if (face >= 6u) {
+        return uv; // a plant: drawn as painted
+    }
     let h = hash_block(world - face_normal(face) * 0.1);
     let cell = floor(uv);
     var f = uv - cell;
@@ -647,6 +657,33 @@ fn fs_main(f: VsOut) -> @location(0) vec4<f32> {
     let ddx = dpdx(f.uv);
     let ddy = dpdy(f.uv);
     let tex = textureSampleGrad(blocks, blocks_sampler, block_uv(f.face, f.uv, f.world), f.layer, ddx, ddy);
+    return shade(f, tex);
+}
+
+// How much of a foliage texel is leaf (see app/src/textures.rs: tinted foliage keeps alpha
+// in 0..0.5, untinted in 0.5..1), and whether it takes the biome's colour.
+fn foliage_cover(a: f32) -> f32 {
+    return select((a - 0.502) / 0.498, a / 0.498, a < 0.5);
+}
+
+// See-through foliage (leaves, grass, flowers): alpha-tested, in its own pass after the solid
+// terrain (a shader that can discard would cost the opaque pass its early depth test on
+// tile-based GPUs). Far away, where mip levels have averaged leaf and hole, the cut is lower,
+// so distant leaves and grass keep their body instead of thinning out.
+@fragment
+fn fs_cutout(f: VsOut) -> @location(0) vec4<f32> {
+    let ddx = dpdx(f.uv);
+    let ddy = dpdy(f.uv);
+    let tex = textureSampleGrad(blocks, blocks_sampler, block_uv(f.face, f.uv, f.world), f.layer, ddx, ddy);
+    let lod = log2(max(length(ddx), length(ddy)) * 32.0);
+    let cut = mix(0.5, 0.28, clamp(lod / 3.0, 0.0, 1.0));
+    if (foliage_cover(tex.a) < cut) {
+        discard;
+    }
+    return shade(f, tex);
+}
+
+fn shade(f: VsOut, tex: vec4<f32>) -> vec4<f32> {
     let d = distance(f.world, g.cam_pos.xyz);
     let fog = clamp((d - g.fog_params.x) / (g.fog_params.y - g.fog_params.x), 0.0, 1.0) * g.flags.x;
     var col: vec3<f32>;
@@ -658,8 +695,10 @@ fn fs_main(f: VsOut) -> @location(0) vec4<f32> {
         alpha = w.a;
     } else {
         let t = tint_at(f.world.xz);
-        // Alpha says how much of the biome colour to apply: 0 = all (grass), 1 = none.
-        let albedo = mix(tex.rgb * t.rgb, tex.rgb, tex.a) * mix(0.86, 1.14, t.a);
+        // Alpha says how much of the biome colour to apply: 0 = all (grass), 1 = none. For
+        // foliage it says only whether (and how much is leaf: see `foliage_cover`).
+        let untinted = select(tex.a, select(0.0, 1.0, tex.a >= 0.5), is_foliage(f.layer));
+        let albedo = mix(tex.rgb * t.rgb, tex.rgb, untinted) * mix(0.86, 1.14, t.a);
         col = albedo * surface_light(f, n, t.rgb);
     }
     // Fog takes on the sky's colour in that direction, so far terrain melts into the sky

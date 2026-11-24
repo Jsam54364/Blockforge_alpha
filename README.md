@@ -464,6 +464,20 @@ point, `worldgen.rs` turns that into blocks, `flora.rs` grows trees and rocks on
 * **Flora** (`flora.rs`): 16 kinds (oak, big oak, birch, maple, spruce, fir, pine, redwood,
   acacia, willow, palm, jungle, cactus, bush, boulder, fallen log) on jittered grids, so
   each chunk can place trees from its neighbours without seams. Density follows the biome.
+* **Plants**, as Vintage Story covers its ground: 15 kinds drawn as two crossed planes
+  (`model = "cross"`): short, medium and tall grass, dry tufts, ferns, leafy and berry
+  bushes, dandelions, poppies, cornflowers, daisies, lavender, dead bushes, reeds and heather.
+  Every dry, whole-block surface gets one by biome (`WorldGen::plant_for`): grass of three
+  heights almost everywhere green, flower meadows in patches, ferns under trees, reeds along
+  rivers, dry tufts and dead bushes where it is dry. Grasses and ferns are greyscale and
+  take the biome's grass colour. Their sprites are painted by `tools/paint_plants.py`. They
+  sway at their tips, are walked through, broken with a tap, replaced by a block built onto
+  them, and fall when the ground under them goes. They are drawn within 96 blocks.
+* **See-through leaves**, as Minecraft's fancy leaves: holes in clumps (a third of each leaf
+  texture, where it is darkest), faces between leaves kept near a canopy's surface so its
+  inside shows through, back faces culled. Leaves and plants are alpha-tested in a pass of
+  their own after the solid terrain (so the solid pass keeps the early depth test on
+  tile-based phone GPUs), and cast dappled shadows through their holes.
 * Distant terrain (`lod.rs`) samples the same functions in batches, so it matches.
 * `cargo run --release --example worldmap -- <seed> <blocks per pixel> map.ppm` draws a map;
   `gen_bench` and `lodtime` time the generator.

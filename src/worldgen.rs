@@ -26,7 +26,7 @@ use crate::rng::hash3;
 pub const SEA_LEVEL: i32 = 0;
 /// Bumped whenever the same seed would generate different terrain: worlds saved by an
 /// older generator are kept apart (their edits would land on different ground).
-pub const WORLDGEN_VERSION: u32 = 12;
+pub const WORLDGEN_VERSION: u32 = 13;
 pub const BEDROCK_Y: i32 = -128;
 /// No caves below this; deep chunks collapse to a single uniform entry.
 const CAVE_FLOOR: i32 = -48;
@@ -61,6 +61,8 @@ pub struct Column {
     pub max_top: i32,
     /// Features that reach into this column of chunks.
     pub features: Vec<Feature>,
+    /// The plant (grass, flower, bush...) growing on each column's ground, or 0.
+    pub plant: Vec<u16>,
 }
 
 impl Column {
@@ -70,6 +72,48 @@ impl Column {
 }
 
 /// The named blocks the generator uses.
+/// The plants the generator grows (0 for any the registry lacks).
+#[derive(Clone, Debug)]
+struct Plants {
+    short: u16,
+    tuft: u16,
+    tall: u16,
+    dry: u16,
+    fern: u16,
+    bush: u16,
+    berries: u16,
+    dandelion: u16,
+    poppy: u16,
+    cornflower: u16,
+    daisy: u16,
+    lavender: u16,
+    dead: u16,
+    reeds: u16,
+    heather: u16,
+}
+
+impl Plants {
+    fn all(&self) -> [u16; 15] {
+        [
+            self.short, self.tuft, self.tall, self.dry, self.fern, self.bush, self.berries, self.dandelion, self.poppy, self.cornflower, self.daisy,
+            self.lavender, self.dead, self.reeds, self.heather,
+        ]
+    }
+}
+
+/// One of `table`'s plants, by weight, for `pick` in 0..1.
+fn choose(pick: f32, table: &[(u16, f32)]) -> u16 {
+    let total: f32 = table.iter().map(|t| t.1).sum();
+    let mut at = pick * total;
+    for &(id, w) in table {
+        if at < w {
+            return id;
+        }
+        at -= w;
+    }
+    table.last().map_or(0, |t| t.0)
+}
+
 #[derive(Clone, Debug)]
 struct Blocks {
     #[allow(dead_code)]
@@ -104,6 +148,7 @@ pub struct WorldGen {
     seed: u64,
     land: Land,
     b: Blocks,
+    plants: Plants,
     /// The rock types, in the order regions wind around each other (see `rock_at`).
     rocks: [u16; 5],
     rock_regions: Fbm,
@@ -230,6 +275,24 @@ impl WorldGen {
                 or("sunstone", "sandstone"),
             ],
         };
+        let p = |n: &str| reg.id(n).unwrap_or(0);
+        let plants = Plants {
+            short: p("short_grass"),
+            tuft: p("grass_tuft"),
+            tall: p("tall_grass"),
+            dry: p("dry_tuft"),
+            fern: p("fern"),
+            bush: p("leafy_bush"),
+            berries: p("berry_bush"),
+            dandelion: p("dandelion"),
+            poppy: p("poppy"),
+            cornflower: p("cornflower"),
+            daisy: p("daisy"),
+            lavender: p("lavender"),
+            dead: p("dead_bush"),
+            reeds: p("reeds"),
+            heather: p("heather"),
+        };
         let mut wood = [(0u16, 0u16); 16];
         let w = |log: &str, leaves: &str| (or(log, "log"), or(leaves, "leaves"));
         wood[Kind::Oak as usize] = w("log", "leaves");
@@ -255,6 +318,7 @@ impl WorldGen {
             seed,
             land: Land::new(seed),
             b,
+            plants,
             rocks: [id("basalt"), id("granite"), id("stone"), id("limestone"), id("slate")],
             rock_regions: Fbm::new(seed ^ 0x0C0F_FEE5, 2600.0, 2, 0.4),
             patches: Fbm::new(seed ^ 0x9A7C_4E55, 24.0, 3, 0.55),
@@ -628,6 +692,7 @@ impl WorldGen {
             min_top: i32::MAX,
             max_top: i32::MIN,
             features: Vec::new(),
+            plant: Vec::with_capacity(n),
         };
         // The land with a one-block border: slabs and slopes depend on the neighbours.
         const W: i32 = CHUNK_SIZE + 2;
@@ -655,6 +720,8 @@ impl WorldGen {
                 c.rock.push(rock);
                 c.water.push(water);
                 c.ice.push(water != DRY && s.t < -0.5);
+                // Plants grow on dry ground with a whole block on top (not on a slab).
+                c.plant.push(if water == DRY && hq.rem_euclid(4) < 2 { self.plant_for(x, z, s, surf, slope) } else { 0 });
             }
         }
         // Features: inside the column the land is already known.
@@ -760,6 +827,9 @@ impl WorldGen {
         let i = lz as usize * CHUNK_SIZE as usize + lx as usize;
         let hq = col.height_q[i];
         let mut state = self.block_at(wx, wy, wz, hq.div_euclid(4), hq.rem_euclid(4), col.surface[i], col.subsurface[i], col.rock[i], col.water[i], col.ice[i]);
+        if col.plant[i] != 0 && wy == hq.div_euclid(4) {
+            state = BlockState::full(col.plant[i]);
+        }
         // Features, in the same order and with the same rules as `generate_chunk`.
         for f in &col.features {
             let (lo, hi) = f.bounds();
@@ -778,7 +848,69 @@ impl WorldGen {
     /// Whether a feature's block may go where `state` is: everything fills air (and water,
     /// for solid parts), solid parts replace leaves and water plants' leaves too.
     fn feature_may_replace(&self, state: BlockState, solid: bool) -> bool {
-        state.is_air() || (solid && (self.palette.wood.iter().any(|w| w.1 == state.id() && w.1 != 0)))
+        state.is_air()
+            || (solid && (self.palette.wood.iter().any(|w| w.1 == state.id() && w.1 != 0)))
+            || (state.id() != 0 && self.plants.all().contains(&state.id()))
+    }
+
+    /// The plant growing on the ground at `(x, z)`, whose top block is `surf`, or 0. As in
+    /// Vintage Story the ground is mostly covered: grass of three heights everywhere it is
+    /// green, ferns under the trees, flowers in meadow patches, reeds along rivers, dry tufts
+    /// and dead bushes where it is dry. Patch noise makes clumps and clearings.
+    fn plant_for(&self, x: i32, z: i32, s: &LandSample, surf: u16, slope: f32) -> u16 {
+        if slope > 1.3 {
+            return 0;
+        }
+        let (b, p) = (&self.b, &self.plants);
+        let soil = [b.grass, b.lush_grass, b.dry_grass, b.prairie_grass, b.cold_grass, b.meadow, b.leaf_litter, b.needle_floor, b.rich_soil, b.moss, b.mud, b.peat, b.tundra_moss]
+            .contains(&surf);
+        let sandy = surf == b.sand || surf == b.red_sand;
+        if !soil && !sandy {
+            return 0;
+        }
+        let h = hash3(self.seed ^ 0x9_1A47, x, 7, z);
+        let roll = (h & 0xFFFF) as f32 / 65536.0;
+        let pick = ((h >> 16) & 0xFFFF) as f32 / 65536.0;
+        let patch = self.patches.at(x as f32 * 0.8 + 311.0, z as f32 * 0.8 - 97.0, 1.0);
+        let clump = 0.45 + 0.9 * crate::noise::smoothstep(-0.35, 0.55, patch);
+        if sandy {
+            let density = match s.biome {
+                Biome::Desert | Biome::Mesa => 0.012,
+                Biome::Beach | Biome::Savanna | Biome::Steppe => 0.05,
+                _ => 0.0,
+            };
+            return if roll < density * clump { choose(pick, &[(p.dead, 3.0), (p.dry, 1.0)]) } else { 0 };
+        }
+        if s.river > 0.55 && roll < 0.5 {
+            return choose(pick, &[(p.reeds, 4.0), (p.tall, 2.0), (p.tuft, 1.0)]);
+        }
+        let grasses = |short: f32, tuft: f32, tall: f32| [(p.short, short), (p.tuft, tuft), (p.tall, tall)];
+        let flowers = patch > 0.3;
+        let (density, table): (f32, Vec<(u16, f32)>) = match s.biome {
+            Biome::Plains if flowers => (
+                0.7,
+                vec![(p.short, 3.0), (p.tuft, 3.0), (p.dandelion, 2.0), (p.poppy, 1.5), (p.cornflower, 1.5), (p.daisy, 2.0), (p.lavender, 0.6)],
+            ),
+            Biome::Plains => (0.62, [grasses(4.0, 3.5, 1.6).to_vec(), vec![(p.daisy, 0.15), (p.dandelion, 0.15), (p.bush, 0.08)]].concat()),
+            Biome::Steppe => (0.45, vec![(p.dry, 4.0), (p.short, 2.0), (p.tuft, 2.0), (p.lavender, if flowers { 0.8 } else { 0.1 }), (p.dead, 0.15)]),
+            Biome::Savanna => (0.5, vec![(p.dry, 3.5), (p.tall, 2.5), (p.tuft, 2.0), (p.dead, 0.15)]),
+            Biome::Forest => (
+                0.42,
+                [grasses(2.5, 1.5, 0.3).to_vec(), vec![(p.fern, 2.5), (p.bush, 0.6), (p.berries, 0.3), (p.daisy, if flowers { 0.6 } else { 0.05 })]].concat(),
+            ),
+            Biome::OldForest => (0.48, vec![(p.fern, 5.0), (p.short, 1.5), (p.tuft, 0.8), (p.bush, 0.7), (p.berries, 0.5)]),
+            Biome::Swamp => (0.6, vec![(p.tall, 3.0), (p.reeds, 2.0), (p.tuft, 2.0), (p.fern, 1.0)]),
+            Biome::Taiga => (0.36, vec![(p.fern, 3.0), (p.short, 2.0), (p.berries, 0.8), (p.bush, 0.4), (p.heather, 0.5)]),
+            Biome::Tundra => (0.22, vec![(p.short, 3.0), (p.heather, 2.0), (p.dry, 1.0)]),
+            Biome::Jungle => (0.7, vec![(p.fern, 3.0), (p.tall, 3.0), (p.tuft, 2.0), (p.bush, 1.0)]),
+            Biome::Peaks => (0.1, vec![(p.short, 3.0), (p.heather, 1.0)]),
+            Biome::Beach => (0.06, vec![(p.dry, 1.0), (p.short, 1.0)]),
+            _ => (0.0, Vec::new()),
+        };
+        if table.is_empty() || roll >= density * clump {
+            return 0;
+        }
+        choose(pick, &table)
     }
 
     pub fn generate_chunk(&self, pos: ChunkPos, col: &Column) -> Chunk {
@@ -811,6 +943,10 @@ impl WorldGen {
                     if !state.is_air() {
                         chunk.set(LocalPos { x: lx as u8, y: ly as u8, z: lz as u8 }.index(), state);
                     }
+                }
+                // The plant on the ground (trees, stamped next, take its place).
+                if col.plant[i] != 0 && (y0..=y1).contains(&top) {
+                    chunk.set(LocalPos { x: lx as u8, y: (top - y0) as u8, z: lz as u8 }.index(), BlockState::full(col.plant[i]));
                 }
             }
         }

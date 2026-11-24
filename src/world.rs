@@ -300,7 +300,8 @@ impl World {
         while y > BEDROCK_Y {
             let pos = BlockPos::new(x, y, z);
             let s = self.journal.get(pos).unwrap_or_else(|| self.generator.seed_block(&col, x, y, z));
-            if !s.is_air() {
+            // (Plants are no surface: distant terrain shows the ground they grow on.)
+            if !s.is_air() && self.registry.get(s).model != crate::registry::Model::Cross {
                 return ColumnTop { x, z, top_q: 4 * y + s.shape().y_range_q().1, block: s.id() };
             }
             y -= 1;
