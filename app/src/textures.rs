@@ -23,11 +23,23 @@ macro_rules! files {
 include!("texture_files.rs");
 
 /// The plant sprites (`tools/paint_plants.py`), drawn on cross-shaped blocks.
-pub const PLANTS: [&str; 15] = [
+pub const PLANTS: [&str; 27] = [
     "short_grass",
     "grass_tuft",
+    "medium_grass",
     "tall_grass",
+    "dry_short",
     "dry_tuft",
+    "dry_medium",
+    "dry_tall",
+    "lush_short",
+    "lush_normal",
+    "lush_medium",
+    "lush_tall",
+    "frost_short",
+    "frost_normal",
+    "frost_medium",
+    "frost_tall",
     "fern",
     "leafy_bush",
     "berry_bush",
@@ -42,7 +54,18 @@ pub const PLANTS: [&str; 15] = [
 ];
 
 /// Plant sprites in greyscale, tinted like the grass around them.
-const TINTED_PLANTS: [&str; 5] = ["short_grass", "grass_tuft", "tall_grass", "fern", "leafy_bush"];
+const TINTED_PLANTS: [&str; 10] = [
+    "short_grass",
+    "grass_tuft",
+    "medium_grass",
+    "tall_grass",
+    "lush_short",
+    "lush_normal",
+    "lush_medium",
+    "lush_tall",
+    "fern",
+    "leafy_bush",
+];
 
 /// Textures multiplied by the biome colour all over.
 fn fully_tinted(name: &str) -> bool {

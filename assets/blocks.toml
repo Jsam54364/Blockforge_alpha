@@ -14209,7 +14209,7 @@ hardness = 0
 name = "dry_tuft"
 group = "natural"
 family = "plant"
-label = "Dry Grass Tuft"
+label = "Dry Grass"
 solid = false
 opaque = false
 render = "cutout"
@@ -14320,6 +14320,140 @@ name = "heather"
 group = "natural"
 family = "plant"
 label = "Heather"
+solid = false
+opaque = false
+render = "cutout"
+model = "cross"
+hardness = 0
+
+# Grass in four heights (short, normal, medium, tall) for each kind: meadow, dry, lush, frost.
+
+[[block]]
+name = "medium_grass"
+group = "natural"
+family = "plant"
+label = "Medium Grass"
+solid = false
+opaque = false
+render = "cutout"
+model = "cross"
+hardness = 0
+
+[[block]]
+name = "dry_short"
+group = "natural"
+family = "plant"
+label = "Short Dry Grass"
+solid = false
+opaque = false
+render = "cutout"
+model = "cross"
+hardness = 0
+
+[[block]]
+name = "dry_medium"
+group = "natural"
+family = "plant"
+label = "Medium Dry Grass"
+solid = false
+opaque = false
+render = "cutout"
+model = "cross"
+hardness = 0
+
+[[block]]
+name = "dry_tall"
+group = "natural"
+family = "plant"
+label = "Tall Dry Grass"
+solid = false
+opaque = false
+render = "cutout"
+model = "cross"
+hardness = 0
+
+[[block]]
+name = "lush_short"
+group = "natural"
+family = "plant"
+label = "Short Lush Grass"
+solid = false
+opaque = false
+render = "cutout"
+model = "cross"
+hardness = 0
+
+[[block]]
+name = "lush_normal"
+group = "natural"
+family = "plant"
+label = "Lush Grass"
+solid = false
+opaque = false
+render = "cutout"
+model = "cross"
+hardness = 0
+
+[[block]]
+name = "lush_medium"
+group = "natural"
+family = "plant"
+label = "Medium Lush Grass"
+solid = false
+opaque = false
+render = "cutout"
+model = "cross"
+hardness = 0
+
+[[block]]
+name = "lush_tall"
+group = "natural"
+family = "plant"
+label = "Tall Lush Grass"
+solid = false
+opaque = false
+render = "cutout"
+model = "cross"
+hardness = 0
+
+[[block]]
+name = "frost_short"
+group = "natural"
+family = "plant"
+label = "Short Frost Grass"
+solid = false
+opaque = false
+render = "cutout"
+model = "cross"
+hardness = 0
+
+[[block]]
+name = "frost_normal"
+group = "natural"
+family = "plant"
+label = "Frost Grass"
+solid = false
+opaque = false
+render = "cutout"
+model = "cross"
+hardness = 0
+
+[[block]]
+name = "frost_medium"
+group = "natural"
+family = "plant"
+label = "Medium Frost Grass"
+solid = false
+opaque = false
+render = "cutout"
+model = "cross"
+hardness = 0
+
+[[block]]
+name = "frost_tall"
+group = "natural"
+family = "plant"
+label = "Tall Frost Grass"
 solid = false
 opaque = false
 render = "cutout"

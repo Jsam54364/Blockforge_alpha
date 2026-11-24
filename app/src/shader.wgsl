@@ -91,8 +91,9 @@ fn face_uv(face: u32, p: vec3<f32>) -> vec2<f32> {
         case 2u: { return vec2<f32>(p.x, p.z); }
         case 3u: { return vec2<f32>(p.x, -p.z); }
         case 4u: { return vec2<f32>(p.x, -p.y); }
-        // The two diagonal planes of cross-shaped plants: across them, x runs 0..1.
-        case 6u, 7u: { return vec2<f32>(p.x, -p.y); }
+        // A plant's two planes (along z, along x): a block wide, the sprite once across.
+        case 6u: { return vec2<f32>(p.z, -p.y); }
+        case 7u: { return vec2<f32>(p.x, -p.y); }
         default: { return vec2<f32>(-p.x, -p.y); }
     }
 }
@@ -165,6 +166,19 @@ fn vs_main(v: VsIn) -> VsOut {
     let blk = f32((b >> 20u) & 15u) / 15.0;
 
     var world = v.origin.xyz + local;
+    var uv_local = local;
+    // A plant moves off the middle of its cell by whole texels (1/32 block), its own way.
+    if (face >= 6u) {
+        let top = f32((b >> 27u) & 1u);
+        let far = f32((b >> 28u) & 1u);
+        let along = select(vec3<f32>(0.0, 0.0, 1.0), vec3<f32>(1.0, 0.0, 0.0), face == 7u);
+        let cell = floor(world - along * far - vec3<f32>(0.0, top, 0.0) + vec3<f32>(0.01, 0.01, 0.01));
+        let h = hash_block(cell + vec3<f32>(0.5));
+        let off = vec3<f32>(f32(h & 15u) - 7.5, 0.0, f32((h >> 4u) & 15u) - 7.5) * (0.75 / 32.0);
+        let snapped = round(off * 32.0) / 32.0;
+        world += snapped;
+        uv_local += snapped;
+    }
     let leafy = is_foliage(tex);
     if (leafy && g.light_color.w > 0.0) {
         // A plant sways at its tips only (its top corners carry bit 27), rooted at the base.
@@ -203,7 +217,7 @@ fn vs_main(v: VsIn) -> VsOut {
     o.world = world;
     // Side faces: lift the texture so its top row starts at the quad's top (half-slabs).
     let lift = select(f32((b >> 27u) & 3u) * 0.25, 0.0, face >= 6u);
-    o.uv = face_uv(face, local + vec3<f32>(0.0, lift, 0.0));
+    o.uv = face_uv(face, uv_local + vec3<f32>(0.0, lift, 0.0));
     o.layer = tex;
     o.face = face;
     // Distance 0, 1, 1.41 or 2+ blocks, as closeness falling linearly to 0 at two blocks.

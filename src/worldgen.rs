@@ -26,7 +26,7 @@ use crate::rng::hash3;
 pub const SEA_LEVEL: i32 = 0;
 /// Bumped whenever the same seed would generate different terrain: worlds saved by an
 /// older generator are kept apart (their edits would land on different ground).
-pub const WORLDGEN_VERSION: u32 = 13;
+pub const WORLDGEN_VERSION: u32 = 14;
 pub const BEDROCK_Y: i32 = -128;
 /// No caves below this; deep chunks collapse to a single uniform entry.
 const CAVE_FLOOR: i32 = -48;
@@ -75,10 +75,8 @@ impl Column {
 /// The plants the generator grows (0 for any the registry lacks).
 #[derive(Clone, Debug)]
 struct Plants {
-    short: u16,
-    tuft: u16,
-    tall: u16,
-    dry: u16,
+    /// Grass by kind (`Grass`) and height (short, normal, medium, tall).
+    grass: [[u16; 4]; 4],
     fern: u16,
     bush: u16,
     berries: u16,
@@ -92,12 +90,27 @@ struct Plants {
     heather: u16,
 }
 
+/// Kinds of grass (an index into `Plants::grass`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Grass {
+    Meadow = 0,
+    Dry = 1,
+    Lush = 2,
+    Frost = 3,
+}
+
+/// In a plant table: grass, of the biome's kind and a height from the height patches.
+const GRASS: u16 = u16::MAX;
+
 impl Plants {
-    fn all(&self) -> [u16; 15] {
-        [
-            self.short, self.tuft, self.tall, self.dry, self.fern, self.bush, self.berries, self.dandelion, self.poppy, self.cornflower, self.daisy,
-            self.lavender, self.dead, self.reeds, self.heather,
-        ]
+    fn contains(&self, id: u16) -> bool {
+        id != 0
+            && (self.grass.iter().flatten().any(|&g| g == id)
+                || [
+                    self.fern, self.bush, self.berries, self.dandelion, self.poppy, self.cornflower, self.daisy, self.lavender, self.dead, self.reeds,
+                    self.heather,
+                ]
+                .contains(&id))
     }
 }
 
@@ -277,10 +290,12 @@ impl WorldGen {
         };
         let p = |n: &str| reg.id(n).unwrap_or(0);
         let plants = Plants {
-            short: p("short_grass"),
-            tuft: p("grass_tuft"),
-            tall: p("tall_grass"),
-            dry: p("dry_tuft"),
+            grass: [
+                [p("short_grass"), p("grass_tuft"), p("medium_grass"), p("tall_grass")],
+                [p("dry_short"), p("dry_tuft"), p("dry_medium"), p("dry_tall")],
+                [p("lush_short"), p("lush_normal"), p("lush_medium"), p("lush_tall")],
+                [p("frost_short"), p("frost_normal"), p("frost_medium"), p("frost_tall")],
+            ],
             fern: p("fern"),
             bush: p("leafy_bush"),
             berries: p("berry_bush"),
@@ -850,13 +865,14 @@ impl WorldGen {
     fn feature_may_replace(&self, state: BlockState, solid: bool) -> bool {
         state.is_air()
             || (solid && (self.palette.wood.iter().any(|w| w.1 == state.id() && w.1 != 0)))
-            || (state.id() != 0 && self.plants.all().contains(&state.id()))
+            || self.plants.contains(state.id())
     }
 
     /// The plant growing on the ground at `(x, z)`, whose top block is `surf`, or 0. As in
-    /// Vintage Story the ground is mostly covered: grass of three heights everywhere it is
-    /// green, ferns under the trees, flowers in meadow patches, reeds along rivers, dry tufts
-    /// and dead bushes where it is dry. Patch noise makes clumps and clearings.
+    /// Vintage Story the ground is mostly covered: grass almost everywhere it is green, of the
+    /// biome's kind (meadow, dry, lush, frost) and in four heights that rise and fall in
+    /// patches across a field; ferns under trees, flowers in meadow patches, reeds along
+    /// rivers, dead bushes where it is dry. Patch noise makes clumps and clearings.
     fn plant_for(&self, x: i32, z: i32, s: &LandSample, surf: u16, slope: f32) -> u16 {
         if slope > 1.3 {
             return 0;
@@ -871,46 +887,69 @@ impl WorldGen {
         let h = hash3(self.seed ^ 0x9_1A47, x, 7, z);
         let roll = (h & 0xFFFF) as f32 / 65536.0;
         let pick = ((h >> 16) & 0xFFFF) as f32 / 65536.0;
+        let jitter = ((h >> 32) & 0xFFFF) as f32 / 65536.0;
         let patch = self.patches.at(x as f32 * 0.8 + 311.0, z as f32 * 0.8 - 97.0, 1.0);
         let clump = 0.45 + 0.9 * crate::noise::smoothstep(-0.35, 0.55, patch);
+        // Grass: its kind from the biome, its height from broad patches (tall swathes, short
+        // lawns) plus a little of each tuft's own.
+        let grass = |kind: Grass, bias: f32| -> u16 {
+            let field = self.patches.at(x as f32 * 0.35 - 1200.0, z as f32 * 0.35 + 800.0, 1.0);
+            let v = 0.5 + 0.55 * field + (jitter - 0.5) * 0.45 + bias;
+            p.grass[kind as usize][((v * 4.0).floor().clamp(0.0, 3.0)) as usize]
+        };
         if sandy {
             let density = match s.biome {
                 Biome::Desert | Biome::Mesa => 0.012,
                 Biome::Beach | Biome::Savanna | Biome::Steppe => 0.05,
                 _ => 0.0,
             };
-            return if roll < density * clump { choose(pick, &[(p.dead, 3.0), (p.dry, 1.0)]) } else { 0 };
+            if roll >= density * clump {
+                return 0;
+            }
+            return if pick < 0.7 { p.dead } else { grass(Grass::Dry, -0.25) };
         }
         if s.river > 0.55 && roll < 0.5 {
-            return choose(pick, &[(p.reeds, 4.0), (p.tall, 2.0), (p.tuft, 1.0)]);
+            return if pick < 0.5 { p.reeds } else { grass(Grass::Lush, 0.25) };
         }
-        let grasses = |short: f32, tuft: f32, tall: f32| [(p.short, short), (p.tuft, tuft), (p.tall, tall)];
         let flowers = patch > 0.3;
-        let (density, table): (f32, Vec<(u16, f32)>) = match s.biome {
+        // (kind of grass, height bias, density, the rest: plant and weight, GRASS for grass)
+        let (kind, bias, density, table): (Grass, f32, f32, Vec<(u16, f32)>) = match s.biome {
             Biome::Plains if flowers => (
-                0.7,
-                vec![(p.short, 3.0), (p.tuft, 3.0), (p.dandelion, 2.0), (p.poppy, 1.5), (p.cornflower, 1.5), (p.daisy, 2.0), (p.lavender, 0.6)],
+                Grass::Meadow,
+                -0.1,
+                0.72,
+                vec![(GRASS, 6.0), (p.dandelion, 2.0), (p.poppy, 1.5), (p.cornflower, 1.5), (p.daisy, 2.0), (p.lavender, 0.6)],
             ),
-            Biome::Plains => (0.62, [grasses(4.0, 3.5, 1.6).to_vec(), vec![(p.daisy, 0.15), (p.dandelion, 0.15), (p.bush, 0.08)]].concat()),
-            Biome::Steppe => (0.45, vec![(p.dry, 4.0), (p.short, 2.0), (p.tuft, 2.0), (p.lavender, if flowers { 0.8 } else { 0.1 }), (p.dead, 0.15)]),
-            Biome::Savanna => (0.5, vec![(p.dry, 3.5), (p.tall, 2.5), (p.tuft, 2.0), (p.dead, 0.15)]),
+            Biome::Plains => (Grass::Meadow, 0.05, 0.66, vec![(GRASS, 9.0), (p.daisy, 0.15), (p.dandelion, 0.15), (p.bush, 0.08)]),
+            Biome::Steppe => (Grass::Dry, 0.0, 0.5, vec![(GRASS, 8.0), (p.lavender, if flowers { 0.8 } else { 0.1 }), (p.dead, 0.15)]),
+            Biome::Savanna => (Grass::Dry, 0.2, 0.55, vec![(GRASS, 8.0), (p.dead, 0.15), (p.bush, 0.1)]),
             Biome::Forest => (
-                0.42,
-                [grasses(2.5, 1.5, 0.3).to_vec(), vec![(p.fern, 2.5), (p.bush, 0.6), (p.berries, 0.3), (p.daisy, if flowers { 0.6 } else { 0.05 })]].concat(),
+                Grass::Meadow,
+                -0.15,
+                0.45,
+                vec![(GRASS, 4.0), (p.fern, 2.5), (p.bush, 0.6), (p.berries, 0.3), (p.daisy, if flowers { 0.6 } else { 0.05 })],
             ),
-            Biome::OldForest => (0.48, vec![(p.fern, 5.0), (p.short, 1.5), (p.tuft, 0.8), (p.bush, 0.7), (p.berries, 0.5)]),
-            Biome::Swamp => (0.6, vec![(p.tall, 3.0), (p.reeds, 2.0), (p.tuft, 2.0), (p.fern, 1.0)]),
-            Biome::Taiga => (0.36, vec![(p.fern, 3.0), (p.short, 2.0), (p.berries, 0.8), (p.bush, 0.4), (p.heather, 0.5)]),
-            Biome::Tundra => (0.22, vec![(p.short, 3.0), (p.heather, 2.0), (p.dry, 1.0)]),
-            Biome::Jungle => (0.7, vec![(p.fern, 3.0), (p.tall, 3.0), (p.tuft, 2.0), (p.bush, 1.0)]),
-            Biome::Peaks => (0.1, vec![(p.short, 3.0), (p.heather, 1.0)]),
-            Biome::Beach => (0.06, vec![(p.dry, 1.0), (p.short, 1.0)]),
-            _ => (0.0, Vec::new()),
+            Biome::OldForest => (Grass::Meadow, -0.25, 0.48, vec![(p.fern, 5.0), (GRASS, 2.0), (p.bush, 0.7), (p.berries, 0.5)]),
+            Biome::Swamp => (Grass::Lush, 0.2, 0.62, vec![(GRASS, 6.0), (p.reeds, 2.0), (p.fern, 1.0)]),
+            Biome::Jungle => (Grass::Lush, 0.15, 0.7, vec![(GRASS, 5.0), (p.fern, 3.0), (p.bush, 1.0)]),
+            Biome::Taiga => (
+                if patch > 0.0 { Grass::Frost } else { Grass::Meadow },
+                -0.2,
+                0.38,
+                vec![(GRASS, 3.0), (p.fern, 3.0), (p.berries, 0.8), (p.bush, 0.4), (p.heather, 0.5)],
+            ),
+            Biome::Tundra => (Grass::Frost, -0.25, 0.3, vec![(GRASS, 5.0), (p.heather, 2.0)]),
+            Biome::Peaks => (Grass::Frost, -0.35, 0.12, vec![(GRASS, 3.0), (p.heather, 1.0)]),
+            Biome::Beach => (Grass::Dry, -0.3, 0.06, vec![(GRASS, 1.0)]),
+            _ => return 0,
         };
-        if table.is_empty() || roll >= density * clump {
+        if roll >= density * clump {
             return 0;
         }
-        choose(pick, &table)
+        match choose(pick, &table) {
+            GRASS => grass(kind, bias),
+            id => id,
+        }
     }
 
     pub fn generate_chunk(&self, pos: ChunkPos, col: &Column) -> Chunk {
@@ -992,6 +1031,42 @@ mod tests {
                 col.min_top <= SEA_LEVEL && col.height_q.iter().any(|q| q.div_euclid(4) > SEA_LEVEL + 2)
             })
             .expect("a coast within 128 km")
+    }
+
+    #[test]
+    fn grass_grows_in_four_heights_of_the_biomes_kind() {
+        let (_r, g) = make();
+        let kind_of = |id: u16| g.plants.grass.iter().position(|row| row.contains(&id)).map(|k| (k, g.plants.grass[k].iter().position(|&x| x == id).unwrap()));
+        let mut heights = [[0usize; 4]; 4];
+        let mut covered = 0;
+        let mut ground = 0;
+        for i in 0..400 {
+            let (cx, cz) = ((i % 20) * 37 - 370, (i / 20) * 41 - 410);
+            let col = g.column(cx, cz);
+            for (k, &plant) in col.plant.iter().enumerate() {
+                let (x, z) = (cx * CHUNK_SIZE + (k % 32) as i32, cz * CHUNK_SIZE + (k / 32) as i32);
+                if col.water[k] != DRY {
+                    continue;
+                }
+                ground += 1;
+                if plant != 0 {
+                    covered += 1;
+                }
+                if let Some((kind, h)) = kind_of(plant) {
+                    heights[kind][h] += 1;
+                    let biome = g.land.sample(x as f32, z as f32, 1.0).biome;
+                    let ok = match kind {
+                        0 => matches!(biome, Biome::Plains | Biome::Forest | Biome::OldForest | Biome::Taiga),
+                        1 => matches!(biome, Biome::Steppe | Biome::Savanna | Biome::Beach | Biome::Desert | Biome::Mesa),
+                        2 => matches!(biome, Biome::Swamp | Biome::Jungle) || g.land.sample(x as f32, z as f32, 1.0).river > 0.5,
+                        _ => matches!(biome, Biome::Taiga | Biome::Tundra | Biome::Peaks),
+                    };
+                    assert!(ok, "grass kind {kind} in {biome:?} at {x},{z}");
+                }
+            }
+        }
+        assert!(heights[Grass::Meadow as usize].iter().all(|&n| n > 50), "meadow grass in every height: {heights:?}");
+        assert!(covered * 4 > ground, "most dry ground is covered ({covered} of {ground})");
     }
 
     #[test]

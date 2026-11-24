@@ -74,7 +74,7 @@ pub fn light(p: &crate::sky::SkyParams) -> ([f32; 3], [f32; 3], f32) {
     if p.sun[1] > -0.02 {
         (p.sun, p.sun_light, smoothstep(0.0, 0.08, p.sun[1]))
     } else {
-        (p.moon, p.moon_light, smoothstep(0.0, 0.08, p.moon[1]) * 0.8)
+        (p.moon, p.moon_light, smoothstep(0.0, 0.08, p.moon[1]) * 0.9)
     }
 }
 

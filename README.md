@@ -464,15 +464,19 @@ point, `worldgen.rs` turns that into blocks, `flora.rs` grows trees and rocks on
 * **Flora** (`flora.rs`): 16 kinds (oak, big oak, birch, maple, spruce, fir, pine, redwood,
   acacia, willow, palm, jungle, cactus, bush, boulder, fallen log) on jittered grids, so
   each chunk can place trees from its neighbours without seams. Density follows the biome.
-* **Plants**, as Vintage Story covers its ground: 15 kinds drawn as two crossed planes
-  (`model = "cross"`): short, medium and tall grass, dry tufts, ferns, leafy and berry
-  bushes, dandelions, poppies, cornflowers, daisies, lavender, dead bushes, reeds and heather.
-  Every dry, whole-block surface gets one by biome (`WorldGen::plant_for`): grass of three
-  heights almost everywhere green, flower meadows in patches, ferns under trees, reeds along
-  rivers, dry tufts and dead bushes where it is dry. Grasses and ferns are greyscale and
-  take the biome's grass colour. Their sprites are painted by `tools/paint_plants.py`. They
-  sway at their tips, are walked through, broken with a tap, replaced by a block built onto
-  them, and fall when the ground under them goes. They are drawn within 96 blocks.
+* **Plants**, as Vintage Story covers its ground: two planes through the middle of the cell,
+  each exactly a block wide, so their 32 x 32 sprites keep 32 texels to the block like every
+  other texture (the rule for anything made for the game), moved off the middle by whole
+  texels per cell so they don't line up. Grass comes in four kinds (meadow, dry, lush, frost)
+  and four heights (short, normal, medium, tall), the kind from the biome and the height
+  from broad patches, so tall swathes and short lawns cross a field. Also ferns, leafy and
+  berry bushes, dandelions, poppies, cornflowers, daisies, lavender, dead bushes, reeds and
+  heather: flower meadows in patches, ferns under trees, reeds along rivers, dead bushes on
+  sand (`WorldGen::plant_for`). Meadow and lush grass, ferns and leafy bushes are greyscale
+  and take the biome's grass colour. Sprites are painted by `tools/paint_plants.py`, blade by
+  blade on whole pixels. Plants sway at their tips, are walked through, broken with a tap,
+  replaced by a block built onto them, and fall when the ground under them goes; they are
+  drawn within 96 blocks.
 * **See-through leaves**, as Minecraft's fancy leaves: holes in clumps (a third of each leaf
   texture, where it is darkest), faces between leaves kept near a canopy's surface so its
   inside shows through, back faces culled. Leaves and plants are alpha-tested in a pass of
@@ -707,6 +711,18 @@ point, `worldgen.rs` turns that into blocks, `flora.rs` grows trees and rocks on
 * The block texture array never has a multiple of six layers (`gfx::array_layers`): on OpenGL
   ES, wgpu would make it a cube map and every block would show the wrong texture.
 
+## Culling
+
+* Chunks outside the view or the draw distance are skipped (frustum), and so are chunks
+  that sight can't reach through solid ground (`cull.rs`, Minecraft's cave culling; leaves,
+  plants and water let sight through).
+* Each chunk's opaque quads are sorted by the way they face; whole directions that face away
+  from the camera are left out before the GPU sees them (`facing_ranges`), and the GPU culls
+  the rest one by one. Faces between solid blocks are never made at all.
+* Leaves deep inside a canopy make no faces; plants beyond 96 blocks are not drawn; shadow
+  maps only take chunks that see the sky and lie in the map's box, plants only the near one.
+* Distant terrain is skipped where real chunks cover it (`LodCoverage`).
+
 ## Resolution and GPU timing (`app/src/gfx.rs`, `app/src/gpu_timer.rs`)
 
 Phone screens have far more pixels than a phone GPU likes to shade (2340x1080 on many),
@@ -744,7 +760,8 @@ the shader as factors, so they cost nothing; they apply with Shaders on.
   shader (Lite: bilinear over 2x2 texels; Fancy: a 3x3 tent over 4x4), with no noise, so they
   hold still as the camera moves. The maps are plain float images read texel by texel (no depth textures, comparison samplers or
   hardware depth bias, which some phone GPUs get wrong); with the stats overlay on they are
-  shown in the corner. The moon casts them at night. The character casts and receives them.
+  shown in the corner. The moon casts them at night: a soft shade (moonlight is most of the night's light, so
+  what it can't reach is clearly darker). The character casts and receives them.
 * **Fake global illumination**: sunlit ground bounces light, coloured like the biome's ground,
   onto walls and undersides; part of what a shadow takes away comes back as bounced light, so
   shade is dim and blue-ish rather than black; block light is warm and pools around lamps.

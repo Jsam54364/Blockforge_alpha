@@ -47,7 +47,8 @@ fn face_uv(face: u32, p: vec3<f32>) -> vec2<f32> {
         case 2u: { return vec2<f32>(p.x, p.z); }
         case 3u: { return vec2<f32>(p.x, -p.z); }
         case 4u: { return vec2<f32>(p.x, -p.y); }
-        case 6u, 7u: { return vec2<f32>(p.x, -p.y); }
+        case 6u: { return vec2<f32>(p.z, -p.y); }
+        case 7u: { return vec2<f32>(p.x, -p.y); }
         default: { return vec2<f32>(-p.x, -p.y); }
     }
 }
@@ -55,10 +56,25 @@ fn face_uv(face: u32, p: vec3<f32>) -> vec2<f32> {
 @vertex
 fn vs_cutout(@location(0) packed: vec2<u32>, @location(1) origin: vec4<f32>) -> CutOut {
     let a = packed.x;
-    let local = vec3<f32>(f32(a & 255u), f32((a >> 8u) & 255u), f32((a >> 16u) & 255u)) * 0.25;
+    let b = packed.y;
+    let face = (a >> 24u) & 7u;
+    var local = vec3<f32>(f32(a & 255u), f32((a >> 8u) & 255u), f32((a >> 16u) & 255u)) * 0.25;
+    // A plant's offset in its cell, as shader.wgsl's vs_main moves it.
+    if (face >= 6u) {
+        let top = f32((b >> 27u) & 1u);
+        let far = f32((b >> 28u) & 1u);
+        let along = select(vec3<f32>(0.0, 0.0, 1.0), vec3<f32>(1.0, 0.0, 0.0), face == 7u);
+        let cell = floor(origin.xyz + local - along * far - vec3<f32>(0.0, top, 0.0) + vec3<f32>(0.01, 0.01, 0.01));
+        let q = vec3<i32>(floor(cell + vec3<f32>(0.5)));
+        var h = (u32(q.x) * 0x8da6b343u) ^ (u32(q.y) * 0xd8163841u) ^ (u32(q.z) * 0xcb1ab31fu);
+        h = (h ^ (h >> 15u)) * 0x2c1b3c6du;
+        h = h ^ (h >> 12u);
+        let off = vec3<f32>(f32(h & 15u) - 7.5, 0.0, f32((h >> 4u) & 15u) - 7.5) * (0.75 / 32.0);
+        local += round(off * 32.0) / 32.0;
+    }
     var o: CutOut;
     o.pos = s.view_proj * vec4<f32>(origin.xyz + local, 1.0);
-    o.uv = face_uv((a >> 24u) & 7u, local);
+    o.uv = face_uv(face, local);
     o.layer = packed.y & 65535u;
     return o;
 }

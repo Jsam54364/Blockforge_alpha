@@ -25,15 +25,16 @@ const DECLINATION: f32 = 10.0;
 
 /// Direct sunlight on a surface facing the sun, at its whitest.
 const SUN_LIGHT: f32 = 0.65;
-/// Direct moonlight.
-const MOON_LIGHT: [f32; 3] = [0.06, 0.075, 0.11];
+/// Direct moonlight: enough of the night's light that what the moon can't reach (under
+/// trees, behind walls) is clearly darker, a soft moon shadow.
+const MOON_LIGHT: [f32; 3] = [0.115, 0.14, 0.205];
 /// Sky light on terrain: scale and how much of the sky's blue it keeps (0 = grey light).
 const AMBIENT_GAIN: f32 = 1.45;
 const AMBIENT_SATURATION: f32 = 0.35;
 /// Sky light counted per sample at most (the glow right around the sun is sunlight's job).
 const AMBIENT_MAX: f32 = 1.2;
 /// So nights stay playable: extra light at night (top faces; sides and bottoms get less).
-const NIGHT_AMBIENT: [f32; 3] = [0.06, 0.07, 0.11];
+const NIGHT_AMBIENT: [f32; 3] = [0.03, 0.035, 0.06];
 const NIGHT_FACE: [f32; 6] = [0.8, 0.8, 1.0, 0.5, 0.8, 0.8];
 /// Sunset colouring: low toward the sun, and everywhere else.
 const DUSK_WARM: [f32; 3] = [1.55, 0.80, 0.42];

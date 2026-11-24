@@ -809,6 +809,8 @@ struct GpuChunk {
     cutout: Option<GpuLayer>,
     /// How many of `cutout`'s quads, at its end, are plants (drawn only near the camera).
     plant_quads: u32,
+    /// `solid`'s quads facing each way, in `Face` order (they are sorted so).
+    face_quads: [u32; 6],
     water: Option<GpuLayer>,
     /// Some face sees the sky. A chunk that is all underground can't shadow anything the sun
     /// reaches (what is behind it from the sun is underground too), so it casts no shadow.
@@ -1549,7 +1551,8 @@ impl Gfx {
                 let water = self.upload(&[&mesh.translucent.vertices]);
                 let sky_lit = mesh.opaque.vertices.iter().chain(&mesh.cutout.vertices).any(|v| v.sky() > 0);
                 let plant_quads = mesh.plant_quads as u32;
-                self.chunks.insert(pos, GpuChunk { solid, cutout, plant_quads, water, sky_lit });
+                let face_quads = mesh.face_quads;
+                self.chunks.insert(pos, GpuChunk { solid, cutout, plant_quads, face_quads, water, sky_lit });
             }
         }
         for key in client.lod.take_evicted() {
@@ -1881,11 +1884,21 @@ impl Gfx {
             pass.set_bind_group(0, &self.bind_solid, &[]);
             // `vis` is far to near (what the water pass needs). Solid terrain goes the other
             // way: near chunks fill the depth buffer first and hide most of what is behind them.
+            // Whole directions of faces turned away from the camera are skipped per chunk
+            // (`facing_ranges`), before the GPU culls the rest one by one.
             for (i, (_, pos)) in vis.iter().enumerate().rev() {
-                if let Some(layer) = self.chunks.get(pos).and_then(|c| c.solid.as_ref()) {
+                let Some(c) = self.chunks.get(pos) else { continue };
+                if let Some(layer) = c.solid.as_ref() {
                     pass.set_vertex_buffer(0, self.pool.slice(&layer.slot));
-                    pass.draw_indexed(0..layer.quads.min(MAX_QUADS) * 6, 0, i as u32..i as u32 + 1);
-                    quads += layer.quads as u64;
+                    let o = pos.origin();
+                    let min = [o.x as f32, o.y as f32, o.z as f32];
+                    for r in facing_ranges(&c.face_quads, layer.quads, min, cam.pos, opts.backface_cull) {
+                        let (a, b) = (r.start.min(MAX_QUADS), r.end.min(MAX_QUADS));
+                        if b > a {
+                            pass.draw_indexed(a * 6..b * 6, 0, i as u32..i as u32 + 1);
+                            quads += (b - a) as u64;
+                        }
+                    }
                 }
             }
             // See-through foliage, near to far, depth-tested against the solid terrain. Plants
@@ -2133,6 +2146,37 @@ impl Gfx {
         frame.present();
         Ok(acquire_wait + present_start.elapsed())
     }
+}
+
+/// The runs of a chunk's opaque quads (sorted by the way they face; `counts` per `Face`) that
+/// can face the camera: a direction is left out when the camera is behind every face of it in
+/// the chunk (all of them lie within the chunk's box, `min` .. `min` + 32). Neighbouring
+/// directions that are both drawn join into one run. With `cull` off, everything.
+fn facing_ranges(counts: &[u32; 6], total: u32, min: [f32; 3], cam: [f32; 3], cull: bool) -> Vec<std::ops::Range<u32>> {
+    if !cull || counts.iter().sum::<u32>() != total {
+        return vec![0..total];
+    }
+    let size = CHUNK_SIZE as f32;
+    let shows = |face: usize| {
+        let axis = face / 2;
+        if face % 2 == 0 {
+            cam[axis] > min[axis] // +X, +Y, +Z: from in front of the lowest one
+        } else {
+            cam[axis] < min[axis] + size // -X, -Y, -Z
+        }
+    };
+    let mut out: Vec<std::ops::Range<u32>> = Vec::new();
+    let mut at = 0;
+    for (face, &n) in counts.iter().enumerate() {
+        if n > 0 && shows(face) {
+            match out.last_mut() {
+                Some(r) if r.end == at => r.end = at + n,
+                _ => out.push(at..at + n),
+            }
+        }
+        at += n;
+    }
+    out
 }
 
 /// How far from the camera (to a chunk's centre, blocks) grass and flowers are drawn.
@@ -2627,6 +2671,23 @@ fn ui_pipeline(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::Texture
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn faces_turned_away_from_the_camera_are_skipped_per_chunk() {
+        // 10 quads facing each way, in Face order: +X, -X, +Y, -Y, +Z, -Z.
+        let counts = [10; 6];
+        let min = [0.0, 0.0, 0.0];
+        // Above and to the +X, +Z side of the chunk: -X, -Y and -Z all face away.
+        let r = facing_ranges(&counts, 60, min, [40.0, 50.0, 40.0], true);
+        assert_eq!(r, vec![0..10, 20..30, 40..50]);
+        // Inside it: every direction can face the camera somewhere.
+        assert_eq!(facing_ranges(&counts, 60, min, [16.0, 16.0, 16.0], true), vec![0..60]);
+        // Below and on the -X side: +Y faces away; neighbours join up.
+        assert_eq!(facing_ranges(&counts, 60, min, [-5.0, -5.0, 10.0], true), vec![10..20, 30..60]);
+        // Culling off, or counts that don't add up (an old mesh): everything.
+        assert_eq!(facing_ranges(&counts, 60, min, [40.0, 50.0, 40.0], false), vec![0..60]);
+        assert_eq!(facing_ranges(&[0; 6], 60, min, [40.0, 50.0, 40.0], true), vec![0..60]);
+    }
 
     #[test]
     fn auto_resolution_drops_while_the_gpu_is_slow_and_comes_back_with_room() {

@@ -250,6 +250,10 @@ pub struct ChunkMesh {
     pub cutout: MeshLayer,
     pub translucent: MeshLayer,
     pub plant_quads: usize,
+    /// The opaque quads are sorted by the way they face (`Face` order): how many face each
+    /// way. The renderer skips the directions that face away from the camera for the whole
+    /// chunk (`facing_quads`), before the GPU sees them.
+    pub face_quads: [u32; 6],
 }
 
 impl ChunkMesh {
@@ -261,6 +265,17 @@ impl ChunkMesh {
 
     pub fn quad_count(&self) -> usize {
         self.opaque.quad_count() + self.cutout.quad_count() + self.translucent.quad_count()
+    }
+
+    /// Sorts the opaque quads by the way they face and counts them (`face_quads`).
+    fn sort_by_face(&mut self) {
+        let mut quads: Vec<[PackedVertex; 4]> = self.opaque.vertices.chunks(4).map(|q| [q[0], q[1], q[2], q[3]]).collect();
+        quads.sort_by_key(|q| q[0].face_index());
+        self.face_quads = [0; 6];
+        for q in &quads {
+            self.face_quads[(q[0].face_index() as usize).min(5)] += 1;
+        }
+        self.opaque.vertices = quads.into_iter().flatten().collect();
     }
 
     pub fn vertex_bytes(&self) -> usize {
@@ -433,21 +448,24 @@ pub(crate) fn emit_quad(
     }
 }
 
-/// The two diagonal faces of a cross-shaped block (`Model::Cross`), from corner to corner of
-/// its cell, as faces 6 and 7, each twice (once per side: foliage is drawn with back faces
-/// culled, so leaves show what is behind their holes); the shader lights them as the ground. Bottom corners are darker (grass is shaded at its base); top corners carry the
-/// `tex_top` bit 1 so only they sway in the wind.
+/// A plant (`Model::Cross`): two planes through the middle of its cell, one along z (face 6)
+/// and one along x (face 7), each exactly a block wide so its 32 x 32 sprite keeps square
+/// texels (32 to the block, as everything else); each twice, once per side (foliage is drawn
+/// with back faces culled). The shader lights them as the ground, sways their tops and moves
+/// each plant off the middle by whole texels (from a hash of its cell), so they don't line up.
+/// Bottom corners are darker (grass is shaded at its base). `tex_top` bit 0 marks the top
+/// corners, bit 1 the corners at the plane's far end (for the shader to find the cell).
 pub(crate) fn emit_cross(layer: &mut MeshLayer, ox: i32, oy: i32, oz: i32, tex: u16, block: u8) {
-    // (x, z) at each end of the two diagonals, in quarter blocks.
-    let planes: [(u32, [(i32, i32); 2]); 2] = [(6, [(0, 0), (4, 4)]), (7, [(4, 0), (0, 4)])];
+    // (face, start and end (x, z) in quarter blocks)
+    let planes: [(u32, [(i32, i32); 2]); 2] = [(6, [(2, 0), (2, 4)]), (7, [(0, 2), (4, 2)])];
     for (face, [(x0, z0), (x1, z1)]) in planes {
-        let corner = |x: i32, z: i32, top: bool| {
+        let corner = |x: i32, z: i32, top: bool, far: bool| {
             let y = oy + if top { 4 } else { 0 };
             let a = (ox + x) as u32 | ((y as u32) << 8) | (((oz + z) as u32) << 16) | (face << 24) | ((if top { 3 } else { 1 }) << 27);
-            let b = tex as u32 | (15 << 16) | (((block & 15) as u32) << 20) | ((top as u32) << 27);
+            let b = tex as u32 | (15 << 16) | (((block & 15) as u32) << 20) | ((top as u32) << 27) | ((far as u32) << 28);
             PackedVertex { a, b }
         };
-        let (a, b, c, d) = (corner(x0, z0, false), corner(x1, z1, false), corner(x1, z1, true), corner(x0, z0, true));
+        let (a, b, c, d) = (corner(x0, z0, false, false), corner(x1, z1, false, true), corner(x1, z1, true, true), corner(x0, z0, true, false));
         layer.vertices.extend([a, b, c, d]);
         layer.vertices.extend([a, d, c, b]);
     }
@@ -483,7 +501,9 @@ pub fn mesh_chunk_with(kind: Mesher, reg: &BlockRegistry, pc: &PaddedChunk) -> C
 
 /// One quad per visible face.
 pub fn mesh_chunk(reg: &BlockRegistry, pc: &PaddedChunk) -> ChunkMesh {
-    mesh_chunk_impl(reg, pc, false)
+    let mut mesh = mesh_chunk_impl(reg, pc, false);
+    mesh.sort_by_face();
+    mesh
 }
 
 /// Hybrid: full opaque cubes go through the bit-mask greedy mesher, everything else (slabs,
@@ -491,6 +511,7 @@ pub fn mesh_chunk(reg: &BlockRegistry, pc: &PaddedChunk) -> ChunkMesh {
 pub fn mesh_chunk_greedy(reg: &BlockRegistry, pc: &PaddedChunk) -> ChunkMesh {
     let mut mesh = mesh_chunk_impl(reg, pc, true);
     crate::greedy::mesh_eligible(reg, pc, &mut mesh);
+    mesh.sort_by_face();
     mesh
 }
 
@@ -842,6 +863,22 @@ mod tests {
     }
 
     #[test]
+    fn opaque_quads_are_grouped_by_the_way_they_face() {
+        let r = reg();
+        let stone = BlockState::full(r.id("stone").unwrap());
+        let mut pc = PaddedChunk::filled(AIR);
+        for (x, y, z) in [(1, 1, 1), (5, 2, 3), (9, 9, 9), (9, 10, 9)] {
+            pc.set(x, y, z, stone);
+        }
+        for m in [mesh_chunk(&r, &pc), mesh_chunk_greedy(&r, &pc)] {
+            assert_eq!(m.face_quads.iter().sum::<u32>() as usize, m.opaque.quad_count());
+            let faces: Vec<u32> = m.opaque.vertices.chunks(4).map(|q| q[0].face_index()).collect();
+            assert!(faces.windows(2).all(|w| w[0] <= w[1]), "sorted by face");
+            assert_eq!(m.face_quads[Face::PosY as usize], 3, "the two lone blocks and the top of the stack");
+        }
+    }
+
+    #[test]
     fn see_through_leaves_show_their_inner_faces_near_the_surface_only() {
         let r = reg();
         let leaves = BlockState::full(r.id("leaves").unwrap());
@@ -872,10 +909,17 @@ mod tests {
         assert_eq!(m.cutout.quad_count(), 4, "two planes, both sides");
         let faces: Vec<u32> = m.cutout.vertices.iter().map(|v| v.face_index()).collect();
         assert!(faces[..8].iter().all(|&f| f == 6) && faces[8..].iter().all(|&f| f == 7));
-        // Corner to corner of its cell, the whole block high; only the top corners sway.
+        // Through the middle of its cell, a block wide and high (32 texels to the block both
+        // ways); only the top corners sway.
         for v in &m.cutout.vertices {
-            assert!([12, 16].contains(&v.x()) && [16, 20].contains(&v.y()) && [20, 24].contains(&v.z()));
+            if v.face_index() == 6 {
+                assert!(v.x() == 14 && [20, 24].contains(&v.z()));
+            } else {
+                assert!(v.z() == 22 && [12, 16].contains(&v.x()));
+            }
+            assert!([16, 20].contains(&v.y()));
             assert_eq!(v.tex_top() & 1 == 1, v.y() == 20);
+            assert_eq!(v.tex_top() & 2 == 2, v.x() == 16 || v.z() == 24);
         }
         // A plant hides nothing: the ground under it keeps its top.
         let stone = BlockState::full(r.id("stone").unwrap());
