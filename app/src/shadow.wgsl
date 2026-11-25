@@ -19,6 +19,10 @@ fn vs_chunk(@location(0) packed: vec2<u32>, @location(1) origin: vec4<f32>) -> @
 
 @vertex
 fn vs_char(@location(0) pos: vec3<f32>, @location(1) normal: vec3<f32>, @location(2) uv: vec2<f32>) -> @builtin(position) vec4<f32> {
+    // Items in hands and spell effects cast none (a sprite's square would; see fs_char).
+    if (uv.x >= 16.0) {
+        return vec4<f32>(0.0, 0.0, -2.0, 1.0);
+    }
     return s.view_proj * vec4<f32>(pos, 1.0);
 }
 

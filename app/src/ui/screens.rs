@@ -767,6 +767,7 @@ impl Ui {
                         Action::ToggleView,
                     ),
                 ),
+                ("Difficulty", Control::Stepper(crate::combat::DIFFICULTIES[s.difficulty.min(2) as usize].into(), Action::CycleDifficulty, Action::CycleDifficulty)),
                 ("Show Stats", on_off(s.show_stats, Action::ToggleStats)),
                 if back == Screen::Pause {
                     ("Time of Day", Control::Stepper(crate::sky::time_label(self.hours), Action::Time(-1), Action::Time(1)))
@@ -1269,10 +1270,85 @@ impl Ui {
         rect(out, cx - len, cy - th * 0.5, len * 2.0, th, XHAIR);
         rect(out, cx - th * 0.5, cy - len, th, len * 2.0, XHAIR);
         let [safe_left, safe_top, _, _] = self.margins();
+        if self.combat.on {
+            self.draw_combat(out);
+        }
         if self.settings.show_stats {
             self.draw_stats(perf, out, safe_left + 8.0 * dp, safe_top + 4.0 * dp);
         }
         self.draw_controls(out);
+        if let Some(t) = self.combat.dead {
+            // Dead: the world darkens to red, and he gets up again in a moment.
+            rect(out, 0.0, 0.0, w, h, [60, 0, 0, 150]);
+            draw::centered(out, Serif, "You Died", w * 0.5, h * 0.38, 54.0 * dp, [230, 70, 60, 255], true);
+            let line = format!("Rising again in {}", t.ceil() as i32);
+            draw::centered(out, Serif, &line, w * 0.5, h * 0.38 + 46.0 * dp, 19.0 * dp, DIM, true);
+        }
+    }
+
+    /// The fight: his health, stamina and mana; bars over the creatures; numbers floating up
+    /// from blows; the screen's edges reddening when he is hurt.
+    fn draw_combat(&mut self, out: &mut Vec<HudVertex>) {
+        let (w, h) = self.size;
+        let dp = self.dp;
+        let [_, top, _, _] = self.margins();
+        let c = self.combat.clone();
+        if c.hurt > 0.0 {
+            let a = (c.hurt / 0.6 * 150.0).min(150.0) as u8;
+            let e = 26.0 * dp;
+            for k in 0..4 {
+                let f = 1.0 - k as f32 / 4.0;
+                let aa = (a as f32 * f * f) as u8;
+                let (o, t) = (k as f32 * e / 4.0, e / 4.0);
+                rect(out, 0.0, o, w, t, [170, 10, 10, aa]);
+                rect(out, 0.0, h - o - t, w, t, [170, 10, 10, aa]);
+                rect(out, o, 0.0, t, h, [170, 10, 10, aa]);
+                rect(out, w - o - t, 0.0, t, h, [170, 10, 10, aa]);
+            }
+        }
+        // Over the creatures: a bar, and the name when near.
+        for b in &c.bars {
+            let bw = 64.0 * dp * b.near;
+            let bh = (6.0 * dp * b.near).max(3.0);
+            let (x, y) = (b.at[0] - bw * 0.5, b.at[1]);
+            let a = (255.0 * b.near) as u8;
+            rect(out, x - 1.5, y - 1.5, bw + 3.0, bh + 3.0, [10, 8, 6, a]);
+            rect(out, x, y, bw, bh, [60, 20, 18, a]);
+            rect(out, x, y, bw * b.frac, bh, [200, 48, 40, a]);
+            if b.near > 0.62 {
+                draw::centered(out, Serif, b.name, b.at[0], y - 10.0 * dp, 13.0 * dp, [235, 225, 205, a], true);
+            }
+        }
+        for (at, text, col) in &c.floaters {
+            draw::centered(out, Serif, text, at[0], at[1], 19.0 * dp, *col, true);
+        }
+        // His bars, across the top: health, then stamina and mana side by side.
+        let bw = (260.0 * dp).min(w * 0.36);
+        let x = (w - bw) * 0.5;
+        let y = top + 8.0 * dp;
+        let frame = |out: &mut Vec<HudVertex>, x: f32, y: f32, bw: f32, bh: f32, frac: f32, fill: [u8; 4], back: [u8; 4]| {
+            rect(out, x - 2.0, y - 2.0, bw + 4.0, bh + 4.0, [16, 12, 10, 220]);
+            rect(out, x, y, bw, bh, back);
+            rect(out, x, y, bw * frac.clamp(0.0, 1.0), bh, fill);
+            rect(out, x, y, bw * frac.clamp(0.0, 1.0), (bh * 0.35).max(1.0), [255, 255, 255, 40]);
+        };
+        let hh = 12.0 * dp;
+        frame(out, x, y, bw, hh, c.health, [196, 40, 36, 255], [58, 18, 16, 230]);
+        let label = format!("{} / {}", c.numbers[0].ceil() as i32, c.numbers[1] as i32);
+        draw::centered(out, Serif, &label, w * 0.5, y + hh * 0.5, 11.0 * dp, [250, 236, 220, 255], true);
+        let sh = 7.0 * dp;
+        let half = (bw - 6.0 * dp) * 0.5;
+        frame(out, x, y + hh + 6.0 * dp, half, sh, c.stamina, [120, 186, 60, 255], [28, 44, 18, 230]);
+        frame(out, x + half + 6.0 * dp, y + hh + 6.0 * dp, half, sh, c.mana, [64, 110, 230, 255], [16, 24, 60, 230]);
+        let mut ey = y + hh + sh + 22.0 * dp;
+        if !c.effects.is_empty() {
+            let line = c.effects.join("  ");
+            draw::centered(out, Serif, &line, w * 0.5, ey, 13.0 * dp, [240, 210, 150, 255], true);
+            ey += 18.0 * dp;
+        }
+        if let Some(m) = &c.message {
+            draw::centered(out, Serif, m, w * 0.5, ey.max(h * 0.3), 17.0 * dp, [240, 200, 160, 255], true);
+        }
     }
 }
 

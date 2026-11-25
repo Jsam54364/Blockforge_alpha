@@ -121,6 +121,43 @@ const TINTED_PLANTS: [&str; 22] = [
     "tall_fern_top",
 ];
 
+/// The item sprites (`tools/paint_items.py`, `assets/items.toml`): see-through around them
+/// like the plants, never tinted.
+pub const ITEMS: [&str; 32] = [
+    "wooden_club",
+    "bronze_sword",
+    "iron_sword",
+    "steel_sword",
+    "iron_dagger",
+    "iron_axe",
+    "iron_mace",
+    "iron_spear",
+    "steel_greatsword",
+    "battle_axe",
+    "warhammer",
+    "ember_staff",
+    "frost_staff",
+    "storm_staff",
+    "staff_of_mending",
+    "leather_cap",
+    "leather_jerkin",
+    "leather_trousers",
+    "leather_boots",
+    "chain_coif",
+    "chain_hauberk",
+    "chain_leggings",
+    "chain_boots",
+    "plate_helm",
+    "plate_cuirass",
+    "plate_greaves",
+    "plate_sabatons",
+    "mage_hood",
+    "mage_robe",
+    "health_potion",
+    "mana_potion",
+    "stamina_potion",
+];
+
 /// Textures multiplied by the biome colour all over.
 fn fully_tinted(name: &str) -> bool {
     name.ends_with("grass_top") || name == "leaves" || TINTED_PLANTS.contains(&plant_base(name))
@@ -128,7 +165,7 @@ fn fully_tinted(name: &str) -> bool {
 
 /// See-through foliage: leaves and plants (alpha-tested, swaying; see the module docs).
 pub fn is_foliage(name: &str) -> bool {
-    name == "leaves" || name.ends_with("_leaves") || PLANTS.contains(&plant_base(name))
+    name == "leaves" || name.ends_with("_leaves") || PLANTS.contains(&plant_base(name)) || ITEMS.contains(&name)
 }
 
 /// A plant sprite's base name: "short_grass_2" (its second variant) is "short_grass".

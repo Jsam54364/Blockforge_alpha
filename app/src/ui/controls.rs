@@ -273,6 +273,16 @@ impl Ui {
                 }
                 let (cx, cy) = (x + w * 0.5, y + h * 0.5);
                 match c.icon {
+                    // With a weapon or staff in hand, ATTACK shows it and PLACE is the guard.
+                    Some("@pickaxe") if self.combat.guard => {
+                        if let Some(icon) = self.icon_of(self.held_block()) {
+                            draw::thumb(out, crate::gfx::icon_uv(icon), cx - w * 0.32, cy - h * 0.32, w * 0.64, h * 0.64);
+                        }
+                    }
+                    Some("@block") if self.combat.guard => {
+                        draw::icon(out, "shield", cx + 1.5, cy + 1.5, w * 0.5, [0, 0, 0, tint[3] / 2]);
+                        draw::icon(out, "shield", cx, cy, w * 0.5, ink);
+                    }
                     Some("@pickaxe") => draw::image(out, "pickaxe", cx - w * 0.3, cy - h * 0.3, w * 0.6, h * 0.6, tint),
                     Some("@block") => {
                         if let Some(icon) = self.icon_of(self.held_block()) {

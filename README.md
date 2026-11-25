@@ -730,6 +730,62 @@ point, `worldgen.rs` turns that into blocks, `flora.rs` grows trees and rocks on
 * The block texture array never has a multiple of six layers (`gfx::array_layers`): on OpenGL
   ES, wgpu would make it a cube map and every block would show the wrong texture.
 
+## Combat and magic (`src/rpg`, `app/src/combat.rs`, `assets/items.toml`)
+
+Medieval fantasy fighting, in the manner of action RPGs: close combat built on stamina,
+timing and poise, and spells cast from staves. The rules live in the core (`src/rpg`, no
+window needed, tested on their own); the app gives them bodies.
+
+* **Health, stamina and mana** (`rpg::Vitals`): stamina pays for every swing, roll and
+  blocked blow and comes back quickly once you stop; mana pays for spells; health mends
+  slowly once you are out of a fight. Shown across the top of the screen.
+* **Damage** comes in six kinds: slash, blunt and pierce from weapons; fire, frost and
+  arcane from spells. Armour takes a share of a blow (50 armour halves it) and each
+  creature resists or is weak to kinds (skeletons shatter under maces and shrug off
+  points and frost; trolls burn). **Effects**: burning, chilled (slowed), bleeding (axes,
+  daggers), mending, warded.
+* **Fighting** (`rpg::fighter`, shared by the player and every creature):
+  * ATTACK tapped is a light attack; pressing again during a swing chains a **combo** of
+    three, each harder. ATTACK held is a **heavy attack**: about twice the damage, much
+    more stagger, and once under way it shrugs off half of what would stagger you.
+  * With a weapon or staff in hand PLACE is the **guard** (held): it stops most of a blow
+    from the front for stamina. Raised just before a blow lands it **parries**: no damage,
+    and the attacker reels, open to a riposte. A guard that runs out of stamina breaks.
+  * **Rolling** (ROLL, or a double tap of the stance button) is a dodge: it costs stamina,
+    and nothing touches you in the middle of it.
+  * **Poise**: every blow wears it down; when it runs out you stagger, which interrupts
+    what you were doing, and blows on a staggered fighter land half again as hard (so do
+    blows from behind).
+  * Guarding, swinging or chilled you move slower. Dead, you get up again at the spawn
+    after five seconds.
+* **Weapons** (`assets/items.toml`): wooden club; bronze, iron and steel swords; iron
+  dagger, axe, mace and spear; steel greatsword, battle axe and warhammer (two-handed).
+  Each has its damage by kind, reach, sweep, stamina cost, poise, guard and bleed.
+* **Staves** cast one spell on a tap and a stronger one when ATTACK is held
+  (`rpg::spells`): Ember Staff (Firebolt, Fireball with a blast), Frost Staff (Frost
+  Shard, Frost Nova), Storm Staff (Lightning, Chain Lightning), Staff of Mending (Mend,
+  Stone Ward). Bolts fly and drop a little; lightning strikes the first thing in your
+  line of sight at once.
+* **Armour** in the inventory's equipment slots (head, body, legs, feet): leather, chain,
+  plate (heavier sets slow your stamina), and a mage's hood and robe against spells.
+  **Potions** (health, mana, stamina) are drunk with PLACE and used up.
+* **Creatures** (`rpg::creatures`, `rpg::ai`): goblins (quick, in packs, roll away from
+  swings, run when badly hurt), goblin shamans (keep their distance and throw fire),
+  skeletons (at night only, with swords), bandits (axes, raise their guard), trolls (huge,
+  slow, warhammers). They wander until they see you, close in, circle, swing, guard or
+  roll as their nature has it. They use the player's body (the HyRig character), scaled
+  and recoloured in the shader, and carry real items. They appear out of sight 24 to 42
+  blocks away and leave when far behind. **Difficulty** (Settings, General): Peaceful (no
+  creatures), Normal, Hard (more of them, more often). In creative flight you are left
+  alone.
+* Items are in the registry with the blocks (`model = "item"`: same ids, names, icons and
+  saving) under the inventory's new **Gear** tab. Their 32 x 32 sprites
+  (`tools/paint_items.py`) are drawn in the hand one texel thick at the game's 32 texels to
+  the metre, so a one-handed sword is about a metre long and a greatsword or staff the
+  sprite's whole diagonal.
+* Over each creature a health bar (and its name when near), numbers floating up from
+  blows ("Parried!", "Dodged"), the screen's edges reddening when you are hurt.
+
 ## Culling
 
 * Chunks outside the view or the draw distance are skipped (frustum), and so are chunks

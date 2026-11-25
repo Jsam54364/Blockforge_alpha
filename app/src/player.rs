@@ -26,7 +26,7 @@ const CARRIED: f32 = 0.3;
 /// busy: punching, climbing, swimming).
 const CARRY_SHOWN: f64 = 0.35;
 
-struct ClientBlocks<'a>(&'a Client);
+pub(crate) struct ClientBlocks<'a>(pub &'a Client);
 
 impl Blocks for ClientBlocks<'_> {
     fn solid(&self, x: i32, y: i32, z: i32) -> Option<Option<(f32, f32)>> {
@@ -71,6 +71,18 @@ pub struct Player {
     /// His height and whether he stood on the ground in the last frame.
     last_y: f64,
     last_grounded: bool,
+    /// Where his hands are this frame (right, left): the fist's middle and its x, y, z axes.
+    /// Items are drawn in them (`combat`).
+    pub hands: [Option<Hand>; 2],
+}
+
+/// A hand's place: the middle of the fist and its axes (x out to the side, y back up the
+/// forearm, z out of the knuckles' underside).
+pub type Hand = ([f32; 3], [[f32; 3]; 3]);
+
+/// The hands of a posed body.
+pub fn hands_of(rig: &Rig, pose: &crate::hyrig::rig::Pose) -> [Option<Hand>; 2] {
+    ["right_hand", "left_hand"].map(|n| rig.node(n).map(|i| (rig.centre(pose, i), pose.frame(i).1)))
 }
 
 /// The lag to add when the footing changed from `before` to `after` in one frame: the whole
@@ -126,6 +138,7 @@ impl Player {
             lift: 0.0,
             last_y: at[1],
             last_grounded: false,
+            hands: [None, None],
         }
     }
 
@@ -232,6 +245,7 @@ impl Player {
         let pose = self.rig.pose(&out, [0.0; 3]);
         self.verts.clear();
         self.rig.triangles(&pose, &mut self.verts);
+        self.hands = hands_of(&self.rig, &pose);
         // The block in his hands: between them, square to his chest.
         let carried = self.ctl.hold() == "two_handed_item" && (out.hold.as_ref().is_some_and(|h| h.0.weight > CARRY_SHOWN) || out.upper_left.is_some());
         self.carrying = carried && self.carry.is_some();

@@ -26,6 +26,10 @@ pub enum Model {
     /// Two crossed planes corner to corner, as Minecraft and Vintage Story draw grass,
     /// flowers and small bushes (`model = "cross"`).
     Cross,
+    /// Not a block at all: a weapon, staff, piece of armour or potion (`assets/items.toml`),
+    /// in the registry so it shares ids, names, icons and saving with the blocks. Its
+    /// texture is its 32 x 32 sprite.
+    Item,
 }
 
 #[derive(Clone, Debug)]
@@ -74,16 +78,17 @@ pub struct BlockRegistry {
     by_name: HashMap<String, u16>,
     textures: Vec<String>,
     source: String,
+    items_source: String,
 }
 
 #[derive(Debug, Clone)]
-enum Value {
+pub(crate) enum Value {
     Str(String),
     Bool(bool),
     Num(f64),
 }
 
-type Table = HashMap<String, Value>;
+pub(crate) type Table = HashMap<String, Value>;
 
 fn strip_comment(line: &str) -> &str {
     let mut in_str = false;
@@ -108,7 +113,9 @@ fn parse_value(s: &str) -> Option<Value> {
     }
 }
 
-fn parse_tables(src: &str) -> Result<Vec<Table>, RegistryError> {
+/// The `[[<kind>]]` tables of a file (kind "block" or "item").
+pub(crate) fn parse_tables(src: &str, kind: &str) -> Result<Vec<Table>, RegistryError> {
+    let header = format!("[[{kind}]]");
     let mut tables: Vec<Table> = Vec::new();
     for (n, raw) in src.lines().enumerate() {
         let lineno = n + 1;
@@ -116,12 +123,12 @@ fn parse_tables(src: &str) -> Result<Vec<Table>, RegistryError> {
         if line.is_empty() {
             continue;
         }
-        if line == "[[block]]" {
+        if line == header {
             tables.push(Table::new());
             continue;
         }
         if line.starts_with('[') {
-            return Err(RegistryError(format!("line {lineno}: only [[block]] tables are supported")));
+            return Err(RegistryError(format!("line {lineno}: only {header} tables are supported")));
         }
         let (k, v) = line
             .split_once('=')
@@ -130,7 +137,7 @@ fn parse_tables(src: &str) -> Result<Vec<Table>, RegistryError> {
             .ok_or_else(|| RegistryError(format!("line {lineno}: bad value `{}`", v.trim())))?;
         let table = tables
             .last_mut()
-            .ok_or_else(|| RegistryError(format!("line {lineno}: key outside of a [[block]]")))?;
+            .ok_or_else(|| RegistryError(format!("line {lineno}: key outside of a {header}")))?;
         table.insert(k.trim().to_string(), value);
     }
     Ok(tables)
@@ -162,12 +169,13 @@ fn get_num(t: &Table, key: &str, who: &str) -> Result<Option<f64>, RegistryError
 
 impl BlockRegistry {
     pub fn from_toml(src: &str) -> Result<Self, RegistryError> {
-        let tables = parse_tables(src)?;
+        let tables = parse_tables(src, "block")?;
         let mut reg = BlockRegistry {
             defs: Vec::new(),
             by_name: HashMap::new(),
             textures: Vec::new(),
             source: src.to_string(),
+            items_source: String::new(),
         };
 
         for t in &tables {
@@ -263,7 +271,53 @@ impl BlockRegistry {
     }
 
     pub fn builtin() -> Self {
-        Self::from_toml(include_str!("../assets/blocks.toml")).expect("builtin blocks.toml is valid")
+        Self::from_toml(include_str!("../assets/blocks.toml"))
+            .expect("builtin blocks.toml is valid")
+            .with_items(include_str!("../assets/items.toml"))
+            .expect("builtin items.toml is valid")
+    }
+
+    /// Adds the items of `src` (`[[item]]` tables: weapons, staves, armour, potions) after
+    /// the blocks, as `Model::Item` entries: not solid, never placed, their texture their
+    /// sprite. Their fighting numbers are read by `rpg::items::ItemBook`.
+    pub fn with_items(mut self, src: &str) -> Result<Self, RegistryError> {
+        for t in parse_tables(src, "item")? {
+            let name = get_str(&t, "name", "?")?.ok_or_else(|| RegistryError("an [[item]] has no name".to_string()))?.to_string();
+            if self.by_name.contains_key(&name) {
+                return Err(RegistryError(format!("duplicate block or item '{name}'")));
+            }
+            if self.defs.len() >= MAX_BLOCK_IDS {
+                return Err(RegistryError(format!("more than {MAX_BLOCK_IDS} blocks and items")));
+            }
+            let tex = self.intern_texture(get_str(&t, "texture", &name)?.unwrap_or(name.as_str()));
+            let id = self.defs.len() as u16;
+            self.by_name.insert(name.clone(), id);
+            self.defs.push(BlockDef {
+                solid: false,
+                opaque: false,
+                render: RenderLayer::Cutout,
+                light_emission: 0,
+                hardness: 0.0,
+                tex: [tex; 6],
+                behavior: None,
+                group: "gear".to_string(),
+                family: get_str(&t, "kind", &name)?.unwrap_or("item").to_string(),
+                label: get_str(&t, "label", &name)?.map(|s| s.to_string()),
+                slab: false,
+                biome: None,
+                model: Model::Item,
+                variants: 1,
+                plant_upper: false,
+                name,
+            });
+        }
+        self.items_source = src.to_string();
+        Ok(self)
+    }
+
+    /// The `[[item]]` tables the registry was given (empty without items).
+    pub fn items_source(&self) -> &str {
+        &self.items_source
     }
 
     fn intern_texture(&mut self, name: &str) -> u16 {
@@ -311,7 +365,7 @@ impl BlockRegistry {
                 *t = map.get(*t as usize).copied().unwrap_or(*t);
             }
         }
-        BlockRegistry { defs, by_name: self.by_name.clone(), textures: self.textures.clone(), source: self.source.clone() }
+        BlockRegistry { defs, by_name: self.by_name.clone(), textures: self.textures.clone(), source: self.source.clone(), items_source: self.items_source.clone() }
     }
 
     pub fn texture_names(&self) -> &[String] {

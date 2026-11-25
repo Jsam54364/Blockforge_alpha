@@ -27,6 +27,7 @@ pub mod protocol;
 pub mod raycast;
 pub mod registry;
 pub mod rng;
+pub mod rpg;
 pub mod save;
 pub mod server;
 pub mod tick;

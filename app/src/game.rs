@@ -28,6 +28,9 @@ use blockforge::server::{self, ServerConfig, ServerHandle};
 use blockforge::worldgen::{GroundInfo, WorldGen, WORLDGEN_VERSION};
 use winit::event::TouchPhase;
 
+use blockforge::rpg::fighter::Command;
+
+use crate::combat::{Combat, Frame, Held};
 use crate::hyrig::View;
 use crate::player::Player;
 use crate::sky::Clock;
@@ -172,6 +175,10 @@ struct Attack {
     touch: u64,
     since: Instant,
     next_chop: Option<Instant>,
+    /// A fighting swing (a weapon or staff in hand, or a creature in front of his fists)
+    /// rather than digging; and whether it has become a heavy attack.
+    fight: bool,
+    heavy: bool,
 }
 
 /// Digging by touch: which touch is held on the world, the block being hammered at and how
@@ -345,6 +352,12 @@ pub struct Game {
     held: HashMap<u64, &'static str>,
     last_update: Instant,
     last_pos_sent: Instant,
+    /// The fight: his fighter, the creatures, spells and sparks (`combat`).
+    pub combat: Combat,
+    /// The touch holding PLACE up as a guard.
+    guard_touch: Option<u64>,
+    /// Where he gets up again after dying.
+    spawn: [f64; 3],
 }
 
 impl Game {
@@ -403,6 +416,11 @@ impl Game {
 
         let now = Instant::now();
         let ui_walk = ui.settings.walk;
+        let combat = Combat::new(registry.clone(), world.seed);
+        let spawn = {
+            let [x, y, z] = gen.find_spawn();
+            [x as f64 + 0.5, y as f64 + 1.5, z as f64 + 0.5]
+        };
         Game {
             client,
             server,
@@ -431,7 +449,67 @@ impl Game {
             held: HashMap::new(),
             last_update: now,
             last_pos_sent: now,
+            combat,
+            guard_touch: None,
+            spawn,
         }
+    }
+
+    /// What he holds, for fighting.
+    fn held(&self) -> Held {
+        self.combat.held_kind(self.ui.held_block())
+    }
+
+    /// Fighting is for walking: in creative flight the buttons build.
+    fn fighting(&self) -> bool {
+        self.ui.settings.walk && !self.player.flying()
+    }
+
+    /// A swing (or a spell) from ATTACK: light on a tap, heavy when held.
+    fn fight(&mut self, heavy: bool) {
+        let cmd = match self.held() {
+            Held::Staff(s) => Command::Cast { spell: if heavy { s.heavy } else { s.light }, power: s.power },
+            _ if heavy => Command::Heavy,
+            _ => Command::Light,
+        };
+        let r = self.combat.command(cmd, &mut self.player);
+        self.hands_busy = Some(Instant::now() + CHOP_HANDS);
+        if r.roll {
+            self.roll_until = Some(Instant::now() + ROLL_PULSE);
+        }
+    }
+
+    /// Development runs: an item in his hand and creatures in front of him.
+    pub fn dev_setup(&mut self, hold: Option<&str>, foes: &[String]) {
+        self.ui.settings.walk = true;
+        if let Some(id) = hold.and_then(|n| self.registry.id(n)) {
+            self.ui.hotbar[0] = Stack::of(id, 1);
+            self.ui.slot = 0;
+        }
+        let p = self.player.position();
+        let yaw = self.cam.yaw + std::f32::consts::PI; // the controller's sense: 0 faces +Z
+        self.combat.dev_spawn(foes, &self.client, [p[0] as f32, p[1] as f32, p[2] as f32], yaw);
+    }
+
+    /// Development runs: a swing, a guard or a spell.
+    pub fn dev_act(&mut self, act: &str) {
+        match act {
+            "light" => self.fight(false),
+            "heavy" | "heavy_cast" => self.fight(true),
+            "cast" => self.fight(false),
+            "guard" => {
+                self.combat.command(Command::GuardUp, &mut self.player);
+            }
+            _ => {}
+        }
+    }
+
+    /// Everything drawn with the character this frame: him, what he holds, the creatures,
+    /// spells and sparks.
+    pub fn scene_triangles(&mut self) -> &[crate::hyrig::rig::Vertex] {
+        let held = self.ui.held_block();
+        let show = self.fighting() && !matches!(self.held(), Held::Block | Held::Nothing);
+        self.combat.triangles(&self.player, held, show)
     }
 
     pub fn registry(&self) -> &Arc<BlockRegistry> {
@@ -571,7 +649,17 @@ impl Game {
 
     /// ATTACK and PLACE while held: chops that keep landing, blocks that keep coming.
     fn update_buttons(&mut self, now: Instant) {
-        if let Some(a) = &mut self.attack {
+        let mut heavy = false;
+        if let Some(a) = self.attack.as_mut().filter(|a| a.fight) {
+            if !a.heavy && now.duration_since(a.since) >= HEAVY_AFTER {
+                a.heavy = true;
+                heavy = true;
+            }
+        }
+        if heavy {
+            self.fight(true);
+        }
+        if let Some(a) = self.attack.as_mut().filter(|a| !a.fight) {
             if now.duration_since(a.since) >= HEAVY_AFTER && a.next_chop.map_or(true, |t| now >= t) {
                 a.next_chop = Some(now + CHOP_EVERY);
                 self.chop_lands = Some(now + CHOP_LANDS);
@@ -621,9 +709,17 @@ impl Game {
     fn button_released(&mut self, id: u64) {
         self.ui_touches.remove(&id);
         self.held.remove(&id);
+        if self.guard_touch == Some(id) {
+            self.guard_touch = None;
+            self.combat.command(Command::GuardDown, &mut self.player);
+        }
         if self.attack.as_ref().is_some_and(|a| a.touch == id) {
             let a = self.attack.take().unwrap();
-            if a.next_chop.is_none() {
+            if a.fight {
+                if !a.heavy {
+                    self.fight(false);
+                }
+            } else if a.next_chop.is_none() {
                 // Let go before it became a heavy attack: a punch.
                 self.break_target();
             }
@@ -703,15 +799,58 @@ impl Game {
         self.player.jump = self.held.values().any(|b| *b == "jump");
         self.player.roll = self.held.values().any(|b| *b == "roll") || self.roll_until.is_some_and(|t| now < t);
         self.player.down = self.held.values().any(|b| *b == "down");
-        // A block picked in the hotbar is carried in both hands, put away while they are busy.
-        let block = self.ui.held_block();
+        // A block picked in the hotbar is carried in both hands, put away while they are busy;
+        // a weapon, staff or potion is held in his right hand.
+        let held_id = self.ui.held_block();
+        let held = self.held();
+        let worn = std::array::from_fn(|i| self.ui.equipment[i].id);
+        self.combat.equip(held_id, worn);
+        let block = if held == Held::Block { held_id } else { 0 };
         let busy = self.attack.is_some() || self.chop_lands.is_some() || self.mining.is_some() || self.hands_busy.is_some_and(|t| now < t);
         self.player.mine = self.mining.is_some();
-        self.player.hold = if block != 0 && !busy { "two_handed_item" } else { "none" };
+        self.player.hold = if block != 0 && !busy {
+            "two_handed_item"
+        } else if self.fighting() {
+            self.combat.hold_pose(held)
+        } else {
+            "none"
+        };
         self.player.set_carry((block != 0).then(|| std::array::from_fn(|f| self.registry.def(block).tex[f])));
-        let eye = self.player.update(&self.client, dt as f64, (strafe, forward), look, aspect, true, cam_view == CamView::Front);
+        // Guarding, swinging or chilled, he moves slower; dead, not at all.
+        let fighting = self.fighting();
+        let pace = if self.combat.dead_for.is_some() { 0.0 } else if fighting { self.combat.player.pace() } else { 1.0 };
+        let eye = self.player.update(&self.client, dt as f64, (strafe * pace, forward * pace), look, aspect, true, cam_view == CamView::Front);
         self.cam.pos = eye;
         self.count_strikes();
+        let p = self.player.position();
+        let frame = Frame {
+            client: &self.client,
+            aim: self.cam.forward(),
+            eyes: [p[0] as f32, p[1] as f32 + 1.55, p[2] as f32],
+            night: !(6.0..19.5).contains(&self.clock.hours()),
+            difficulty: self.ui.settings.difficulty,
+            flying: !fighting,
+        };
+        let report = self.combat.update(dt, &frame, &mut self.player);
+        if report.roll {
+            self.roll_until = Some(now + ROLL_PULSE);
+        }
+        if report.missed && matches!(held, Held::Weapon(_)) {
+            // A swing that met no one still cuts the grass or flowers it was aimed at (never
+            // the ground: a missed blow mustn't dig).
+            if let Some(hit) = self.target().filter(|h| self.client.is_plant(h.pos)) {
+                self.client.break_block(hit.pos);
+            }
+        }
+        if report.respawn {
+            self.player.place(self.spawn);
+        }
+        if self.combat.dead_for.is_some() {
+            self.attack = None;
+            self.placing = None;
+        }
+        let rc = self.render_cam();
+        self.ui.combat = if fighting { self.combat.hud(rc.pos, rc.forward(), self.size.0 as f32, self.size.1 as f32, held) } else { Default::default() };
         // Flight can start or end by itself (two quick jumps; flying down onto the ground):
         // the setting follows.
         if !self.player.is_waiting() && self.player.flying() == self.ui.settings.walk {
@@ -732,18 +871,47 @@ impl Game {
     /// Does what a HUD button asks (`id` is the touch that pressed it).
     fn ui_action(&mut self, id: u64, action: Action) {
         match action {
+            Action::Hold("attack") | Action::Hold("place") if self.combat.dead_for.is_some() => {}
             Action::Hold("attack") => {
-                self.attack = Some(Attack { touch: id, since: Instant::now(), next_chop: None });
+                let p = self.player.position();
+                let at = [p[0] as f32, p[1] as f32, p[2] as f32];
+                let fight = self.fighting()
+                    && (matches!(self.held(), Held::Weapon(_) | Held::Staff(_)) || self.combat.foe_in_front(at, self.cam.forward(), self.combat.player.weapon.reach));
+                self.attack = Some(Attack { touch: id, since: Instant::now(), next_chop: None, fight, heavy: false });
+            }
+            Action::Hold("place") if self.fighting() && matches!(self.held(), Held::Weapon(_) | Held::Staff(_)) => {
+                // With a weapon or staff, PLACE is the guard (raised just before a blow: a parry).
+                self.guard_touch = Some(id);
+                self.combat.command(Command::GuardUp, &mut self.player);
+            }
+            Action::Hold("place") if self.fighting() && matches!(self.held(), Held::Potion(_)) => {
+                if let Held::Potion(p) = self.held() {
+                    if !self.combat.player.busy() {
+                        self.combat.command(Command::Drink(p), &mut self.player);
+                        let slot = self.ui.slot.min(8);
+                        let s = &mut self.ui.hotbar[slot];
+                        s.count = s.count.saturating_sub(1);
+                        if s.count == 0 {
+                            *s = Stack::EMPTY;
+                        }
+                    }
+                }
             }
             Action::Hold("place") => {
                 self.place_target();
                 self.placing = Some((id, Instant::now() + PLACE_FIRST));
             }
+            Action::Hold("roll") if self.fighting() => {
+                // A roll is a dodge: it needs the stamina.
+                if self.combat.command(Command::Dodge, &mut self.player).roll {
+                    self.held.insert(id, "roll");
+                }
+            }
             Action::Hold("stance") => {
                 let now = Instant::now();
                 // A second tap soon after a first: roll (and forget the first tap's crouch).
                 let rolled = self.crouch_at.take().is_some();
-                if rolled {
+                if rolled && (!self.fighting() || self.combat.command(Command::Dodge, &mut self.player).roll) {
                     self.roll_until = Some(now + ROLL_PULSE);
                 }
                 self.stance = Some(Stance { touch: id, since: now, done: rolled });
@@ -1126,6 +1294,41 @@ mod tests {
     }
 
     /// A world in memory around seed 1337's spawn, loaded, with the HUD laid out.
+    #[test]
+    fn a_sword_is_held_swung_and_hits_a_goblin_in_front_of_him() {
+        let mut g = loaded_game(true);
+        g.ui.settings.difficulty = 0; // no other creatures
+        run_until(&mut g, "landing", 20.0, &|g: &Game| !g.player.is_waiting() && g.player.last.as_ref().is_some_and(|o| o.grounded));
+        let body = g.player.triangles().len();
+        g.ui.settings.difficulty = 1;
+        g.dev_setup(Some("iron_sword"), &["goblin".to_string()]);
+        run_for(&mut g, 0.3);
+        assert_eq!(g.player.hold, "one_handed");
+        let all = g.scene_triangles().len();
+        assert!(all > body * 2 + 300, "his body {body}, with the sword and a goblin {all}");
+        // Swing until the goblin has been hit (it may guard or roll; it may move).
+        let goblin = |g: &Game| g.combat.creatures.first().map(|c| c.fighter.vitals.health.value);
+        let full = goblin(&g).expect("a goblin");
+        let mut hurt = false;
+        for _ in 0..200 {
+            let Some(c) = g.combat.creatures.first() else { break };
+            // Face it, and swing once it has come into reach.
+            let p = g.player.position();
+            let (dx, dz) = (c.pos[0] - p[0] as f32, c.pos[2] - p[2] as f32);
+            g.cam.yaw = (-dx).atan2(-dz);
+            g.cam.pitch = -0.1;
+            if dx.hypot(dz) < 2.4 && !g.combat.player.busy() {
+                g.fight(false);
+            }
+            run_for(&mut g, 0.1);
+            if goblin(&g).map_or(true, |h| h < full) {
+                hurt = true;
+                break;
+            }
+        }
+        assert!(hurt, "the goblin was never hit");
+    }
+
     fn loaded_game(walk: bool) -> Game {
         let reg = Arc::new(BlockRegistry::builtin());
         let mut ui = Ui::new();

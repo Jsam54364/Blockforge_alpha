@@ -9,6 +9,7 @@
 mod android;
 mod atlas;
 mod clouds;
+mod combat;
 mod font;
 mod game;
 mod gfx;
@@ -86,10 +87,19 @@ struct DevShot {
     frames: u64,
     path: PathBuf,
     playing_frames: u64,
-    /// The camera instead of the game's: (height above the player's, yaw, pitch in degrees).
-    cam: Option<(f32, f32, f32)>,
+    /// The camera instead of the game's: (height above the player's, yaw, pitch in degrees,
+    /// and how far back from him along its view, in blocks).
+    cam: Option<(f32, f32, f32, f32)>,
     /// Where to put the player instead of the spawn (x, z).
     at: Option<(f32, f32)>,
+    /// An item to hold (BLOCKFORGE_HOLD), creatures to stand in front of him
+    /// (BLOCKFORGE_FOES, comma separated), and what to do just before the picture
+    /// (BLOCKFORGE_ACT: light, heavy, guard, cast, heavy_cast), this many frames before it.
+    hold: Option<String>,
+    foes: Vec<String>,
+    act: Option<String>,
+    act_lead: u64,
+    set_up: bool,
 }
 
 impl App {
@@ -304,7 +314,7 @@ impl App {
             if let (Some(d), Some(folder)) = (self.save_dir.clone(), self.open_folder.take()) {
                 if let Some(g) = self.gfx.as_mut() {
                     if game.ui.screen != ui::Screen::Loading {
-                        g.set_character(game.player.triangles());
+                        g.set_character(game.scene_triangles());
                         let cam = game.render_cam();
                         let opts = Self::render_options(&game);
                         let view = game.view_blocks();
@@ -390,16 +400,34 @@ impl App {
         game.ui.settings.show_stats = false;
         if game.ui.screen == ui::Screen::Playing {
             d.playing_frames += 1;
+            if !d.set_up && !game.player.is_waiting() && d.playing_frames > 20 {
+                d.set_up = true;
+                game.dev_setup(d.hold.as_deref(), &d.foes);
+                // BLOCKFORGE_AFTER: the picture this many frames after the set-up.
+                if let Some(n) = std::env::var("BLOCKFORGE_AFTER").ok().and_then(|v| v.parse::<u64>().ok()) {
+                    d.frames = d.playing_frames + n;
+                }
+            }
+            if let Some(a) = &d.act {
+                if d.playing_frames + d.act_lead == d.frames {
+                    game.dev_act(a);
+                }
+            }
         }
     }
 
     fn dev_capture(&mut self) {
         let (Some(d), Some(g), Some(game)) = (self.dev.clone(), self.gfx.as_mut(), self.game.as_mut()) else { return };
-        g.set_character(game.player.triangles());
+        g.set_character(game.scene_triangles());
         let cam = dev_cam(&self.dev, game);
         let opts = Self::render_options(game);
         let view = game.view_blocks();
-        match g.capture_world(&mut game.client, &cam, view, &opts) {
+        let shot = if std::env::var("BLOCKFORGE_HUD").is_ok() {
+            g.capture_world_hud(&mut game.client, &cam, view, &opts, &self.hud)
+        } else {
+            g.capture_world(&mut game.client, &cam, view, &opts)
+        };
+        match shot {
             Some((px, w, h)) => match save_png(&d.path, &px, w, h) {
                 Ok(()) => eprintln!("blockforge: saved {}", d.path.display()),
                 Err(e) => eprintln!("blockforge: could not save {}: {e}", d.path.display()),
@@ -445,7 +473,7 @@ impl App {
         let result = match (&mut self.game, over_world) {
             (Some(game), true) => {
                 let mut opts = Self::render_options(game);
-                g.set_character(game.player.triangles());
+                g.set_character(game.scene_triangles());
                 // The inventory's equipment tab shows the character (the title screen's idling
                 // figure).
                 if let Some(sc) = figure {
@@ -653,11 +681,12 @@ fn android_main(app: winit::platform::android::activity::AndroidApp) {
 /// The camera a development run draws from (`DevShot::cam`), else the game's.
 fn dev_cam(dev: &Option<DevShot>, game: &game::Game) -> game::CameraView {
     let mut cam = game.render_cam();
-    if let Some((dy, yaw, pitch)) = dev.as_ref().and_then(|d| d.cam) {
+    if let Some((dy, yaw, pitch, back)) = dev.as_ref().and_then(|d| d.cam) {
         let p = game.player.position();
-        cam.pos = [p[0] as f32, p[1] as f32 + dy, p[2] as f32];
         cam.yaw = yaw.to_radians();
         cam.pitch = pitch.to_radians();
+        let f = cam.forward();
+        cam.pos = [p[0] as f32 - f[0] * back, p[1] as f32 + dy - f[1] * back, p[2] as f32 - f[2] * back];
     }
     cam
 }
@@ -695,12 +724,17 @@ pub fn run_desktop() {
         playing_frames: 0,
         cam: std::env::var("BLOCKFORGE_CAM").ok().and_then(|v| {
             let n: Vec<f32> = v.split(',').filter_map(|t| t.trim().parse().ok()).collect();
-            (n.len() == 3).then(|| (n[0], n[1], n[2]))
+            (n.len() >= 3).then(|| (n[0], n[1], n[2], n.get(3).copied().unwrap_or(0.0)))
         }),
         at: std::env::var("BLOCKFORGE_AT").ok().and_then(|v| {
             let n: Vec<f32> = v.split(',').filter_map(|t| t.trim().parse().ok()).collect();
             (n.len() == 2).then(|| (n[0], n[1]))
         }),
+        hold: std::env::var("BLOCKFORGE_HOLD").ok(),
+        foes: std::env::var("BLOCKFORGE_FOES").map(|v| v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()).unwrap_or_default(),
+        act: std::env::var("BLOCKFORGE_ACT").ok(),
+        act_lead: var("BLOCKFORGE_ACT_LEAD", "12").parse().unwrap_or(12),
+        set_up: false,
     });
     event_loop.run_app(&mut state).expect("event loop failed");
 }

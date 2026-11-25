@@ -914,6 +914,7 @@ fn settings_survive_a_round_trip_through_text() {
         shaders: 2,
         resolution: 3,
         grass: 2,
+        difficulty: 2,
         look: crate::look::ShaderLook { fog: 70, warm_torches: false, ..crate::look::PRESETS[2].1 },
         walk: false,
         view: CamView::Front,

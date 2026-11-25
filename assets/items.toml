@@ -1,0 +1,333 @@
+# Items: weapons, staves, armour and potions. They join the block registry after the
+# blocks (as `model = "item"`), so they share ids, names, icons and saving with them; the
+# numbers here are read by `rpg::items::ItemBook`. Each has a 32 x 32 sprite of the same
+# name in assets/textures (painted by tools/paint_items.py), drawn in the hand as that
+# sprite given one texel of thickness: 32 texels to the metre, like every block.
+#
+# Weapons: damage by kind (slash, blunt, pierce), reach (metres from the wielder's middle),
+# arc (degrees swept), stamina per light swing (twice for a heavy one), poise (how hard it
+# shakes), guard (share of a blow's physical damage a guard stops), bleed (seconds),
+# hands = 2 for two-handed. Light swings chain into a combo of three.
+
+[[item]]
+name = "wooden_club"
+label = "Wooden Club"
+kind = "weapon"
+class = "club"
+blunt = 9
+reach = 2.2
+arc = 90
+stamina = 11
+poise = 12
+guard = 0.45
+
+[[item]]
+name = "bronze_sword"
+label = "Bronze Sword"
+kind = "weapon"
+class = "sword"
+slash = 11
+pierce = 2
+reach = 2.4
+arc = 100
+stamina = 12
+poise = 9
+guard = 0.6
+
+[[item]]
+name = "iron_sword"
+label = "Iron Sword"
+kind = "weapon"
+class = "sword"
+slash = 14
+pierce = 3
+reach = 2.5
+arc = 100
+stamina = 13
+poise = 10
+guard = 0.65
+
+[[item]]
+name = "steel_sword"
+label = "Steel Sword"
+kind = "weapon"
+class = "sword"
+slash = 18
+pierce = 4
+reach = 2.6
+arc = 100
+stamina = 13
+poise = 11
+guard = 0.7
+
+[[item]]
+name = "iron_dagger"
+label = "Iron Dagger"
+kind = "weapon"
+class = "dagger"
+pierce = 8
+slash = 2
+reach = 1.9
+arc = 60
+stamina = 8
+poise = 5
+guard = 0.35
+bleed = 3
+
+[[item]]
+name = "iron_axe"
+label = "Iron Axe"
+kind = "weapon"
+class = "axe"
+slash = 14
+blunt = 4
+reach = 2.3
+arc = 90
+stamina = 15
+poise = 14
+guard = 0.5
+bleed = 2
+
+[[item]]
+name = "iron_mace"
+label = "Iron Mace"
+kind = "weapon"
+class = "mace"
+blunt = 17
+reach = 2.3
+arc = 90
+stamina = 15
+poise = 18
+guard = 0.55
+
+[[item]]
+name = "iron_spear"
+label = "Iron Spear"
+kind = "weapon"
+class = "spear"
+hands = 2
+pierce = 19
+reach = 3.4
+arc = 40
+stamina = 15
+poise = 12
+guard = 0.55
+
+[[item]]
+name = "steel_greatsword"
+label = "Steel Greatsword"
+kind = "weapon"
+class = "greatsword"
+hands = 2
+slash = 28
+pierce = 4
+reach = 3.0
+arc = 130
+stamina = 22
+poise = 26
+guard = 0.8
+
+[[item]]
+name = "battle_axe"
+label = "Battle Axe"
+kind = "weapon"
+class = "battleaxe"
+hands = 2
+slash = 26
+blunt = 6
+reach = 2.8
+arc = 120
+stamina = 24
+poise = 30
+guard = 0.6
+bleed = 3
+
+[[item]]
+name = "warhammer"
+label = "Warhammer"
+kind = "weapon"
+class = "warhammer"
+hands = 2
+blunt = 34
+reach = 2.8
+arc = 110
+stamina = 26
+poise = 45
+guard = 0.65
+
+# Staves: ATTACK tapped casts the light spell, held the heavy one (see rpg::spells).
+
+[[item]]
+name = "ember_staff"
+label = "Ember Staff"
+kind = "staff"
+light = "firebolt"
+heavy = "fireball"
+power = 1.0
+
+[[item]]
+name = "frost_staff"
+label = "Frost Staff"
+kind = "staff"
+light = "frost_shard"
+heavy = "frost_nova"
+power = 1.0
+
+[[item]]
+name = "storm_staff"
+label = "Storm Staff"
+kind = "staff"
+light = "lightning"
+heavy = "chain_lightning"
+power = 1.0
+
+[[item]]
+name = "staff_of_mending"
+label = "Staff of Mending"
+kind = "staff"
+light = "heal"
+heavy = "stone_ward"
+power = 1.0
+
+# Armour: slot (head, body, legs, feet), armour against blows (or per kind), weight
+# (a share by which it slows stamina coming back).
+
+[[item]]
+name = "leather_cap"
+label = "Leather Cap"
+kind = "armor"
+slot = "head"
+armor = 3
+
+[[item]]
+name = "leather_jerkin"
+label = "Leather Jerkin"
+kind = "armor"
+slot = "body"
+armor = 7
+weight = 0.02
+
+[[item]]
+name = "leather_trousers"
+label = "Leather Trousers"
+kind = "armor"
+slot = "legs"
+armor = 5
+weight = 0.01
+
+[[item]]
+name = "leather_boots"
+label = "Leather Boots"
+kind = "armor"
+slot = "feet"
+armor = 2
+
+[[item]]
+name = "chain_coif"
+label = "Chain Coif"
+kind = "armor"
+slot = "head"
+armor = 6
+pierce = 4
+weight = 0.02
+
+[[item]]
+name = "chain_hauberk"
+label = "Chain Hauberk"
+kind = "armor"
+slot = "body"
+armor = 16
+pierce = 9
+weight = 0.07
+
+[[item]]
+name = "chain_leggings"
+label = "Chain Leggings"
+kind = "armor"
+slot = "legs"
+armor = 10
+pierce = 6
+weight = 0.04
+
+[[item]]
+name = "chain_boots"
+label = "Chain Boots"
+kind = "armor"
+slot = "feet"
+armor = 4
+weight = 0.02
+
+[[item]]
+name = "plate_helm"
+label = "Plate Helm"
+kind = "armor"
+slot = "head"
+armor = 10
+weight = 0.04
+
+[[item]]
+name = "plate_cuirass"
+label = "Plate Cuirass"
+kind = "armor"
+slot = "body"
+armor = 26
+weight = 0.12
+
+[[item]]
+name = "plate_greaves"
+label = "Plate Greaves"
+kind = "armor"
+slot = "legs"
+armor = 16
+weight = 0.08
+
+[[item]]
+name = "plate_sabatons"
+label = "Plate Sabatons"
+kind = "armor"
+slot = "feet"
+armor = 7
+weight = 0.04
+
+[[item]]
+name = "mage_hood"
+label = "Mage's Hood"
+kind = "armor"
+slot = "head"
+armor = 1
+fire = 6
+frost = 6
+arcane = 8
+
+[[item]]
+name = "mage_robe"
+label = "Mage's Robe"
+kind = "armor"
+slot = "body"
+armor = 3
+fire = 12
+frost = 12
+arcane = 16
+
+# Potions: restored at once (heal, mana, stamina), and healing a second after (regen) for
+# `time` seconds.
+
+[[item]]
+name = "health_potion"
+label = "Health Potion"
+kind = "potion"
+heal = 35
+regen = 4
+time = 5
+
+[[item]]
+name = "mana_potion"
+label = "Mana Potion"
+kind = "potion"
+mana = 60
+
+[[item]]
+name = "stamina_potion"
+label = "Stamina Draught"
+kind = "potion"
+stamina = 100

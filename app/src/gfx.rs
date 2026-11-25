@@ -568,7 +568,7 @@ fn character_pipeline(
 }
 
 /// The most character vertices drawn in a frame (the model has 768).
-const MAX_CHARACTER_VERTS: usize = 4096;
+const MAX_CHARACTER_VERTS: usize = 65536;
 
 /// Clouds: the terrain's vertex layout without instances, blended, both sides drawn.
 fn cloud_pipeline(
@@ -882,6 +882,8 @@ pub struct Gfx {
     ui: UiGpu,
     /// Set by `capture_world`: the next `render` draws into a texture and keeps the picture.
     capture_next: bool,
+    /// The next capture keeps the HUD (development pictures of it).
+    capture_hud: bool,
     captured: Option<(Vec<u8>, u32, u32)>,
     /// The title screen's turning panorama (`title.rs`, `title.wgsl`).
     pipe_title: wgpu::RenderPipeline,
@@ -1285,6 +1287,7 @@ impl Gfx {
             pipe_sky,
             ui,
             capture_next: false,
+            capture_hud: false,
             captured: None,
             pipe_title,
             bind_title,
@@ -1528,6 +1531,17 @@ impl Gfx {
         self.captured = None;
         let _ = self.render(client, cam, view_blocks, opts, &[]);
         self.capture_next = false;
+        self.captured.take()
+    }
+
+    /// A picture of the world with the HUD over it (development runs).
+    pub fn capture_world_hud(&mut self, client: &mut Client, cam: &CameraView, view_blocks: f32, opts: &RenderOptions, hud: &[HudVertex]) -> Option<(Vec<u8>, u32, u32)> {
+        self.capture_next = true;
+        self.capture_hud = true;
+        self.captured = None;
+        let _ = self.render(client, cam, view_blocks, opts, hud);
+        self.capture_next = false;
+        self.capture_hud = false;
         self.captured.take()
     }
 
@@ -1822,7 +1836,7 @@ impl Gfx {
 
         // A capture (`capture_world`) draws the world alone into a texture of its own.
         let capture = std::mem::take(&mut self.capture_next);
-        let hud_verts = if capture { 0 } else { hud.len().min(MAX_HUD_VERTS) };
+        let hud_verts = if capture && !std::mem::take(&mut self.capture_hud) { 0 } else { hud.len().min(MAX_HUD_VERTS) };
         if hud_verts > 0 {
             self.queue.write_buffer(&self.hud_buf, 0, as_bytes(&hud[..hud_verts]));
             self.write_ui_screen();

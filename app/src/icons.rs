@@ -116,8 +116,13 @@ pub fn reset_icons() {
 }
 
 /// The inventory's groups, as tabs, in order: (key in blocks.toml, name, icon).
-pub const GROUPS: [(&str, &str, &str); 4] =
-    [("building", "Building", "fort"), ("natural", "Natural", "landscape"), ("wood", "Wood", "forest"), ("minerals", "Minerals", "diamond")];
+pub const GROUPS: [(&str, &str, &str); 5] = [
+    ("building", "Building", "fort"),
+    ("natural", "Natural", "landscape"),
+    ("wood", "Wood", "forest"),
+    ("minerals", "Minerals", "diamond"),
+    ("gear", "Gear", "shield"),
+];
 
 /// The biomes blocks belong to (their `biome` in blocks.toml) and their names: the Blocks
 /// window shows one at a time, or all (filter 0; biome n is filter n + 1).
@@ -165,7 +170,9 @@ pub fn is_slab(item: u16) -> bool {
 /// slab just after it. An item is a block state: a placeable block's id, or its slab's
 /// state. The icons are drawn in this order (`gfx::set_block_icons`).
 pub fn items(reg: &BlockRegistry) -> Vec<u16> {
-    let blocks = placeable(reg);
+    // Blocks, and the gear (weapons, staves, armour, potions: `Model::Item`).
+    let mut blocks = placeable(reg);
+    blocks.extend((1..reg.len() as u16).filter(|&id| reg.def(id).model == Model::Item));
     let mut families: Vec<&str> = Vec::new();
     for id in 1..reg.len() as u16 {
         let f = reg.def(id).family.as_str();
@@ -260,7 +267,7 @@ fn sprite(reg: &BlockRegistry, tex: u16) -> Vec<u8> {
 /// transparent around it.
 pub fn render(reg: &BlockRegistry, id: u16) -> Vec<u8> {
     let def = reg.def(id);
-    if def.model == Model::Cross {
+    if def.model == Model::Cross || def.model == Model::Item {
         return sprite(reg, def.tex[Face::PosX.index()]);
     }
     // How tall it is (a slab: half, its sides showing the lower half of their texture).

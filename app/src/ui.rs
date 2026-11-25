@@ -140,6 +140,8 @@ pub struct Settings {
     pub look: crate::look::ShaderLook,
     /// How far grass and flowers are drawn: 0 low, 1 medium, 2 high.
     pub grass: u8,
+    /// How fierce the world is (`combat::DIFFICULTIES`): 0 peaceful, 1 normal, 2 hard.
+    pub difficulty: u8,
     /// Walking as the character (true) or the free-flying camera.
     pub walk: bool,
     /// Where the camera is while walking.
@@ -215,6 +217,7 @@ impl Default for Settings {
             resolution: 0,
             look: crate::look::ShaderLook::DEFAULT,
             grass: 1,
+            difficulty: 1,
             walk: true,
             view: CamView::Back,
             hud_opacity: 85,
@@ -230,7 +233,7 @@ impl Settings {
     /// `key=value` lines, one per setting, for the settings file kept between launches.
     pub fn to_text(&self) -> String {
         format!(
-            "render_chunks={}\nlod_level={}\nlod_quality={}\nfog={}\ncull={}\nvsync={}\ngreedy={}\nshow_stats={}\nclouds={}\ngod_rays={}\nshaders={}\nresolution={}\nlook={}\ngrass={}\nwalk={}\nview={}\nhud_opacity={}\nlook_speed={}\njoy_size={}\ntouch_build={}\none_stance={}\n",
+            "render_chunks={}\nlod_level={}\nlod_quality={}\nfog={}\ncull={}\nvsync={}\ngreedy={}\nshow_stats={}\nclouds={}\ngod_rays={}\nshaders={}\nresolution={}\nlook={}\ngrass={}\ndifficulty={}\nwalk={}\nview={}\nhud_opacity={}\nlook_speed={}\njoy_size={}\ntouch_build={}\none_stance={}\n",
             self.render_chunks,
             self.lod_level,
             self.lod_quality,
@@ -245,6 +248,7 @@ impl Settings {
             self.resolution,
             self.look.save(),
             self.grass,
+            self.difficulty,
             self.walk,
             self.view.key(),
             self.hud_opacity,
@@ -301,6 +305,11 @@ impl Settings {
                 "grass" => {
                     if let Ok(v) = value.parse::<u8>() {
                         self.grass = v.min(2);
+                    }
+                }
+                "difficulty" => {
+                    if let Ok(v) = value.parse::<u8>() {
+                        self.difficulty = v.min(2);
                     }
                 }
                 "look" => {
@@ -394,6 +403,7 @@ pub enum Action {
     CycleShaders,
     CycleResolution,
     CycleGrass,
+    CycleDifficulty,
     /// Shader options: the next (+1) or previous (-1) preset.
     CyclePreset(i8),
     /// Shader options: one step of an option up (+1) or down (-1).
@@ -514,8 +524,44 @@ struct Button {
     action: Action,
 }
 
+/// A creature's health bar over its head, on screen.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FoeBar {
+    pub at: [f32; 2],
+    pub frac: f32,
+    pub name: &'static str,
+    /// 1 close by, less further off (the bar is drawn smaller and fainter).
+    pub near: f32,
+}
+
+/// What the HUD shows of the fight (`combat::Combat::hud`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CombatHud {
+    /// In the game on foot (the bars show).
+    pub on: bool,
+    pub health: f32,
+    pub stamina: f32,
+    pub mana: f32,
+    /// Health and mana as numbers: value and most.
+    pub numbers: [f32; 4],
+    /// PLACE guards (a weapon or staff in hand), or drinks (a potion).
+    pub guard: bool,
+    pub potion: bool,
+    pub bars: Vec<FoeBar>,
+    /// Numbers and words floating up from blows: where, what, colour.
+    pub floaters: Vec<([f32; 2], String, [u8; 4])>,
+    /// Seconds until he gets up again, while dead.
+    pub dead: Option<f32>,
+    /// Just hurt (the screen's edges redden), counting down.
+    pub hurt: f32,
+    pub effects: Vec<&'static str>,
+    pub message: Option<String>,
+}
+
 pub struct Ui {
     pub settings: Settings,
+    /// The fight, as the HUD shows it.
+    pub combat: CombatHud,
     /// Which screen shows. The app starts on the title screen.
     pub screen: Screen,
     /// Seconds since the app started (animates the title screen's splash line).
@@ -726,6 +772,7 @@ impl Ui {
     pub fn new() -> Ui {
         Ui {
             settings: Settings::default(),
+            combat: CombatHud::default(),
             screen: Screen::Title,
             seconds: 0.0,
             splash: 0,
@@ -1219,6 +1266,11 @@ impl Ui {
             }
             Action::ToggleTorches => {
                 self.edited().look.toggle_torches();
+                false
+            }
+            Action::CycleDifficulty => {
+                let s = self.edited();
+                s.difficulty = (s.difficulty + 1) % 3;
                 false
             }
             Action::CycleGrass => {

@@ -934,22 +934,62 @@ fn vs_char(@location(0) pos: vec3<f32>, @location(1) normal: vec3<f32>, @locatio
     return o;
 }
 
+// The creatures' colours: the same body as the player's, recoloured where it is skin (warm)
+// and left alone where it is grey (eyes, teeth). Skin 0 is the player's own.
+fn skin_colour(c: vec3<f32>, skin: f32) -> vec3<f32> {
+    let l = dot(c, vec3<f32>(0.3, 0.59, 0.11));
+    let warm = clamp((c.r - c.b) * 3.0, 0.0, 1.0);
+    if (skin < 0.5) {
+        return c;
+    } else if (skin < 1.5) { // goblin: green
+        return mix(c, l * vec3<f32>(0.66, 1.0, 0.36) * 1.05, warm);
+    } else if (skin < 2.5) { // skeleton: bone
+        return mix(c, (0.25 + l * 0.95) * vec3<f32>(1.0, 0.95, 0.82), 0.92);
+    } else if (skin < 3.5) { // bandit: tanned, in leathers
+        return mix(c, l * vec3<f32>(0.86, 0.58, 0.40) * 0.92, warm);
+    }
+    // troll: grey-green stone hide
+    return mix(c, l * vec3<f32>(0.62, 0.70, 0.56), warm);
+}
+
 @fragment
 fn fs_char(f: CharOut) -> @location(0) vec4<f32> {
-    // A block he carries comes with the character, its texture coordinates marked: u past
-    // 8, and the texture's layer in v (v + 2 x layer). Both textures are looked up first
-    // (that needs uniform control flow), then one is used.
+    // What the triangle is, from its texture coordinates (see app/src/combat.rs):
+    //   u in 0..8    the character: skin k at u + 1.5 k; a hit's red flash at v + 2 n
+    //   u in 8..16   a block he carries (u + 8, v + 2 x the texture's layer)
+    //   u in 16..24  an item sprite in a hand (alpha-tested, never tinted)
+    //   u in 24..32  a glowing spell effect: its colour in the normal, unlit
+    // Both textures are looked up first (that needs uniform control flow), then one is used.
     let held = f.uv.x >= 8.0;
+    let sprite = f.uv.x >= 16.0;
+    let glow = f.uv.x >= 24.0;
     let layer = floor(f.uv.y * 0.5);
-    let bt = textureSample(blocks, blocks_sampler, vec2<f32>(f.uv.x - 8.0, f.uv.y - layer * 2.0), i32(layer));
-    let t = textureSample(char_tex, char_sampler, f.uv);
+    let bu = f.uv.x - select(8.0, 16.0, sprite);
+    let bt = textureSample(blocks, blocks_sampler, vec2<f32>(bu, f.uv.y - layer * 2.0), i32(layer));
+    let skin = floor(f.uv.x / 1.5);
+    let flash = floor(f.uv.y * 0.5);
+    let cuv = vec2<f32>(f.uv.x - skin * 1.5, f.uv.y - flash * 2.0);
+    let t = textureSample(char_tex, char_sampler, cuv);
+    if (glow) {
+        let d = distance(f.world, g.cam_pos.xyz);
+        let fog = clamp((d - g.fog_params.x) / (g.fog_params.y - g.fog_params.x), 0.0, 1.0) * g.flags.x;
+        return vec4<f32>(display(mix(f.normal, sky_radiance((f.world - g.cam_pos.xyz) / max(d, 1e-3), 2.0), fog)), 1.0);
+    }
     var base = t.rgb;
-    if (held) {
+    if (sprite) {
+        if (bt.a < 0.75) {
+            discard;
+        }
+        base = bt.rgb;
+    } else if (held) {
         // Tinted like the terrain where it stands (alpha 0 = all of the biome colour).
         let tn = tint_at(f.world.xz);
         base = mix(bt.rgb * tn.rgb, bt.rgb, bt.a) * mix(0.86, 1.14, tn.a);
     } else if (t.a < 0.64) { // the model's cut-out threshold (rig::ALPHA_CUTOFF)
         discard;
+    } else {
+        base = skin_colour(base, skin);
+        base = mix(base, vec3<f32>(1.0, 0.22, 0.16), min(flash, 3.0) * 0.2);
     }
     var vis = 1.0;
     if (g.shadow.z > 0.0 && max(f.direct.r, max(f.direct.g, f.direct.b)) > 0.0005) {
